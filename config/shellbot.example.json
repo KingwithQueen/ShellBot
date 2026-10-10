@@ -1,0 +1,10 @@
+{
+  "roots": [
+    { "id": "workspace", "path": "C:/ShellBotWorkspace", "read_only": true },
+    { "id": "documents", "path": "D:/ShellBotDocuments", "read_only": true }
+  ],
+  "http": { "port": 8765, "token_env": "SHELLBOT_TOKEN", "public_url": "" },
+  "execution": { "enabled": false, "profile": "controlled", "approval_mode": "always" },
+  "approval_ttl_seconds": 300,
+  "audit_max_bytes": 8388608
+}

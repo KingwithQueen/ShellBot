@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <Filter Include="源文件">
@@ -14,4 +14,34 @@
       <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
     </Filter>
   </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="app\main.c"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="app\stdio.c"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="app\http.c"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="platform\windows.c"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="platform\owner.c"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="platform\execution.c"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="platform\task_process.c"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="..\core\tools\tasks.c"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="..\core\policy\approval.c"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="..\core\policy\audit.c"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="..\core\config\config.c"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="..\core\config\projects.c"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="..\core\policy\project_policy.c"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="..\core\protocol\mcp.c"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="..\core\tools\tools.c"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="..\core\tools\text.c"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="..\core\tools\search.c"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="..\third_party\yyjson\yyjson.c"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="..\third_party\civetweb\src\civetweb.c"><Filter>源文件</Filter></ClCompile>
+    <ClInclude Include="..\core\include\sb.h"><Filter>头文件</Filter></ClInclude>
+    <ClInclude Include="..\core\include\sb_projects.h"><Filter>头文件</Filter></ClInclude>
+    <ClInclude Include="platform\execution.h"><Filter>头文件</Filter></ClInclude>
+    <ClInclude Include="..\third_party\yyjson\yyjson.h"><Filter>头文件</Filter></ClInclude>
+    <ClInclude Include="..\third_party\civetweb\include\civetweb.h"><Filter>头文件</Filter></ClInclude>
+    <None Include="app\shellbot.manifest"><Filter>资源文件</Filter></None>
+    <None Include="app\external_mg_cry_internal_impl.inl"><Filter>头文件</Filter></None>
+    <None Include="app\external_log_access.inl"><Filter>头文件</Filter></None>
+  </ItemGroup>
+  <ItemGroup><ClInclude Include="platform\task_process.h"><Filter>头文件</Filter></ClInclude></ItemGroup>
 </Project>

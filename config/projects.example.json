@@ -1,0 +1,38 @@
+{
+  "format_version": 1,
+  "gateway": { "port": 8765, "public_url": "" },
+  "projects": [
+    {
+      "id": "full-access",
+      "policy_revision": 1,
+      "token_env": "SHELLBOT_FULL_TOKEN",
+      "data_dir": "C:/ShellBotProjects/full-access/state",
+      "default_workspace_id": "workspace",
+      "workspaces": [
+        { "id": "workspace", "path": "C:/ShellBotWorkspace", "read_only": false }
+      ],
+      "policy": {
+        "approval_mode": "never",
+        "files": { "scope": "current_user", "current_user_read_only": false },
+        "execution": { "enabled": true, "default_identity": "current_user", "administrator_allowed": false },
+        "tools": ["host_info", "host_capabilities", "fs_list", "fs_read", "fs_search", "image_view", "fs_write", "fs_patch", "task_start", "task_status", "task_output", "task_input", "task_cancel"]
+      }
+    },
+    {
+      "id": "workspace-only",
+      "policy_revision": 1,
+      "token_env": "SHELLBOT_WORKSPACE_TOKEN",
+      "data_dir": "C:/ShellBotProjects/workspace-only/state",
+      "workspaces": [
+        { "id": "workspace", "path": "D:/ShellBotWorkspace", "read_only": false },
+        { "id": "reference", "path": "D:/ShellBotReference", "read_only": true }
+      ],
+      "policy": {
+        "approval_mode": "workspace_auto",
+        "files": { "scope": "configured" },
+        "execution": { "enabled": true, "default_identity": "restricted", "administrator_allowed": false },
+        "tools": ["host_info", "host_capabilities", "fs_list", "fs_read", "fs_search", "image_view", "fs_write", "fs_patch", "task_start", "task_status", "task_output", "task_input", "task_cancel"]
+      }
+    }
+  ]
+}

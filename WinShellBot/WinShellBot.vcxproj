@@ -25,6 +25,7 @@
     <ProjectGuid>{d2b9ed97-6b77-49d9-8e85-a5b309fadbad}</ProjectGuid>
     <RootNamespace>WinShellBot</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <VcpkgEnabled>false</VcpkgEnabled>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
@@ -80,7 +81,7 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>WIN32;_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <LanguageStandard>stdcpp20</LanguageStandard>
+      <LanguageStandard_C>stdc17</LanguageStandard_C>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -98,7 +99,7 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>WIN32;NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <LanguageStandard>stdcpp20</LanguageStandard>
+      <LanguageStandard_C>stdc17</LanguageStandard_C>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -114,7 +115,7 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <LanguageStandard>stdcpp20</LanguageStandard>
+      <LanguageStandard_C>stdc17</LanguageStandard_C>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -132,7 +133,7 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <LanguageStandard>stdcpp20</LanguageStandard>
+      <LanguageStandard_C>stdc17</LanguageStandard_C>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -143,7 +144,68 @@
     </Manifest>
   </ItemDefinitionGroup>
 
-  <ItemGroup></ItemGroup>
+  <PropertyGroup>
+    <OutDir>$(MSBuildProjectDirectory)\..\out\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(MSBuildProjectDirectory)\..\build\$(Platform)\$(Configuration)\</IntDir>
+    <TargetName>WinShellBot</TargetName>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <CompileAs>CompileAsC</CompileAs>
+      <LanguageStandard_C>stdc17</LanguageStandard_C>
+      <WarningLevel>Level4</WarningLevel>
+      <TreatWarningAsError>true</TreatWarningAsError>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalIncludeDirectories>$(MSBuildProjectDirectory)\..\core\include;$(MSBuildProjectDirectory)\..\third_party\yyjson;$(MSBuildProjectDirectory)\..\third_party\civetweb\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;WINVER=0x0A00;_WIN32_WINNT=0x0A00;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <RuntimeLibrary Condition="'$(Configuration)'=='Debug'">MultiThreadedDebug</RuntimeLibrary>
+      <RuntimeLibrary Condition="'$(Configuration)'=='Release'">MultiThreaded</RuntimeLibrary>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>Ws2_32.lib;Bcrypt.lib;Shell32.lib;Ole32.lib;Uuid.lib;Advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+    <Manifest>
+      <AdditionalManifestFiles>$(MSBuildProjectDirectory)\app\shellbot.manifest;%(AdditionalManifestFiles)</AdditionalManifestFiles>
+    </Manifest>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="app\main.c" />
+    <ClCompile Include="app\stdio.c" />
+    <ClCompile Include="app\http.c" />
+    <ClCompile Include="platform\windows.c" />
+    <ClCompile Include="platform\owner.c" />
+    <ClCompile Include="platform\execution.c" />
+    <ClCompile Include="platform\task_process.c" />
+    <ClCompile Include="..\core\tools\tasks.c" />
+    <ClCompile Include="..\core\policy\approval.c" />
+    <ClCompile Include="..\core\policy\audit.c" />
+    <ClCompile Include="..\core\config\config.c" />
+    <ClCompile Include="..\core\config\projects.c" />
+    <ClCompile Include="..\core\policy\project_policy.c" />
+    <ClCompile Include="..\core\protocol\mcp.c" />
+    <ClCompile Include="..\core\tools\tools.c" />
+    <ClCompile Include="..\core\tools\text.c" />
+    <ClCompile Include="..\core\tools\search.c" />
+    <ClCompile Include="..\third_party\yyjson\yyjson.c">
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <ClCompile Include="..\third_party\civetweb\src\civetweb.c">
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <PreprocessorDefinitions>NO_SSL;NO_CGI;NO_WEBSOCKET;NO_FILES;NO_FILESYSTEMS;MG_EXTERNAL_FUNCTION_mg_cry_internal_impl;MG_EXTERNAL_FUNCTION_log_access;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(MSBuildProjectDirectory)\app;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <ClInclude Include="..\core\include\sb.h" />
+    <ClInclude Include="..\core\include\sb_projects.h" />
+    <ClInclude Include="platform\execution.h" />
+    <ClInclude Include="platform\task_process.h" />
+    <ClInclude Include="..\third_party\yyjson\yyjson.h" />
+    <ClInclude Include="..\third_party\civetweb\include\civetweb.h" />
+    <None Include="app\shellbot.manifest" />
+    <None Include="app\external_mg_cry_internal_impl.inl" />
+    <None Include="app\external_log_access.inl" />
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>

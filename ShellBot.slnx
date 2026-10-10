@@ -3,5 +3,5 @@
     <Platform Name="x64" />
     <Platform Name="x86" />
   </Configurations>
-  <Project Path="WinShellBot/WinShellBot.vcxproj" />
+  <Project Path="WinShellBot/WinShellBot.vcxproj" Id="d2b9ed97-6b77-49d9-8e85-a5b309fadbad" />
 </Solution>

@@ -44,7 +44,7 @@
 
 # Kernel Module Compile Results
 *.mod*
-*.cmd
+.*.cmd
 .tmp_versions/
 modules.order
 Module.symvers
@@ -53,3 +53,59 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# Visual Studio local state and generated build data
+.vs/
+*.vcxproj.user
+*.suo
+*.VC.db
+*.VC.opendb
+*.tlog/
+*.lastbuildstate
+*.ipch
+
+# Windows build output
+/Debug/
+/Release/
+/x64/
+/x86/
+/Win32/
+/WinShellBot/Debug/
+/WinShellBot/Release/
+/WinShellBot/x64/
+/WinShellBot/x86/
+/WinShellBot/Win32/
+
+# Generated builds, packages and validation artifacts
+/build/
+/out/
+/artifacts/
+/dist/
+/tests/test-results/
+/tests/endpoint-test-results/
+/WinShellBot/build/
+/WinShellBot/out/
+
+# Local runtime data and credentials
+/Data/
+/data/
+/WinShellBot/Data/
+/WinShellBot/data/
+/logs/
+/cache/
+/tmp/
+/secrets/
+/credentials/
+/runtime/
+/.cloudflared/
+.env
+.env.local
+.env.*.local
+/shellbot.local.json
+/WinShellBot/shellbot.local.json
+/config/*.local.json
+__pycache__/
+*.pyc
+
+# Keep source scripts, example configuration, test fixtures and resources tracked.
+# Do not add broad *.cmd, *.json, *.db or image exclusions here.
