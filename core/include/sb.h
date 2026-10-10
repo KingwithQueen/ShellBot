@@ -6,7 +6,7 @@
 #include <stdint.h>
 #include "yyjson.h"
 
-#define SB_VERSION "0.1.0-dev.9"
+#define SB_VERSION "0.1.0-dev.10"
 #define SB_MAX_ROOTS 16
 #define SB_MAX_WORKSPACES (SB_MAX_ROOTS * 2)
 #define SB_PATH_CAP 32768
@@ -209,5 +209,17 @@ char *sb_dispatch(sb_host *host, sb_protocol *protocol, const char *request,
                   size_t *response_length, int *http_status);
 int sb_stdio_run(sb_host *host);
 int sb_http_run(sb_host *host, sb_error *error);
+typedef struct sb_http_server sb_http_server;
+/* open authenticates and reserves a fixed project before reading its body.
+   close always releases that reservation, including HTTP validation failures. */
+typedef struct {
+    void *(*open)(void *context, const char *path, const char *authorization, bool *health, int *status);
+    char *(*call)(void *context, void *binding, const char *request, size_t length,
+                  const sb_request_context *transport, size_t *response_length, int *status);
+    void (*close)(void *context, void *binding);
+} sb_http_routes;
+sb_http_server *sb_http_start(const sb_config *config, const sb_http_routes *routes, void *context, sb_error *error);
+bool sb_http_stopping(void);
+void sb_http_stop(sb_http_server *server);
 
 #endif

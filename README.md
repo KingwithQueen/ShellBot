@@ -4,11 +4,11 @@ ShellBot 是使用 C17 开发的电脑 MCP 主机。模型服务负责推理，S
 
 Windows 工程 WinShellBot 优先面向 Windows 10/11 x64。通用 C 核心与 Windows 接口分离，便于以后移植 Linux 和 macOS；Windows 7 以后单独编译和验证。
 
-后续开发按已确认的多项目和独立权限方案推进，见 [开发计划](docs/DEVELOPMENT_PLAN.md)及 [项目权限与执行身份](docs/EXECUTION_PERMISSIONS.md)。dev.9 已完成 M1 配置基础和 M2 普通权限管理器、独立项目工作进程，见 [项目配置说明](docs/PROJECT_CONFIGURATION.md)及 [项目管理器](docs/PROJECT_MANAGER.md)；独立 HTTP 链接与认证待 M3。
+后续开发按已确认的多项目和独立权限方案推进，见 [开发计划](docs/DEVELOPMENT_PLAN.md)及 [项目权限与执行身份](docs/EXECUTION_PERMISSIONS.md)。dev.10 已完成 M1 配置基础、M2 普通权限管理器和 M3 独立项目 HTTP 地址及认证，见 [项目配置说明](docs/PROJECT_CONFIGURATION.md)、[项目管理器](docs/PROJECT_MANAGER.md)及 [项目网关](docs/PROJECT_GATEWAY.md)。下一项为 M4 完整审批与受限执行。
 
 ## 当前实现
 
-当前版本为 `0.1.0-dev.9`，是第一阶段的开发测试版本。程序只监听本机端口，域名与 cloudflared 隧道由已有环境完成，不要求域名检查；OAuth 与隧道管理暂缓。已实现：
+当前版本为 `0.1.0-dev.10`，是开发测试版本。程序只监听本机端口，域名与 cloudflared 隧道由已有环境完成，不要求域名检查；OAuth 与隧道管理暂缓。已实现：
 
 | 能力 | 当前行为 |
 | --- | --- |
@@ -24,6 +24,7 @@ Windows 工程 WinShellBot 优先面向 Windows 10/11 x64。通用 C 核心与 W
 | 目录配置 | 最多 16 个显式目录，每个目录拥有独立 workspace_id，默认只读 |
 | M1 项目配置与策略 | format_version:1 多项目配置校验、三审批模式统一判断、身份与管理员许可分离、旧配置显式备份迁移；以 --manager 显式启动项目 |
 | M2 项目管理器 | 本机创建、配置、启停；独立普通工作进程、Data、任务、幂等记录、审批和备份；配额与本人 Job 清理 |
+| M3 项目 MCP 网关 | 一个回环端口、/projects/ID/mcp、逐项目 bearer、显式默认项目 /mcp、地址生成、有界并发和进程通信超时 |
 | 运行保护 | 数据目录实例锁、请求和结果大小上限；HTTP 令牌、Host/Origin 检查 |
 | 已有代理接入 | 默认接受本机代理的合法 Host/Origin 且要求 bearer；外部地址配置作为可选限制保留 |
 | 后台命令任务 | task_start、task_status、task_output、task_input、task_cancel；显式启用 user/administrator 后提供进程、输出、输入、超时和取消 |
@@ -33,11 +34,11 @@ Windows 工程 WinShellBot 优先面向 Windows 10/11 x64。通用 C 核心与 W
 
 本版支持 MCP `2025-03-26`、`2025-06-18`、`2025-11-25` 的初始化与工具子集，并支持 `2026-07-28` 的逐请求元数据、`server/discover`、工具调用和请求头镜像校验。新版成功结果包含 `resultType: complete` 和服务信息，发现与工具列表包含缓存范围。HTTP 不建立协议会话；GET `/mcp` 返回 405，不宣称 SSE、标准 MCP tasks 扩展或 elicitation；后台任务使用普通工具调用。本机待审批请求以工具错误及结构化状态返回，不伪装成客户端授权。依据：[MCP 工具规范](https://modelcontextprotocol.io/specification/2026-07-28/server/tools)、[HTTP 传输规范](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http)。
 
-HTTP 每个运行实例使用一个已有 bearer 身份。默认不需要填写域名，仍验证 Host/Origin 格式和令牌；可选 public_url 启用域名限制。实际客户端工具使用与本机自检分别记录。
+旧单实例 HTTP 使用一个 bearer 身份；项目网关中每个项目使用独立 bearer，路由和凭据共同固定项目。默认不需要填写域名，仍验证 Host/Origin 格式和令牌；可选 public_url 启用域名限制并生成公共地址。实际客户端工具使用与本机自检分别记录。
 
 覆盖与局部修改采用锁定原文件并预先保存私有备份，返回 atomic_save:false，支持冲突拒绝和结果重试，不承诺崩溃原子性，见 [文本修改说明](docs/FILE_EDIT.md)。普通用户和管理员后台命令已实现，见 [命令任务说明](docs/COMMAND_TASKS.md)。完整受控隔离、规则与远程审批、审批/任务重启恢复、完整调用审计、桌面控制、PDF/Office/OCR 和完整项目管理仍待实现。
 
-未版本化的单实例运行配置仍使用 dev.7 的三档执行结构：controlled、user、administrator。显式启用 user/administrator 时沿用原命令预授权和单主机代理行为；默认关闭，controlled 的完整隔离仍未验收，命令不可用。dev.9 的项目配置已将审批、文件范围、身份与管理员许可分开，并通过 --manager 启动；--config 保持旧单实例入口。项目管理员后端不可用，完整审批与受限执行待 M4/M5。见 [项目配置说明](docs/PROJECT_CONFIGURATION.md)及 [项目权限与执行身份](docs/EXECUTION_PERMISSIONS.md)。
+未版本化的单实例运行配置仍使用 dev.7 的三档执行结构：controlled、user、administrator。显式启用 user/administrator 时沿用原命令预授权和单主机代理行为；默认关闭，controlled 的完整隔离仍未验收，命令不可用。项目配置将审批、文件范围、身份与管理员许可分开，通过 --manager 启动，加 --http 开启项目网关；--config 保持旧单实例入口。项目管理员后端不可用，完整审批与受限执行待 M4/M5。见 [项目配置说明](docs/PROJECT_CONFIGURATION.md)及 [项目权限与执行身份](docs/EXECUTION_PERMISSIONS.md)。
 
 ## 构建与验证
 
@@ -54,7 +55,7 @@ python .\tests\smoke.py --exe .\out\x64\Release\WinShellBot.exe
 # 分别验证核心功能，明确排除仍在调查的关闭连接诊断：
 .\scripts\test.ps1 -Configuration Release -SkipCloseProbe
 # 核心报告必须匹配当前 Release 程序才能生成测试包：
-# 当前打包器另要求旧 dev.7 原生专项凭据；dev.9 M2 本轮不生成新包。
+# 当前打包器另要求旧 dev.7 原生专项凭据；dev.10 M3 本轮不生成新包。
 .\scripts\package-test.ps1
 ```
 
@@ -82,6 +83,8 @@ args: --stdio --root C:\ShellBotWorkspace
 `--root` 为目录设置标识 `workspace`，始终只读。多个目录请复制并修改 [config/shellbot.example.json](config/shellbot.example.json)，然后使用 `--config 配置文件路径`。配置目录必须使用绝对路径；`--root` 和 `--config` 不能同时使用。root 的 `read_only` 默认 `true`；设为 `false` 只允许提出创建请求，仍需本机所有者批准具体目标和内容。
 
 M1 新格式可用 `WinShellBot.exe --validate-projects 配置文件` 校验，样例为 [config/projects.example.json](config/projects.example.json)。`--migrate-config` 会生成新配置和原始字节备份，不修改旧 Data；具体参数及当前不可用的组合见 [项目配置说明](docs/PROJECT_CONFIGURATION.md)。新格式尚不作为上述 --config 的运行输入。
+
+项目 MCP 使用 `--manager --http --projects 注册配置 --manager-data-dir 独立目录` 启动，再通过 `--project-start ID` 显式启用项目。每个启用项目必须在其 token_env 中提供不同的有效令牌；地址为 `http://127.0.0.1:8765/projects/ID/mcp`，`--project-links ID` 返回本机和可选公共地址。旧 `/mcp` 仅在 gateway.default_project_id 显式绑定时提供。完整步骤与限制见 [项目网关](docs/PROJECT_GATEWAY.md)。
 
 HTTP 本机开发示例：
 
@@ -130,4 +133,4 @@ fs_search 的 mode 默认 filename；设为 content 可以搜索 UTF-8/UTF-16 �
 
 许可采用 [MIT 模板](LICENSE.txt)，版权年份和主体需在首次正式发行前补全；第三方组件保留各自许可，见[依赖记录](third_party/README.md)。
 
-本轮保留旧版本包、dev.6 基线与全部测试报告，清理已核验的冗余依赖下载缓存约 66.5 MiB。main 上的实现仍未提交、未推送。当前验收范围与剩余项目以 IMPLEMENTATION_STATUS.md 为准，以上旧版本结果只适用于对应程序摘要。
+旧版本包、基线与原始报告继续保留。M2 已由用户提交推送为 `2dd0d84`；本轮 M3 仍是 main 上未提交、未推送的本地更改，没有新包。当前验收范围与剩余项目以 IMPLEMENTATION_STATUS.md 为准，以上旧版本结果只适用于对应程序摘要。

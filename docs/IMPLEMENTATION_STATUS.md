@@ -1,10 +1,35 @@
 # ShellBot 实现与验证记录
 
-更新日期：2026 年 10 月 10 日。程序版本：`0.1.0-dev.9`。仓库：`E:\Program\ShellBot`，分支 `main`。
+更新日期：2026 年 10 月 10 日。程序版本：`0.1.0-dev.10`。仓库：`E:\Program\ShellBot`，分支 `main`。
 
-当前基准提交为 `5f9d177b3e95b32733bceaec201ab0353b980d10`，M1 由用户提交并推送；本地 HEAD 与 origin/main 跟踪引用一致。M2 是基于该提交的本地未提交更改，没有推送。保留解决方案项目身份、dev.8 回退基线及旧 ZIP；dev.9 是本机构建验证的开发候选，没有生成新测试包，第一阶段仍未整体完成。
+当前基准提交为 `2dd0d84da8ffbac4903dae3f03066c40e237b1b9`，M2 由用户提交并推送；本地 HEAD 与 origin/main 跟踪引用一致。M3 是基于该提交的本地未提交更改，没有推送。保留解决方案项目身份、dev.9 回退基线及旧 ZIP；dev.10 是本机构建验证的开发候选，没有生成新测试包，完整项目权限及候选验收仍未完成。
 
-## dev.9 M2 管理器与项目工作进程
+## dev.10 M3 项目 MCP 地址与认证
+
+普通管理器新增可选 --http，仍共用回环端口 8765。每项目 /projects/ID/mcp 和 /projects/ID/healthz 只接受该项目独立 bearer；/mcp、/healthz 只有显式 default_project_id 时绑定该项目，不通过客户端参数选择项目。缺失、无效或重复令牌阻止整个网关启动；凭据只进入管理器缓冲，不进入工作进程消息、子进程环境、生成地址或日志。--project-links 返回本机及可选公共地址，不探测域名或更改已有隧道，见 [项目网关](PROJECT_GATEWAY.md)。
+
+网关与旧单主机入口复用 HTTP 校验，保留协议版本、方法/工具请求头、base64 哨兵及关键重复字段拒绝。管理器转发真实请求头，工作进程按无会话 HTTP 校验，保留 JSON 响应与空 202；本机管理请求仍按原 stdio 语义处理。工作进程固定 project/revision，HTTP actor 为 project-mcp，与 manager-owner 的任务、幂等键及审批归属分开。MCP 没有管理或批准接口。
+
+固定四个 HTTP 线程、四个应用层等待连接位置；每项目认证后先预留工作进程，再读正文。同项目忙时返回 429，不在项目侧排队，其他项目可独立响应。HTTP 正文和结果沿用 1/4 MiB 上限；私有请求另有 64 KiB 封装预算，工作进程通信共用 8 秒期限，断线或超时清理本人 Job、返回 503 和可能已有副作用提示，不自动重启/重发。旧连接保持及有界网络等待保留，历史 Connection: close 问题未修复。
+
+| 最终本机验证 | 结果与报告 |
+| --- | --- |
+| Debug / Release 构建 | C17 /W4 /WX，主程序与两个原生测试程序通过 |
+| Debug / Release M1 回归 | 各 405 项，build/validation/x64-{Debug,Release}-m1.json |
+| Debug / Release M2 回归 | 各 220 项，build/validation/x64-{Debug,Release}-m2.json |
+| Debug / Release M3 | 各 335 项，build/validation/x64-{Debug,Release}-m3.json |
+| Debug 既有核心 | 2427 项，build/validation/x64-Debug-core.json |
+| Release 既有核心 | 2418 项，build/validation/x64-Release-core.json |
+
+M3 使用隔离配置和真实网关/普通工作进程验证跨项目令牌拒绝、路由和请求参数不能改绑定、同名 workspace、工具开关、协议头/通知/旧初始化、慢正文并发、重复任务/输入不重复副作用、跨项目及跨 actor 任务拒绝、迁移修改审批及重试、工作进程通信超时、显式重启、默认项目和无 public_url 连接。凭据在内存中随机生成，保留文件逐一确认不含令牌值；检查数包含时序轮询及产物数量，不作为固定功能数量。
+
+最终 Debug 为 2570240 字节，SHA-256 `450008862bff23737d97d245a815cfaee08d64908dba854a8c22f0c769f07bcd`；Release 为 699392 字节，SHA-256 `976df32ef4f779ff8f1781fd50b2253191a52486b07f4a0419f29f16825b199a`。摘要匹配八份最终报告，汇总及来源记录为 build/validation/m3-local-acceptance.json、m3-source-manifest.json。完整 dev.9 源码、文档、程序及原报告保存于 build/baseline-dev9-m3-20261010；失败测试目录保留在 build/m3-tests。测试结束后未发现主程序或原生夹具残留进程。
+
+用户已回来并明确恢复必要 UAC 等人工操作授权；M3 本身不需要提权测试，未启动管理员专项。核心回归明确排除历史 close 诊断、管理员启动及当前文件系统不可用的硬链接夹具，不将 skipped 当作通过。沙箱内调试链接再次出现 MSPDB140.DLL 加载错误，经工具审批后的相同本机构建通过，不改系统工具链或安全设置。
+
+下一项为 M4 完整审批与受限执行；新项目自动写入、未列目录账户文件后端、完整审批适配和 restricted 命令仍不可用，M5 才接可信项目管理员代理。独立 Windows/Server 2025、实际 MCP 客户端、已有公网隧道和 dev.10 UAC 验收均未完成；本机网关通过不替代它们。本轮未改实际配置、Data、隧道，未提交、推送、发布或降低旧打包验收门槛。
+
+## dev.9 M2 管理器与项目工作进程（历史基线）
 
 新增 WinShellBot/platform/manager.c 与 manager.h，复用同一 asInvoker 程序的管理器和工作进程角色。项目创建和配置导出新文件及原字节私有备份，配置更新由程序递增策略版本；管理器固定启动快照，本机所有者可启停和查询项目，方法见 [项目管理器](PROJECT_MANAGER.md)。
 
@@ -17,10 +42,10 @@
 | 最终本机验证 | 结果与报告 |
 | --- | --- |
 | Debug / Release 构建 | C17 /W4 /WX，主程序及两个原生测试程序通过 |
-| Debug / Release M1 回归 | 各 405 项，build/validation/x64-Debug-m1.json、x64-Release-m1.json |
-| Debug / Release M2 | 各 220 项，build/validation/x64-Debug-m2.json、x64-Release-m2.json |
-| Debug 既有核心 | 2421 项，build/validation/x64-Debug-core.json |
-| Release 既有核心 | 2403 项，build/validation/x64-Release-core.json |
+| Debug / Release M1 回归 | 各 405 项，build/baseline-dev9-m3-20261010/validation/x64-{Debug,Release}-m1.json |
+| Debug / Release M2 | 各 220 项，build/baseline-dev9-m3-20261010/validation/x64-{Debug,Release}-m2.json |
+| Debug 既有核心 | 2421 项，build/baseline-dev9-m3-20261010/validation/x64-Debug-core.json |
+| Release 既有核心 | 2403 项，build/baseline-dev9-m3-20261010/validation/x64-Release-core.json |
 
 M2 使用实际进程验证五项目运行、同名 workspace 和幂等键、跨项目任务编号与实例拒绝、凭据环境排除、策略模式与工具开关、审批和备份各自存储、任务预算、项目停止/崩溃、管理器正常退出/强制结束及无关进程保留。全部报告摘要匹配最终程序；断言数包含时序轮询，因此不同轮次核心数量可不同。
 
@@ -74,7 +99,7 @@ M1 验证包括列表/读取/搜索/图像共同审批、目录外及只读拒�
 
 管理通道是拒绝远程客户端的 Windows 命名管道，使用显式 ACL，并模拟客户端校验实际账户 SID。dev.6 进一步拒绝限制 SID、低完整性和 AppContainer 调用者；HTTP 的 --stop 也通过该通道完成，stdio 关闭输入流停止。同账户的普通本地程序仍属于信任范围，不宣称全面区分人工操作和自动程序。三档配置和身份基础层进度见文末；完整受控隔离、规则和独立远程审批仍未实现；普通/管理员任务已实现，具体设计见 [三档执行权限](EXECUTION_PERMISSIONS.md)。
 
-HTTP 仅监听 127.0.0.1，要求 bearer，拒绝格式错误的 Host/Origin、URL 凭据和重复安全头。没有自动静态文件服务、Cookie 认证或 CORS。每实例一个调用身份，clientInfo 不是授权身份。dev.5 默认由已有代理决定域名，public_url 作为可选限制保留；用户明确不要求域名检查，OAuth 和 cloudflared 管理暂缓。
+HTTP 仅监听 127.0.0.1，要求 bearer，拒绝格式错误的 Host/Origin、URL 凭据和重复安全头。没有自动静态文件服务、Cookie 认证或 CORS。旧单实例一个调用身份，项目网关每项目一个 bearer 身份，clientInfo 不是授权身份。dev.5 默认由已有代理决定域名，public_url 作为可选限制保留；用户明确不要求域名检查，OAuth 和 cloudflared 管理暂缓。
 
 ## 本机验证
 
@@ -82,11 +107,11 @@ HTTP 仅监听 127.0.0.1，要求 bearer，拒绝格式错误的 Host/Origin、U
 
 先前 dev.2 的 Debug 与 Release x64 核心套件各通过 521 项断言。测试启动真实 stdio 和 HTTP 进程，包含 Unicode 分页、图像字节、多根目录、目录联接逃逸、创建请求无副作用、查看完整内容、批准/拒绝/撤销/过期/重启失效、队列预算、目录实体替换、禁止覆盖、参数篡改、16 次并发写入重试、100 次并发 HTTP 查询、持续连接和本机停止。
 
-当前 dev.9 核心报告为 build/validation/x64-Debug-core.json 与 x64-Release-core.json；dev.7 原报告另存 build/baseline-dev7-m1-20261010/validation。核心范围明确排除关闭连接诊断，并通过 skipped 记录未执行的夹具和管理员启动授权。旧版本归档及 ZIP 保留；dev.5 Release 和两份 1515 项核心报告保存在 build/baseline-dev5-permissions-20261007，已交付 dev.5 ZIP 不变。
+当前 dev.10 核心报告为 build/validation/x64-Debug-core.json 与 x64-Release-core.json；dev.9 原报告另存 build/baseline-dev9-m3-20261010/validation，dev.7 原报告在 build/baseline-dev7-m1-20261010/validation。核心范围明确排除关闭连接诊断，并通过 skipped 记录未执行的夹具和管理员启动。旧版本归档及 ZIP 保留；dev.5 Release 和两份 1515 项核心报告保存在 build/baseline-dev5-permissions-20261007，已交付 dev.5 ZIP 不变。
 
 历史完整测试包含 100 次客户端主动关闭连接的诊断；开发机曾出现 WinError 10054 或响应提前结束，因此完整套件未通过。独立 Python 参考 HTTP 服务在当前机器同样复现：100 次 keep-alive 调用无失败，100 次 close 调用有 13 次失败。Windows PowerShell 原生 TCP 测试也复现，不是 Python 客户端专有现象。已尝试显式有界 linger、禁用 Nagle 和合并响应发送，不能据此声称根因已解决。网络配置、操作系统和实现的具体责任仍待进一步证据。
 
-旧 dev.2 Release 完整报告保存在 build/validation/x64-Release-full.json，关闭连接诊断为 100 次中失败 14 次，不通过重试隐藏失败。该文件不代表当前 dev.9 的报告，需按 artifact.sha256 区分。独立参考诊断为 build/http_reference_probe.py；测试报告、缓存和产物不入版本控制。dev.2 的直接 DLL 依赖为 WS2_32、bcrypt、SHELL32、ole32、ADVAPI32、KERNEL32，没有额外 CRT DLL。
+旧 dev.2 Release 完整报告保存在 build/validation/x64-Release-full.json，关闭连接诊断为 100 次中失败 14 次，不通过重试隐藏失败。该文件不代表当前 dev.10 的报告，需按 artifact.sha256 区分。独立参考诊断为 build/http_reference_probe.py；测试报告、缓存和产物不入版本控制。dev.2 的直接 DLL 依赖为 WS2_32、bcrypt、SHELL32、ole32、ADVAPI32、KERNEL32，没有额外 CRT DLL。
 
 ## Server 2025 测试交付
 

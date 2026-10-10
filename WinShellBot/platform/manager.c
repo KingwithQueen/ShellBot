@@ -9,9 +9,10 @@
 #include <string.h>
 #include <wchar.h>
 
-/* No HTTP or elevation in M2. All owner calls are authenticated locally;
-   a worker receives exactly one immutable project over its inherited handle. */
+/* Owner management stays local. The optional gateway authenticates each route
+   before reserving its worker; workers never receive bearer credentials. */
 #define WORKER_IO_MS 8000
+#define WORKER_REQUEST_LIMIT (SB_REQUEST_LIMIT + 65536u)
 typedef struct {
     CRITICAL_SECTION lock;
     const sb_project *project;
@@ -22,6 +23,8 @@ typedef struct {
     char data_identity[50];
     const char *state;
     sb_root *data_root;
+    char token[257];
+    size_t token_length;
 } worker;
 typedef struct {
     sb_project_registry registry;
@@ -31,6 +34,8 @@ typedef struct {
     sb_root *data_root;
     sb_audit *audit;
     sb_owner *owner;
+    sb_config gateway_config;
+    sb_http_server *gateway;
     HANDLE stop;
 } manager;
 
@@ -228,6 +233,116 @@ static yyjson_mut_val *status(manager *m, worker *w, yyjson_mut_doc *doc) {
     yyjson_mut_obj_add_bool(doc, value, "administrator_backend", false);
     return value;
 }
+
+static bool token_matches(const worker *w, const char *authorization) {
+    if (!authorization || _strnicmp(authorization, "Bearer ", 7) || !w->token_length ||
+        strlen(authorization + 7) != w->token_length) return false;
+    volatile unsigned difference = 0;
+    for (size_t i = 0; i < w->token_length; ++i)
+        difference |= (unsigned)((unsigned char)authorization[i + 7] ^ (unsigned char)w->token[i]);
+    return difference == 0;
+}
+static bool gateway_credentials(manager *m, sb_error *error) {
+    for (size_t i = 0; i < m->registry.project_count; ++i) {
+        worker *w = &m->workers[i];
+        if (!w->project->enabled) continue;
+        const char *token = getenv(w->project->token_env);
+        size_t length = token ? strlen(token) : 0;
+        if (length < 32 || length > 256) goto invalid;
+        for (size_t j = 0; j < length; ++j) if ((unsigned char)token[j] <= 32 || (unsigned char)token[j] >= 127) goto invalid;
+        memcpy(w->token, token, length + 1); w->token_length = length;
+        for (size_t j = 0; j < i; ++j) if (w->token_length == m->workers[j].token_length &&
+            !memcmp(w->token, m->workers[j].token, length)) {
+            sb_fail(error, "Enabled projects must have distinct bearer token values; gateway startup blocked."); return false;
+        }
+    }
+    return true;
+invalid:
+    sb_fail(error, "Every enabled project requires a 32..256 byte visible-ASCII bearer in its token_env; gateway startup blocked."); return false;
+}
+static void *gateway_open(void *context, const char *path, const char *authorization, bool *health, int *http_status) {
+    manager *m = context; worker *w = NULL;
+    const char *suffix = !strcmp(path, "/mcp") ? "mcp" : !strcmp(path, "/healthz") ? "healthz" : NULL;
+    if (suffix) {
+        for (size_t i = 0; i < m->registry.project_count; ++i)
+            if (!strcmp(m->workers[i].project->id, m->registry.default_project_id)) w = &m->workers[i];
+    } else if (!strncmp(path, "/projects/", 10)) {
+        const char *id = path + 10, *end = strchr(id, '/');
+        if (end && (!strcmp(end + 1, "mcp") || !strcmp(end + 1, "healthz"))) {
+            suffix = end + 1;
+            for (size_t i = 0; i < m->registry.project_count; ++i)
+                if (strlen(m->workers[i].project->id) == (size_t)(end - id) &&
+                    !memcmp(m->workers[i].project->id, id, (size_t)(end - id))) w = &m->workers[i];
+        }
+    }
+    if (!w) { *http_status = 404; return NULL; }
+    if (!w->project->enabled) { *http_status = 503; return NULL; }
+    if (!token_matches(w, authorization)) { *http_status = 401; return NULL; }
+    if (WaitForSingleObject(m->stop, 0) == WAIT_OBJECT_0) { *http_status = 503; return NULL; }
+    if (!TryEnterCriticalSection(&w->lock)) { *http_status = 429; return NULL; }
+    refresh(m, w);
+    if (!w->process) { LeaveCriticalSection(&w->lock); *http_status = 503; return NULL; }
+    *health = !strcmp(suffix, "healthz"); *http_status = 200; return w;
+}
+static void gateway_close(void *context, void *binding) { (void)context; LeaveCriticalSection(&((worker *)binding)->lock); }
+static char *gateway_call(void *context, void *binding, const char *request, size_t length,
+                          const sb_request_context *transport, size_t *response_length, int *http_status) {
+    manager *m = context; worker *w = binding;
+    *response_length = 0; *http_status = 500;
+    yyjson_doc *input = yyjson_read(request, length, 0);
+    if (!input) {
+        *http_status = 400;
+        char *failure = sb_strdup("{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32700,\"message\":\"Parse error.\"}}");
+        *response_length = failure ? strlen(failure) : 0; return failure;
+    }
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL); char *wire = NULL, *response = NULL;
+    const char *headers[] = {transport->version, transport->method, transport->name};
+    const char *names[] = {"version", "method", "name"};
+    if (!doc) goto done;
+    yyjson_mut_val *envelope = yyjson_mut_obj(doc); yyjson_mut_doc_set_root(doc, envelope);
+    yyjson_mut_obj_add_str(doc, envelope, "kind", "http");
+    yyjson_mut_obj_add_val(doc, envelope, "request", yyjson_val_mut_copy(doc, yyjson_doc_get_root(input)));
+    for (size_t i = 0; i < 3; ++i) if (headers[i]) {
+        if (strlen(headers[i]) > 8192) { *http_status = 400; response = error_json("Protocol header exceeds its limit."); goto done; }
+        yyjson_mut_obj_add_str(doc, envelope, names[i], headers[i]);
+    }
+    wire = yyjson_mut_write(doc, 0, NULL);
+    if (!wire || strlen(wire) > WORKER_REQUEST_LIMIT) { *http_status = 413; response = error_json("Worker request frame exceeds its limit."); goto done; }
+    uint64_t deadline = sb_platform_millis() + WORKER_IO_MS;
+    char *frame = send_frame(w->pipe, wire, true, deadline) ? receive_frame(w->pipe, true, deadline, SB_RESPONSE_LIMIT) : NULL;
+    yyjson_doc *reply = frame ? yyjson_read(frame, strlen(frame), 0) : NULL;
+    yyjson_val *root = yyjson_doc_get_root(reply), *body = yyjson_obj_get(root, "body"); uint64_t status_code = 0;
+    static const char *const keys[] = {"status", "body"};
+    if (reply && sb_config_keys(root, keys, 2) && sb_integer(yyjson_obj_get(root, "status"), &status_code) &&
+        status_code >= 200 && status_code <= 599 && body && (yyjson_is_obj(body) || (status_code == 202 && yyjson_is_null(body)))) {
+        *http_status = (int)status_code;
+        if (!yyjson_is_null(body)) response = yyjson_val_write(body, 0, NULL);
+        if (!response && status_code != 202) { *http_status = 500; response = error_json("Cannot allocate worker response."); }
+    } else {
+        reap(w, "failed"); *http_status = 503;
+        response = error_json("Worker disconnected or exceeded its deadline; review possible side effects before any new request. No automatic replay.");
+        sb_audit_project(m->audit, "project_failed", w->project->id, w->project->policy_revision, w->pid);
+    }
+    yyjson_doc_free(reply); free(frame);
+done:
+    yyjson_doc_free(input); yyjson_mut_doc_free(doc); free(wire);
+    *response_length = response ? strlen(response) : 0; return response;
+}
+static yyjson_mut_val *project_links(manager *m, worker *w, yyjson_mut_doc *doc) {
+    yyjson_mut_val *links = yyjson_mut_obj(doc); char local[160], public_url[416];
+    snprintf(local, sizeof(local), "http://127.0.0.1:%u/projects/%s/mcp", m->registry.port, w->project->id);
+    yyjson_mut_obj_add_str(doc, links, "project_id", w->project->id);
+    yyjson_mut_obj_add_strcpy(doc, links, "local_mcp_url", local);
+    if (*m->registry.public_origin) {
+        snprintf(public_url, sizeof(public_url), "%s/projects/%s/mcp", m->registry.public_origin, w->project->id);
+        yyjson_mut_obj_add_strcpy(doc, links, "public_mcp_url", public_url);
+    }
+    yyjson_mut_obj_add_str(doc, links, "token_env", w->project->token_env);
+    yyjson_mut_obj_add_bool(doc, links, "gateway_running", m->gateway != NULL);
+    yyjson_mut_obj_add_bool(doc, links, "enabled", w->project->enabled);
+    yyjson_mut_obj_add_bool(doc, links, "default_route", !strcmp(w->project->id, m->registry.default_project_id));
+    return links;
+}
 static char *manager_request(void *context, const char *request, size_t length) {
     manager *m = context;
     yyjson_doc *input = yyjson_read(request, length, 0);
@@ -259,7 +374,9 @@ static char *manager_request(void *context, const char *request, size_t length) 
         yyjson_mut_obj_add_uint(doc, result, "manager_pid", GetCurrentProcessId());
         yyjson_mut_obj_add_bool(doc, result, "elevated", false);
         yyjson_mut_obj_add_uint(doc, result, "owner_workers", 4);
-        yyjson_mut_obj_add_bool(doc, result, "http_gateway", false);
+        yyjson_mut_obj_add_bool(doc, result, "http_gateway", m->gateway != NULL);
+        yyjson_mut_obj_add_uint(doc, result, "http_workers", m->gateway ? 4 : 0);
+        yyjson_mut_obj_add_uint(doc, result, "http_connection_queue", m->gateway ? 4 : 0);
     } else {
         worker *w = NULL;
         for (size_t i = 0; id && i < m->registry.project_count; ++i) if (!strcmp(id, m->workers[i].project->id)) w = &m->workers[i];
@@ -276,6 +393,7 @@ static char *manager_request(void *context, const char *request, size_t length) 
                 sb_audit_project(m->audit, "project_stopped", w->project->id, w->project->policy_revision, w->pid);
                 yyjson_mut_obj_add_val(doc, result, "project", status(m, w, doc));
             } else if (!strcmp(command, "project-status") && !payload) yyjson_mut_obj_add_val(doc, result, "project", status(m, w, doc));
+            else if (!strcmp(command, "project-links") && !payload) yyjson_mut_obj_add_val(doc, result, "links", project_links(m, w, doc));
             else if ((!strcmp(command, "project-request") || !strcmp(command, "project-owner")) && payload) {
                 if (!w->process) failure = "Project is not running; explicit owner start is required.";
                 else {
@@ -355,15 +473,22 @@ overlap:
 done:
     yyjson_doc_free(source); return ok;
 }
-static int run_manager(const char *source, const char *data) {
+static int run_manager(const char *source, const char *data, bool http) {
     sb_error error = {0}; size_t length = 0; char *bytes = sb_platform_load_config(source, &length, &error);
     manager *m = calloc(1, sizeof(*m)); int code = 2;
     if (!m || !bytes || !preflight(m, data, bytes, length, &error)) goto done;
     m->stop = CreateEventW(NULL, TRUE, FALSE, NULL); if (!m->stop) goto done;
+    if (http) {
+        if (!gateway_credentials(m, &error)) goto done;
+        sb_config_defaults(&m->gateway_config); m->gateway_config.port = m->registry.port;
+        if (*m->registry.public_origin && !sb_config_public_url(&m->gateway_config, m->registry.public_origin, &error)) goto done;
+        const sb_http_routes routes = {gateway_open, gateway_call, gateway_close};
+        m->gateway = sb_http_start(&m->gateway_config, &routes, m, &error); if (!m->gateway) goto done;
+    }
     m->owner = sb_owner_start_handler(data, manager_request, m, &error); if (!m->owner) goto done;
-    puts("{\"manager_ready\":true,\"elevated\":false,\"http_gateway\":false}"); fflush(stdout);
+    printf("{\"manager_ready\":true,\"elevated\":false,\"http_gateway\":%s}\n", http ? "true" : "false"); fflush(stdout);
     /* Explicit startup per project. The manager never replays failed work. */
-    while (WaitForSingleObject(m->stop, 100) == WAIT_TIMEOUT && !sb_owner_stopping(m->owner)) {
+    while (WaitForSingleObject(m->stop, 100) == WAIT_TIMEOUT && !sb_owner_stopping(m->owner) && (!m->gateway || !sb_http_stopping())) {
         for (size_t i = 0; i < m->registry.project_count; ++i) {
             worker *w = &m->workers[i];
             if (TryEnterCriticalSection(&w->lock)) { refresh(m, w); LeaveCriticalSection(&w->lock); }
@@ -373,15 +498,19 @@ static int run_manager(const char *source, const char *data) {
 done:
     free(bytes);
     if (m) {
+        if (m->stop) SetEvent(m->stop);
+        sb_http_stop(m->gateway);
         sb_owner_stop(m->owner);
         for (size_t i = 0; i < m->initialized; ++i) {
             if (m->workers[i].process)
                 sb_audit_project(m->audit, "project_stopped", m->workers[i].project->id, m->workers[i].project->policy_revision, m->workers[i].pid);
             reap(&m->workers[i], "stopped"); free(m->workers[i].snapshot);
+            SecureZeroMemory(m->workers[i].token, sizeof(m->workers[i].token));
             sb_platform_root_close(m->workers[i].data_root); DeleteCriticalSection(&m->workers[i].lock);
         }
         if (m->stop) CloseHandle(m->stop);
         sb_audit_free(m->audit); sb_platform_root_close(m->data_root); sb_platform_lease_close(m->lease);
+        sb_config_free(&m->gateway_config);
         sb_projects_free(&m->registry); free(m);
     }
     if (code) fprintf(stderr, "ShellBot: %s\n", *error.text ? error.text : "Manager startup failed.");
@@ -440,19 +569,40 @@ int sb_project_worker(int argc, wchar_t **argv) {
     bool sent = send_frame(pipe, greeting, false, 0); free(greeting); if (!sent) goto done;
     sb_protocol protocol = {0}; code = 0;
     for (;;) {
-        char *envelope = receive_frame(pipe, false, 0, SB_REQUEST_LIMIT); if (!envelope) break;
+        char *envelope = receive_frame(pipe, false, 0, WORKER_REQUEST_LIMIT); if (!envelope) break;
         yyjson_doc *input = yyjson_read(envelope, strlen(envelope), 0);
         yyjson_val *root = yyjson_doc_get_root(input), *request = yyjson_obj_get(root, "request");
         static const char *const keys[] = {"kind", "request"};
+        static const char *const http_keys[] = {"kind", "request", "version", "method", "name"};
         const char *kind = sb_string(yyjson_obj_get(root, "kind"));
         char *wire = yyjson_val_write(request, 0, NULL), *response = NULL;
-        if (!wire || !kind || !yyjson_is_obj(request) || !sb_config_keys(root, keys, 2)) response = error_json("Invalid worker envelope.");
+        bool is_http = kind && !strcmp(kind, "http");
+        bool valid = wire && kind && (is_http ? sb_config_keys(root, http_keys, 5) : yyjson_is_obj(request) && sb_config_keys(root, keys, 2));
+        const char *headers[3] = {0}; const char *names[] = {"version", "method", "name"};
+        for (size_t i = 0; valid && is_http && i < 3; ++i) {
+            yyjson_val *header = yyjson_obj_get(root, names[i]); headers[i] = sb_string(header);
+            if (header && (!headers[i] || strlen(headers[i]) > 8192)) valid = false;
+        }
+        if (!valid) response = error_json("Invalid worker envelope.");
         else if (!strcmp(kind, "owner")) response = sb_policy_owner_request(host.policy, wire, strlen(wire));
-        else if (!strcmp(kind, "mcp")) {
-            sb_request_context ctx = {.actor = "manager-owner", .project = project, .policy_revision = project->policy_revision};
+        else if (!strcmp(kind, "mcp") || is_http) {
+            sb_request_context ctx = {.actor = is_http ? "project-mcp" : "manager-owner", .version = headers[0], .method = headers[1], .name = headers[2],
+                .project = project, .policy_revision = project->policy_revision};
             size_t response_length = 0; int http_status = 0;
-            response = sb_dispatch(&host, &protocol, wire, strlen(wire), &ctx, &response_length, &http_status);
-            if (!response && http_status == 202) response = sb_strdup("{\"notification\":true}");
+            host.http_mode = is_http;
+            response = sb_dispatch(&host, is_http ? NULL : &protocol, wire, strlen(wire), &ctx, &response_length, &http_status);
+            if (is_http) {
+                yyjson_doc *body = response ? yyjson_read(response, response_length, 0) : NULL;
+                yyjson_mut_doc *wrapped = yyjson_mut_doc_new(NULL);
+                char *encoded = NULL;
+                if (wrapped && (body || (!response && http_status == 202))) {
+                    yyjson_mut_val *result = yyjson_mut_obj(wrapped); yyjson_mut_doc_set_root(wrapped, result);
+                    yyjson_mut_obj_add_uint(wrapped, result, "status", (unsigned)http_status);
+                    yyjson_mut_obj_add_val(wrapped, result, "body", body ? yyjson_val_mut_copy(wrapped, yyjson_doc_get_root(body)) : yyjson_mut_null(wrapped));
+                    encoded = yyjson_mut_write(wrapped, 0, NULL);
+                }
+                yyjson_doc_free(body); yyjson_mut_doc_free(wrapped); free(response); response = encoded;
+            } else if (!response && http_status == 202) response = sb_strdup("{\"notification\":true}");
         } else response = error_json("Unknown worker envelope kind.");
         free(wire); yyjson_doc_free(input); free(envelope);
         sent = send_frame(pipe, response, false, 0); free(response); if (!sent) break;
@@ -465,7 +615,7 @@ done:
 
 bool sb_manager_option(const char *option) {
     static const char *const names[] = {"--manager", "--manager-stop", "--project-create", "--project-configure", "--project-start",
-        "--project-stop", "--project-status", "--project-request", "--project-owner"};
+        "--project-stop", "--project-status", "--project-request", "--project-owner", "--project-links"};
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) if (!strcmp(option, names[i])) return true;
     return false;
 }
@@ -473,12 +623,14 @@ int sb_manager_cli(int argc, char **argv) {
     const char *mode = argv[1], *id = NULL, *registry = NULL, *data = NULL, *definition = NULL, *output = NULL, *request_file = NULL;
     bool editing = !strcmp(mode, "--project-create") || !strcmp(mode, "--project-configure");
     bool payload = !strcmp(mode, "--project-request") || !strcmp(mode, "--project-owner");
+    bool http = false;
     int index = 2;
     if (strcmp(mode, "--manager") && strcmp(mode, "--manager-stop")) {
         if (index < argc && strncmp(argv[index], "--", 2)) id = argv[index++];
         if ((!id && strcmp(mode, "--project-status")) || (id && !sb_identifier(id))) goto invalid;
     }
     for (; index < argc; ++index) {
+        if (!strcmp(argv[index], "--http") && !strcmp(mode, "--manager") && !http) { http = true; continue; }
         const char **slot = !strcmp(argv[index], "--projects") ? &registry : !strcmp(argv[index], "--manager-data-dir") ? &data :
             !strcmp(argv[index], "--project-config") ? &definition : !strcmp(argv[index], "--output") ? &output :
             !strcmp(argv[index], "--request") ? &request_file : NULL;
@@ -498,7 +650,7 @@ int sb_manager_cli(int argc, char **argv) {
         puts("{\"exported\":true,\"source_backup_saved\":true,\"running_configuration_changed\":false}"); code = 0;
     } else if (!strcmp(mode, "--manager")) {
         if (!registry || !data || definition || output || request_file) goto invalid;
-        code = run_manager(registry, data);
+        code = run_manager(registry, data, http);
     } else {
         if (!data || !sb_project_path_valid(data) || registry || definition || output || (payload != (request_file != NULL))) goto invalid;
         yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL); if (!doc) goto done;

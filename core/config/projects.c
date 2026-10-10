@@ -393,7 +393,7 @@ char *sb_projects_summary(const sb_project_registry *registry) {
     yyjson_mut_obj_add_uint(doc, root, "format_version", registry->format_version);
     yyjson_mut_obj_add_bool(doc, root, "runtime_available", true);
     yyjson_mut_obj_add_bool(doc, root, "runtime_started", false);
-    yyjson_mut_obj_add_bool(doc, root, "http_gateway_available", false);
+    yyjson_mut_obj_add_bool(doc, root, "http_gateway_available", true);
     yyjson_mut_obj_add_val(doc, root, "projects", projects);
     for (size_t i = 0; i < registry->project_count; ++i) {
         const sb_project *project = &registry->projects[i];

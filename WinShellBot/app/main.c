@@ -20,9 +20,10 @@ static void usage(void) {
           "       WinShellBot --validate-projects FILE\n"
           "       WinShellBot --project-create | --project-configure ID --project-config FILE\n"
           "                  [--projects REGISTRY] --output NEW (never overwrites existing files)\n"
-          "       WinShellBot --manager --projects REGISTRY --manager-data-dir ABSOLUTE_DIR\n"
+          "       WinShellBot --manager [--http] --projects REGISTRY --manager-data-dir ABSOLUTE_DIR\n"
           "       WinShellBot --project-start | --project-stop ID --manager-data-dir ABSOLUTE_DIR\n"
           "       WinShellBot --project-status [ID] --manager-data-dir ABSOLUTE_DIR\n"
+          "       WinShellBot --project-links ID --manager-data-dir ABSOLUTE_DIR (no token values)\n"
           "       WinShellBot --project-request | --project-owner ID --request FILE\n"
           "                  --manager-data-dir ABSOLUTE_DIR (local owner channel only)\n"
           "       WinShellBot --manager-stop --manager-data-dir ABSOLUTE_DIR\n"
@@ -35,6 +36,7 @@ static void usage(void) {
           "       WinShellBot --inspect | --approve | --deny | --revoke ID [--data-dir ABSOLUTE_DIR]\n"
           "Default: stdio; no implicit workspace. --root creates id 'workspace'.\n"
           "HTTP: 127.0.0.1 only, /mcp and /healthz, bearer from SHELLBOT_TOKEN.\n"
+          "Manager HTTP: /projects/ID/mcp, each project's token_env; /mcp needs default_project_id.\n"
           "Roots default to read-only. Create-only writes require explicit configuration and local approval.\n"
           "Existing external tunnels are configured separately. No OAuth or tunnel management.\n", stdout);
 }

@@ -1,8 +1,8 @@
 # M1 项目配置与统一权限策略
 
-更新日期：2026 年 10 月 10 日。代码版本：`0.1.0-dev.9`。配置格式：`format_version: 1`。
+更新日期：2026 年 10 月 10 日。代码版本：`0.1.0-dev.10`。配置格式：`format_version: 1`。
 
-M1 完成配置数据模型、严格校验、统一 allow/deny/pending 判断和旧配置显式迁移。M2 已加入普通管理器和项目工作进程，运行方法见 [项目管理器](PROJECT_MANAGER.md)。网关认证、完整审批适配、受限执行、共享管理员代理和远程审批仍待 M3–M6；`--config` 遇到版本化配置会在创建 Data 或初始化执行身份之前拒绝。
+M1 完成配置数据模型、严格校验、统一 allow/deny/pending 判断和旧配置显式迁移。M2 普通管理器和项目工作进程见 [项目管理器](PROJECT_MANAGER.md)，M3 地址和认证见 [项目网关](PROJECT_GATEWAY.md)。完整审批适配、受限执行、共享管理员代理和远程审批仍待 M4–M6；`--config` 遇到版本化配置会在创建 Data 或初始化执行身份之前拒绝。
 
 ## 配置和校验入口
 
@@ -12,16 +12,16 @@ M1 完成配置数据模型、严格校验、统一 allow/deny/pending 判断和
 .\out\x64\Release\WinShellBot.exe --validate-projects .\config\projects.example.json
 ```
 
-这个入口不读取环境中的令牌值，不初始化执行身份、不请求 UAC、不创建 Data、不启动监听。新格式目录只做语法和配置冲突检查，不要求目录已存在。兼容项目会调用既有解析器，打开旧工作目录的元数据句柄进行原规则校验，不读取文件正文；旧目录需要存在。状态输出省略真实目录路径及凭据引用，返回项目、策略版本、审批方式和不可用后端的原因。dev.9 的 runtime_available:true 表示存在 M2 管理器，runtime_started:false 表示校验没有启动项目；http_gateway_available:false 表示 M3 尚未接入。策略的 allow/pending 不能替代后端就绪状态。
+这个入口不读取环境中的令牌值，不初始化执行身份、不请求 UAC、不创建 Data、不启动监听。新格式目录只做语法和配置冲突检查，不要求目录已存在。兼容项目会调用既有解析器，打开旧工作目录的元数据句柄进行原规则校验，不读取文件正文；旧目录需要存在。状态输出省略真实目录路径及凭据引用，返回项目、策略版本、审批方式和不可用后端的原因。runtime_available:true 表示存在 M2 管理器，runtime_started:false 表示校验没有启动项目；dev.10 的 http_gateway_available:true 表示可以显式开启 M3 网关，校验命令本身没有启动监听。策略的 allow/pending 不能替代后端就绪状态。
 
 | 字段 | 约束与默认值 |
 | --- | --- |
 | format_version | 必填整数 1；其他格式和无版本注册配置拒绝 |
 | projects | 1～16 个项目；project id 区分大小写，由 1～63 个 ASCII 字母、数字、下划线或连字符组成 |
 | gateway | 可选；port 默认 8765，仅 1024～65535；public_url 可空，只沿用既有地址语法校验，不进行网络或域名探测 |
-| gateway.default_project_id | 只允许引用注册项目；省略表示不绑定旧 `/mcp`，实际路由留待 M3 |
+| gateway.default_project_id | 只允许引用注册项目；省略表示不绑定旧 `/mcp`；M3 已实现显式默认项目路径 |
 | 项目 enabled / policy_revision | 默认 true / 1；revision 必须是非零 uint64，未来由管理器在配置变更时维护 |
-| 项目 token_env | 普通新项目必填，仅保存凭据的环境变量引用；不同项目不得重用同一引用，Windows 大小写变体也拒绝；M2 工作进程排除所有项目凭据变量；实际认证待 M3 |
+| 项目 token_env | 普通新项目必填，仅保存凭据环境变量引用；不同项目不得重用同一引用，Windows 大小写变体也拒绝；工作进程排除全部项目凭据变量；M3 还核验启用项目令牌值有效且不同 |
 | 项目 data_dir | 必填绝对磁盘或 UNC 路径；不同项目的 Data 不得相同或互相包含；校验不创建目录 |
 | workspaces / extra_directories | 每类最多 16 个目录；两类共用本项目的稳定 id 命名空间，read_only 默认 true |
 | default_workspace_id | 必须引用本项目 workspace；省略使用第一个 workspace；无 workspace 不隐式授权 cwd |
@@ -73,8 +73,8 @@ dev.7 的读取自动、写入本机审批和已启用 user/administrator 命令
 
 ## 验证和仍待完成项
 
-scripts/build.ps1 另编译开发用 ShellBot-ProjectPolicyTests.exe，不属于产品运行依赖。scripts/test.ps1 的 x64 分支先运行 tests/project_checks.py 和 tests/manager_checks.py，再运行旧工具核心回归。专项覆盖三模式、跨项目同名目录、只读和目录外上限、任务归属、策略版本、不可用后端、严格配置拒绝、六类旧执行配置迁移、实际解析后的兼容策略、字节备份、重复输出拒绝和旧 Data 保留。
+scripts/build.ps1 另编译开发用 ShellBot-ProjectPolicyTests.exe，不属于产品运行依赖。scripts/test.ps1 的 x64 分支先运行 tests/project_checks.py、tests/manager_checks.py 和 tests/gateway_checks.py，再运行旧工具核心回归。配置专项覆盖三模式、跨项目同名目录、只读和目录外上限、任务归属、策略版本、不可用后端、严格配置拒绝、六类旧执行配置迁移、实际解析后的兼容策略、字节备份、重复输出拒绝和旧 Data 保留。
 
 Debug/Release 的最终结果及程序摘要见 [实现记录](IMPLEMENTATION_STATUS.md) 和 build/validation/x64-Debug-m1.json、x64-Release-m1.json。专项原始目录和失败报告保留在 tests/test-results；dev.7 基线在 build/baseline-dev7-m1-20261010。
 
-M2 已完成普通权限管理器、每项目工作进程、独立 Data/任务/审计、凭据环境排除、配额和故障处理，见 [管理器说明](PROJECT_MANAGER.md)。M3 再接项目路由与认证；M4/M5 接实际审批、受限执行和逐项目管理员授权。历史 HTTP close 问题、独立机器及真实 MCP 客户端验收仍单独记录。
+M2 已完成普通权限管理器、每项目工作进程、独立 Data/任务/审计、凭据环境排除、配额和故障处理，见 [管理器说明](PROJECT_MANAGER.md)。M3 已接项目路由与认证；M4/M5 接完整审批、受限执行和逐项目管理员授权。历史 HTTP close 问题、独立机器及真实 MCP 客户端验收仍单独记录。

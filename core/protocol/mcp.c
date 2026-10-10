@@ -144,7 +144,7 @@ char *sb_dispatch(sb_host *host, sb_protocol *protocol, const char *request,
             yyjson_mut_obj_add_str(output, result, "protocolVersion", sb_protocol_version(legacy_requested) && strcmp(legacy_requested, "2026-07-28") ? legacy_requested : "2025-11-25");
             yyjson_mut_obj_add_val(output, result, "capabilities", capabilities(output));
             yyjson_mut_obj_add_val(output, result, "serverInfo", server_info(output));
-            yyjson_mut_obj_add_str(output, result, "instructions", "Use host_capabilities for workspace ids. File writes require local owner approval. Overwrite and patch require expected_sha256 and create a private backup. No OAuth or execution yet.");
+            yyjson_mut_obj_add_str(output, result, "instructions", "Use host_capabilities to inspect workspace ids, project policy, and available backends. Approval and execution depend on owner configuration. Overwrite and patch require expected_sha256 and a private backup. OAuth and tunnel management are unavailable.");
             yyjson_mut_obj_add_val(output, response, "result", result);
             if (protocol) protocol->initialized = true;
         }
