@@ -1,4 +1,8 @@
-# 命令与后台任务（dev.7）
+# 命令与后台任务
+
+dev.11 的正常新格式项目按 always/workspace_auto/never 管理 task_start 和 task_input，pending 须经本机 project-owner 批准，实际结果轮询与取消按归属继续可用。受限任务使用实际 LPAC，只接受所有者声明的程序，子进程、网络和 Win32k 均禁止；缺少或未通过启动检查时拒绝执行。新项目命令启动在批准后钉住程序并计算 executable_sha256，参与 request_key 摘要，审批还绑定物理程序版本与 cwd 元数据。不会读取未知环境变量或继承项目 bearer。详见 [项目审批与受限执行](PROJECT_APPROVALS.md)。
+
+后续各节描述保留的 dev.7 单实例 user/administrator 行为；其中 controlled 不可用、每任务 64 个进程、原摘要不固定程序内容等限制只适用于旧入口。新 LPAC 每任务限 1 个进程；新项目管理员代理仍待 M5。脚本及动态依赖不会因为 argv 摘要自动全部固定，必须遵守声明运行资源与后端真实权限。
 
 本版在显式启用的 user 和 administrator 档提供后台程序执行。默认 execution.enabled:false；controlled 的完整隔离、规则和远程审批尚未完成，启用该档仍拒绝命令。任务工具采用普通 MCP 工具调用，不声明标准 MCP tasks 扩展。
 

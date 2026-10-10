@@ -71,8 +71,23 @@ yyjson_mut_val *sb_project_tools_list(sb_host *host, yyjson_mut_doc *doc) {
     if (!host->project || !result) return result;
     yyjson_mut_val *tools = yyjson_mut_obj_get(result, "tools");
     for (size_t i = yyjson_mut_arr_size(tools); i; --i) {
-        const char *name = yyjson_mut_get_str(yyjson_mut_obj_get(yyjson_mut_arr_get(tools, i - 1), "name"));
+        yyjson_mut_val *tool = yyjson_mut_arr_get(tools,i-1);
+        const char *name = yyjson_mut_get_str(yyjson_mut_obj_get(tool, "name"));
         if (!project_tool_visible(host, name)) yyjson_mut_arr_remove(tools, i - 1);
+        else if (!host->project->legacy_compatibility && (strncmp(name,"fs_",3) == 0 || !strcmp(name,"image_view") || !strcmp(name,"task_start") || !strcmp(name,"task_input"))) {
+            yyjson_mut_val *schema = yyjson_mut_obj_get(tool,"inputSchema"), *properties = yyjson_mut_obj_get(schema,"properties");
+            if (!yyjson_mut_obj_get(properties,"approval_id")) {
+                yyjson_mut_val *approval = yyjson_mut_obj(doc); yyjson_mut_obj_add_str(doc,approval,"type","string");
+                yyjson_mut_obj_add_val(doc,properties,"approval_id",approval);
+            }
+            if (host->project->policy.file_scope == SB_FILES_CURRENT_USER && strncmp(name,"task_",5)) {
+                yyjson_mut_val *required = yyjson_mut_obj_get(schema,"required");
+                for (size_t j = yyjson_mut_arr_size(required); j; --j)
+                    if (!strcmp(yyjson_mut_get_str(yyjson_mut_arr_get(required,j-1)),"workspace_id")) yyjson_mut_arr_remove(required,j-1);
+            }
+            yyjson_mut_obj_remove_str(tool,"description");
+            yyjson_mut_obj_add_str(doc,tool,"description","Project policy controls this operation. Pending replies contain approval_id; a local owner must inspect/approve before retry. Keep arguments identical; bounded file pages use next_offset and the same approval_id. With current_user file scope, omit workspace_id for an absolute local path. Read-only grants always apply; edits retain expected hashes and private backups.");
+        }
     }
     return result;
 }
@@ -109,7 +124,7 @@ static bool expected_hash(yyjson_val *args, char hash[65]) {
     hash[64] = 0; return true;
 }
 
-static bool arguments_valid(const tool_definition *definition, yyjson_val *args) {
+static bool arguments_valid(const tool_definition *definition, yyjson_val *args, const sb_host *host) {
     if (!args) return true;
     if (!yyjson_is_obj(args)) return false;
     yyjson_doc *schema = yyjson_read(definition->schema, strlen(definition->schema), 0);
@@ -121,7 +136,9 @@ static bool arguments_valid(const tool_definition *definition, yyjson_val *args)
     yyjson_obj_foreach(args, idx, max, key, value) {
         (void)value;
         const char *name = sb_string(key);
-        if (!name || !yyjson_obj_get(properties, name)) { valid = false; break; }
+        bool project_approval = host->project && !host->project->legacy_compatibility && name && !strcmp(name,"approval_id") &&
+            (strncmp(definition->name,"fs_",3) == 0 || !strcmp(definition->name,"image_view") || !strcmp(definition->name,"task_start") || !strcmp(definition->name,"task_input"));
+        if (!name || (!yyjson_obj_get(properties, name) && !project_approval)) { valid = false; break; }
         yyjson_obj_iter it = yyjson_obj_iter_with(args);
         for (size_t j = 0; j < idx; ++j) if (!strcmp(name, yyjson_get_str(yyjson_obj_iter_next(&it)))) valid = false;
     }
@@ -172,12 +189,13 @@ static const char *image_header(const unsigned char *data, size_t size, uint32_t
     return NULL;
 }
 
-yyjson_mut_val *sb_tool_call(sb_host *host, const char *actor, const char *name, yyjson_val *args, yyjson_mut_doc *doc) {
+static yyjson_mut_val *tool_call_inner(sb_host *host, const char *actor, const char *name, yyjson_val *args,
+    yyjson_mut_doc *doc, sb_workspace *override, const char *path_override, bool authorized) {
     const tool_definition *definition = NULL;
     for (size_t i = 0; i < tool_count(); ++i) if (!strcmp(name, definitions[i].name)) definition = &definitions[i];
     if (!definition) return failure(doc, "Unknown tool.");
-    if (!arguments_valid(definition, args)) return failure(doc, "Invalid or unknown tool arguments.");
-    if (host->project) {
+    if (!arguments_valid(definition, args, host)) return failure(doc, "Invalid or unknown tool arguments.");
+    if (host->project && !authorized) {
         const sb_project *project = host->project;
         const sb_project_directory *directory = sb_project_directory_find(project, sb_string(yyjson_obj_get(args, "workspace_id")));
         sb_request_context context = {.actor = actor, .project = project, .policy_revision = project->policy_revision};
@@ -227,9 +245,9 @@ yyjson_mut_val *sb_tool_call(sb_host *host, const char *actor, const char *name,
         yyjson_mut_obj_add_val(doc, data, "protocol_versions", versions);
         yyjson_mut_obj_add_uint(doc, data, "max_text_bytes", SB_TEXT_LIMIT);
         yyjson_mut_obj_add_uint(doc, data, "max_image_bytes", SB_IMAGE_LIMIT);
-        yyjson_mut_obj_add_bool(doc, data, "file_write", !host->project || host->project->legacy_compatibility);
-        yyjson_mut_obj_add_bool(doc, data, "file_overwrite", !host->project || host->project->legacy_compatibility);
-        yyjson_mut_obj_add_bool(doc, data, "file_patch", !host->project || host->project->legacy_compatibility);
+        yyjson_mut_obj_add_bool(doc, data, "file_write", true);
+        yyjson_mut_obj_add_bool(doc, data, "file_overwrite", true);
+        yyjson_mut_obj_add_bool(doc, data, "file_patch", true);
         yyjson_mut_obj_add_bool(doc, data, "atomic_overwrite", false);
         yyjson_mut_obj_add_uint(doc, data, "max_edit_bytes", SB_TEXT_LIMIT);
         yyjson_mut_obj_add_uint(doc, data, "max_backups_per_instance", 64);
@@ -241,8 +259,8 @@ yyjson_mut_val *sb_tool_call(sb_host *host, const char *actor, const char *name,
         yyjson_mut_obj_add_str(doc, data, "approval_mode", host->project && !host->project->legacy_compatibility ?
             (host->project->policy.approval_mode == SB_PROJECT_NEVER ? "never" : host->project->policy.approval_mode == SB_PROJECT_WORKSPACE_AUTO ? "workspace_auto" : "always") : "local-owner");
         if (host->project) {
-            yyjson_mut_obj_add_bool(doc, data, "project_approval_adapter", false);
-            yyjson_mut_obj_add_bool(doc, data, "unlisted_account_file_adapter", false);
+            yyjson_mut_obj_add_bool(doc, data, "project_approval_adapter", !host->project->legacy_compatibility);
+            yyjson_mut_obj_add_bool(doc, data, "unlisted_account_file_adapter", !host->project->legacy_compatibility && host->project->policy.file_scope == SB_FILES_CURRENT_USER);
             yyjson_mut_obj_add_bool(doc, data, "administrator_backend", false);
             yyjson_mut_obj_add_uint(doc, data, "max_active_tasks", host->config.limits.active_tasks);
             yyjson_mut_obj_add_uint(doc, data, "max_task_records", host->config.limits.task_records);
@@ -274,12 +292,13 @@ yyjson_mut_val *sb_tool_call(sb_host *host, const char *actor, const char *name,
     }
     const char *id = sb_string(yyjson_obj_get(args, "workspace_id"));
     const char *path = sb_string(yyjson_obj_get(args, "path"));
-    if (!id) return failure(doc, "workspace_id is required.");
-    sb_workspace *workspace = sb_workspace_find(&host->config, id);
+    if (!id && !override) return failure(doc, "workspace_id is required.");
+    sb_workspace *workspace = override ? override : sb_workspace_find(&host->config, id);
     if (!workspace) return failure(doc, "Unknown workspace_id.");
     if (!path && yyjson_obj_get(args, "path")) return failure(doc, "path must be a string without NUL.");
     if (!path && (!strcmp(name, "fs_read") || !strcmp(name, "image_view") || !strcmp(name, "fs_write") || !strcmp(name, "fs_patch"))) return failure(doc, "path is required.");
     if (!path) path = ".";
+    if (path_override) path = path_override;
     sb_error error = {0};
     if (!strcmp(name, "fs_write") || !strcmp(name, "fs_patch")) {
         const char *text = sb_string(yyjson_obj_get(args, "text"));
@@ -299,11 +318,13 @@ yyjson_mut_val *sb_tool_call(sb_host *host, const char *actor, const char *name,
                 !number(args, "expected_matches", 1, 1, 1000, &matches))
                 return failure(doc, "Editing requires a 64-character expected_sha256; patch requires nonempty search, replacement and expected_matches within 1..1000.");
             sb_edit_request edit = {name, text, search, replacement, hash, approval_id, (size_t)matches};
-            yyjson_mut_val *written = sb_policy_modify(host, actor, workspace, path, &edit, doc, &failed);
+            yyjson_mut_val *written = authorized ? sb_policy_modify_authorized(host,actor,workspace,path,&edit,doc,&failed) :
+                sb_policy_modify(host, actor, workspace, path, &edit, doc, &failed);
             return content_result(doc, written, failed);
         }
         if (yyjson_obj_get(args, "expected_sha256")) return failure(doc, "expected_sha256 requires overwrite:true.");
-        yyjson_mut_val *written = sb_policy_write(host, actor, workspace, path, text, approval_id, doc, &failed);
+        yyjson_mut_val *written = authorized ? sb_policy_write_authorized(host,actor,workspace,path,text,doc,&failed) :
+            sb_policy_write(host, actor, workspace, path, text, approval_id, doc, &failed);
         return content_result(doc, written, failed);
     }
     if (!strcmp(name, "fs_search")) {
@@ -410,4 +431,147 @@ yyjson_mut_val *sb_tool_call(sb_host *host, const char *actor, const char *name,
 done:
     sb_platform_close(file);
     return result;
+}
+
+static char *operation_parameters(const char *name, yyjson_val *args) {
+    const char *keys[32]; size_t count = 0, idx, max; yyjson_val *key,*value;
+    yyjson_obj_foreach(args,idx,max,key,value) {
+        (void)value; const char *text = sb_string(key);
+        if (!strcmp(text,"approval_id") || ((!strcmp(name,"fs_read") || !strcmp(name,"fs_list")) && !strcmp(text,"offset")) ||
+            (!strcmp(name,"fs_read") && !strcmp(text,"encoding"))) continue;
+        if (count == 32) return NULL; keys[count++] = text;
+    }
+    for(size_t i=1;i<count;++i) for(size_t j=i;j && strcmp(keys[j-1],keys[j])>0;--j) { const char *swap=keys[j-1];keys[j-1]=keys[j];keys[j]=swap; }
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL); if (!doc) return NULL;
+    yyjson_mut_val *object = yyjson_mut_obj(doc);
+    for (size_t i = 0; i < count; ++i) yyjson_mut_obj_add_val(doc,object,keys[i],yyjson_val_mut_copy(doc,yyjson_obj_get(args,keys[i])));
+    yyjson_mut_doc_set_root(doc,object); char *text = yyjson_mut_write(doc,0,NULL); yyjson_mut_doc_free(doc); return text;
+}
+
+static bool project_arguments_valid(sb_host *host, const tool_definition *definition, yyjson_val *args) {
+    if (!arguments_valid(definition,args,host)) return false;
+    yyjson_doc *schema = yyjson_read(definition->schema,strlen(definition->schema),0);
+    if (!schema) return false;
+    yyjson_val *root = yyjson_doc_get_root(schema), *required = yyjson_obj_get(root,"required"), *properties = yyjson_obj_get(root,"properties");
+    bool valid = true; size_t idx,max; yyjson_val *key,*value;
+    yyjson_arr_foreach(required,idx,max,value) {
+        const char *name = sb_string(value);
+        bool account_path = !strcmp(name,"workspace_id") && host->project->policy.file_scope == SB_FILES_CURRENT_USER &&
+            strncmp(definition->name,"task_",5) && !yyjson_obj_get(args,"workspace_id");
+        if (!account_path && !yyjson_obj_get(args,name)) valid = false;
+    }
+    yyjson_obj_foreach(args,idx,max,key,value) {
+        const char *name = sb_string(key); yyjson_val *property = yyjson_obj_get(properties,name);
+        const char *type = sb_string(yyjson_obj_get(property,"type"));
+        if (!strcmp(name,"approval_id")) {
+            const char *id = sb_string(value); if (!id || strlen(id)!=32 || strspn(id,"0123456789abcdef")!=32) valid=false;
+        } else if (type && !strcmp(type,"string")) {
+            const char *text = sb_string(value); uint64_t lo=0,hi=UINT64_MAX;
+            sb_integer(yyjson_obj_get(property,"minLength"),&lo); sb_integer(yyjson_obj_get(property,"maxLength"),&hi);
+            if (!text || strlen(text)<lo || strlen(text)>hi) valid=false;
+            yyjson_val *choices = yyjson_obj_get(property,"enum");
+            if (choices) { bool matched=false; size_t i,n; yyjson_val *choice; yyjson_arr_foreach(choices,i,n,choice) if(text && !strcmp(text,sb_string(choice))) matched=true; if(!matched)valid=false; }
+        } else if (type && !strcmp(type,"integer")) {
+            uint64_t n=0,lo=0,hi=UINT64_MAX; sb_integer(yyjson_obj_get(property,"minimum"),&lo);sb_integer(yyjson_obj_get(property,"maximum"),&hi);
+            if (!sb_integer(value,&n) || n<lo || n>hi)valid=false;
+        } else if (type && !strcmp(type,"boolean") && !yyjson_is_bool(value)) valid=false;
+        else if (type && !strcmp(type,"array") && !yyjson_is_arr(value)) valid=false;
+    }
+    yyjson_doc_free(schema); return valid;
+}
+
+yyjson_mut_val *sb_tool_call(sb_host *host, const char *actor, const char *name, yyjson_val *args, yyjson_mut_doc *doc) {
+    if (!host->project || host->project->legacy_compatibility) return tool_call_inner(host,actor,name,args,doc,NULL,NULL,false);
+    const tool_definition *definition = NULL;
+    for (size_t i=0;i<tool_count();++i) if(!strcmp(name,definitions[i].name)) definition=&definitions[i];
+    if (!definition || !project_arguments_valid(host,definition,args)) return failure(doc,"Invalid or unknown tool arguments.");
+    const sb_project *project = host->project;
+    const char *id = sb_string(yyjson_obj_get(args,"workspace_id")), *path = sb_string(yyjson_obj_get(args,"path"));
+    bool file_tool = !strncmp(name,"fs_",3) || !strcmp(name,"image_view");
+    sb_workspace account = {0}, *workspace = id ? sb_workspace_find(&host->config,id) : NULL;
+    const sb_project_directory *directory = sb_project_directory_find(project,id);
+    char *relative = NULL; sb_error error = {0}; yyjson_mut_val *result = NULL;
+    if (file_tool && !id && project->policy.file_scope == SB_FILES_CURRENT_USER) {
+        account.root = path ? sb_platform_account_parent(path,&relative,&error) : NULL;
+        if (!account.root) return failure(doc,*error.text ? error.text : "An absolute account path is required.");
+        strcpy(account.id,"current-user"); account.read_only=project->policy.current_user_read_only; workspace=&account;
+        for(size_t i=0;i<host->config.workspace_count;++i) {
+            bool inside=sb_platform_target_within(host->config.workspaces[i].root,account.root,relative,&error);
+            if(*error.text){result=failure(doc,error.text);goto done;}
+            if(inside){directory=sb_project_directory_find(project,host->config.workspaces[i].id); account.read_only=host->config.workspaces[i].read_only;break;}
+        }
+        path=relative;
+    }
+    sb_request_context context = {.actor=actor,.project=project,.policy_revision=project->policy_revision};
+    sb_project_operation operation = {.tool=name,.directory=directory,.current_user_target=file_tool && workspace==&account && !directory,
+        .identity=(!strcmp(name,"task_start") || !strcmp(name,"task_input")) ? project->policy.default_identity : SB_ID_CURRENT_USER,
+        .restricted_backend_verified=sb_execution_restricted_verified(host->execution),
+        .owned_task=sb_execution_task_owned(host->execution,actor,sb_string(yyjson_obj_get(args,"task_id")))};
+    sb_policy_result decision=sb_project_evaluate(&context,&operation);
+    if(decision.decision==SB_DECISION_DENY) { result=failure(doc,decision.reason);goto done; }
+    if(!strcmp(name,"task_start") && !sb_execution_program_permitted(host->execution,sb_string(yyjson_obj_get(args,"executable")))) {
+        result=failure(doc,"Restricted executable must be an owner-configured runtime_file.");goto done;
+    }
+    if(!file_tool && strcmp(name,"task_start") && strcmp(name,"task_input")) { result=tool_call_inner(host,actor,name,args,doc,NULL,NULL,true);goto done; }
+    if(file_tool && !workspace) { result=failure(doc,"Unknown workspace_id.");goto done; }
+    if(file_tool && decision.decision==SB_DECISION_ALLOW && strcmp(name,"fs_write") && strcmp(name,"fs_patch") && !yyjson_obj_get(args,"approval_id")) {
+        result=tool_call_inner(host,actor,name,args,doc,workspace==&account ? &account : NULL,workspace==&account ? path : NULL,true);goto done;
+    }
+    if(!path) path=".";
+    bool directory_target=!strcmp(name,"fs_list") || !strcmp(name,"fs_search") || !strcmp(name,"task_start");
+    bool create=!strcmp(name,"fs_write") && !yyjson_get_bool(yyjson_obj_get(args,"overwrite"));
+    char version[65]={0}, target_version[65]={0},program_version[65]={0}, target[256],ticket[33]={0};
+    char parent_id[50]={0};
+    if(file_tool || !strcmp(name,"task_start")) {
+        if (!workspace || !sb_platform_root_identity(workspace->root,parent_id,&error) ||
+            !sb_platform_target_version(workspace->root,path,directory_target,create,!strcmp(name,"fs_search") && yyjson_get_bool(yyjson_obj_get(args,"recursive")),version,&error)) {
+            result=failure(doc,*error.text ? error.text : "Cannot resolve physical operation target.");goto done;
+        }
+        char path_hash[65]; if(!sb_platform_sha256(path,strlen(path),path_hash,&error)) { result=failure(doc,error.text);goto done; }
+        snprintf(target,sizeof(target),"%s:%s",parent_id,path_hash);
+    } else { snprintf(target,sizeof(target),"task:%s",sb_string(yyjson_obj_get(args,"task_id"))); strcpy(version,sb_execution_instance(host->execution)); }
+    strcpy(target_version,version);
+    if(!strcmp(name,"task_start")) {
+        char *program_relative=NULL; sb_root *program=sb_platform_account_parent(sb_string(yyjson_obj_get(args,"executable")),&program_relative,&error);
+        bool ok=program && sb_platform_target_version(program,program_relative,false,false,false,program_version,&error);
+        sb_platform_root_close(program);free(program_relative);
+        char pair[132];snprintf(pair,sizeof(pair),"%s|%s",version,ok?program_version:"");
+        if(!ok || !sb_platform_sha256(pair,strlen(pair),version,&error)) { result=failure(doc,error.text);goto done; }
+    }
+    uint64_t offset=0,budget=1;
+    if(!strcmp(name,"fs_read")) { if(!number(args,"offset",0,0,INT64_MAX,&offset)||!number(args,"max_bytes",SB_TEXT_LIMIT,4,SB_TEXT_LIMIT,&budget)){result=failure(doc,"Invalid file page.");goto done;} }
+    else if(!strcmp(name,"fs_list")) { if(!number(args,"offset",0,0,10000,&offset)||!number(args,"max_entries",100,1,200,&budget)){result=failure(doc,"Invalid directory page.");goto done;} }
+    else if(!strcmp(name,"fs_search")) { if(!number(args,"max_total_bytes",16777216,4,16777216,&budget)){result=failure(doc,"Invalid search budget.");goto done;} }
+    else if(!strcmp(name,"image_view"))budget=SB_IMAGE_LIMIT;
+    else if(!strcmp(name,"fs_write") || !strcmp(name,"fs_patch"))budget=SB_TEXT_LIMIT;
+    if(!file_tool && decision.decision==SB_DECISION_ALLOW && !yyjson_obj_get(args,"approval_id")) {
+        host->approved_target_version=target_version;host->approved_program_version=*program_version?program_version:NULL;
+        result=tool_call_inner(host,actor,name,args,doc,NULL,NULL,true);
+        host->approved_target_version=NULL;host->approved_program_version=NULL;goto done;
+    }
+    char *parameters=operation_parameters(name,args); yyjson_mut_val *reply=NULL;
+    bool allowed=sb_policy_operation_begin(host,actor,name,parameters,target,version,sb_string(yyjson_obj_get(args,"approval_id")),decision.decision==SB_DECISION_PENDING,offset,budget,doc,&reply,ticket);
+    free(parameters);
+    if(!allowed) { result=yyjson_mut_obj_get(reply,"isError") ? reply : content_result(doc,reply,true);goto done; }
+    host->approved_target_version=target_version;host->approved_program_version=*program_version?program_version:NULL;
+    result=tool_call_inner(host,actor,name,args,doc,workspace==&account ? &account : NULL,workspace==&account ? path : NULL,true);
+    host->approved_target_version=NULL;host->approved_program_version=NULL;
+    /* Content is kept in the worker until the physical snapshot is checked again. */
+    if(file_tool && strncmp(name,"fs_write",8) && strcmp(name,"fs_patch") && !yyjson_mut_get_bool(yyjson_mut_obj_get(result,"isError"))) {
+        char after[65]; if(!sb_platform_target_version(workspace->root,path,directory_target,false,!strcmp(name,"fs_search") && yyjson_get_bool(yyjson_obj_get(args,"recursive")),after,&error) || strcmp(version,after))
+            result=failure(doc,"Physical target changed while accessing it; no content returned.");
+    }
+    yyjson_mut_val *data=yyjson_mut_obj_get(result,"structuredContent");
+    yyjson_mut_obj_add_strcpy(doc,data,"approval_id",ticket);
+    sb_policy_operation_finish(host->policy,ticket,result);
+done:
+    if(result) {
+        yyjson_mut_val *metadata=yyjson_mut_obj_get(result,"structuredContent");
+        if(metadata && !yyjson_mut_obj_get(metadata,"project_id"))yyjson_mut_obj_add_str(doc,metadata,"project_id",project->id);
+        if(metadata && !yyjson_mut_obj_get(metadata,"policy_revision"))yyjson_mut_obj_add_uint(doc,metadata,"policy_revision",project->policy_revision);
+        yyjson_mut_val *text=yyjson_mut_arr_get(yyjson_mut_obj_get(result,"content"),0);
+        char *serialized=metadata?yyjson_mut_val_write(metadata,0,NULL):NULL;
+        if(serialized && text){yyjson_mut_obj_remove_str(text,"text");yyjson_mut_obj_add_strcpy(doc,text,"text",serialized);}free(serialized);
+    }
+    free(relative);sb_platform_root_close(account.root);return result;
 }

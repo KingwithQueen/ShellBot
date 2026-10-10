@@ -264,6 +264,106 @@ void sb_platform_entries_free(sb_entry *entries, size_t count) {
     free(entries);
 }
 
+sb_root *sb_platform_account_parent(const char *absolute, char **relative, sb_error *error) {
+    *relative = NULL;
+    wchar_t *path = wide(absolute);
+    if (!path || wcslen(path) < 3 || path[1] != L':' || (path[2] != L'\\' && path[2] != L'/') ||
+        !((path[0] >= L'A' && path[0] <= L'Z') || (path[0] >= L'a' && path[0] <= L'z'))) {
+        free(path); sb_fail(error, "Account paths must be absolute local drive paths."); return NULL;
+    }
+    if (!relative_path(path + 3)) { free(path); sb_fail(error, "Invalid absolute account path."); return NULL; }
+    path[2] = L'\\';
+    size_t length = wcslen(path);
+    while (length > 3 && path[length - 1] == L'\\') path[--length] = 0;
+    wchar_t *leaf = wcsrchr(path, L'\\');
+    if (length == 3) { *relative = sb_strdup("."); }
+    else if (leaf) { *relative = utf8(leaf + 1); if (leaf == path + 2) leaf[1] = 0; else *leaf = 0; }
+    char *parent = utf8(path); free(path);
+    sb_root *root = parent && *relative ? sb_platform_root(parent, error) : NULL;
+    free(parent);
+    if (!root) { free(*relative); *relative = NULL; }
+    return root;
+}
+
+bool sb_platform_target_within(sb_root *root, sb_root *parent, const char *relative, sb_error *error) {
+    wchar_t *root_path=calloc(SB_PATH_CAP,sizeof(*root_path)),*parent_path=calloc(SB_PATH_CAP,sizeof(*parent_path)),*suffix=wide(relative);
+    DWORD a=root_path?GetFinalPathNameByHandleW(root->handle,root_path,SB_PATH_CAP,FILE_NAME_NORMALIZED|VOLUME_NAME_GUID):0;
+    DWORD b=parent_path?GetFinalPathNameByHandleW(parent->handle,parent_path,SB_PATH_CAP,FILE_NAME_NORMALIZED|VOLUME_NAME_GUID):0;
+    bool valid=a && a<SB_PATH_CAP && b && b<SB_PATH_CAP && suffix && relative_path(suffix);
+    size_t length=valid?wcslen(root_path):0,capacity=valid?wcslen(parent_path)+wcslen(suffix)+2:0;
+    wchar_t *target=capacity<SB_PATH_CAP && capacity?calloc(capacity,sizeof(*target)):NULL;
+    if(target)swprintf(target,capacity,L"%ls%ls%ls",parent_path,*suffix?L"\\":L"",suffix);
+    while(length && root_path[length-1]==L'\\')--length;
+    bool inside=target && wcslen(target)>=length && CompareStringOrdinal(target,(int)length,root_path,(int)length,FALSE)==CSTR_EQUAL && (!target[length] || target[length]==L'\\');
+    if(!valid || !target)sb_fail(error,"Cannot classify physical account path.");
+    free(root_path);free(parent_path);free(suffix);free(target);return inside;
+}
+
+static bool version_update(sb_file *file,char digest[65],sb_error *error) {
+    FILE_ID_INFO id = {0}; FILE_BASIC_INFO basic = {0};
+    bool ok = GetFileInformationByHandleEx(file->handle, FileIdInfo, &id, sizeof(id)) &&
+        GetFileInformationByHandleEx(file->handle, FileBasicInfo, &basic, sizeof(basic));
+    char identity[96] = {0}, tuple[512];
+    if (ok) {
+        snprintf(identity, sizeof(identity), "%016llx:", (unsigned long long)id.VolumeSerialNumber);
+        for (size_t i = 0; i < 16; ++i) snprintf(identity + 17 + i * 2, 3, "%02x", id.FileId.Identifier[i]);
+        char path_hash[65]; ok = sb_platform_sha256(file->path, wcslen(file->path) * sizeof(wchar_t), path_hash, error);
+        int n = snprintf(tuple, sizeof(tuple), "%s|%s|%s|%llu|%llu|%llu|%lu", digest, path_hash, identity,
+            (unsigned long long)file->size, (unsigned long long)basic.LastWriteTime.QuadPart,
+            (unsigned long long)basic.ChangeTime.QuadPart, basic.FileAttributes);
+        if (ok) ok = n > 0 && sb_platform_sha256(tuple, (size_t)n, digest, error);
+    }
+    return ok;
+}
+bool sb_platform_file_version(sb_file *file,char version[65],sb_error *error) {
+    memset(version,0,65);return file && version_update(file,version,error);
+}
+static bool version_walk(sb_root *root, const char *path, bool directory, bool recursive,
+    unsigned depth, unsigned *objects, char digest[65], sb_error *error) {
+    if (++*objects > 1000 || depth > 16) { sb_fail(error, "Approval snapshot exceeds 1000 objects or 16 levels."); return false; }
+    sb_file *file = sb_platform_open(root, path, directory, error);
+    if (!file) return false;
+    bool ok=version_update(file,digest,error);char tuple[512];
+    if (ok && directory) {
+        sb_entry *entries = NULL; size_t count = 0; bool more = false;
+        ok = sb_platform_list(file, 0, 1000, &entries, &count, &more, error) && !more;
+        if (more) sb_fail(error, "Approval directory snapshot exceeds 1000 objects.");
+        for (size_t i = 0; ok && i < count; ++i) {
+            sb_entry *entry = &entries[i];
+            /* The list itself binds link names, but never follows their targets. */
+            size_t capacity = strlen(path) + strlen(entry->name) + 2;
+            char *child = malloc(capacity);
+            if (!child) { ok = false; break; }
+            snprintf(child, capacity, "%s/%s", path, entry->name);
+            if (!entry->reparse && (!entry->directory || recursive))
+                ok = version_walk(root, child, entry->directory, recursive, depth + 1, objects, digest, error);
+            else {
+                char name_hash[65];
+                ok = sb_platform_sha256(child, strlen(child), name_hash, error);
+                int n = snprintf(tuple, sizeof(tuple), "%s|%s|%llu|%u|%u", digest, name_hash,
+                    (unsigned long long)entry->size, entry->directory, entry->reparse);
+                if (ok) ok = sb_platform_sha256(tuple, (size_t)n, digest, error);
+            }
+            free(child);
+        }
+        sb_platform_entries_free(entries, count);
+    }
+    sb_platform_close(file);
+    if (!ok && !*error->text) sb_fail(error, "Cannot snapshot physical approval target.");
+    return ok;
+}
+
+bool sb_platform_target_version(sb_root *root, const char *relative, bool directory,
+    bool create, bool recursive, char version[65], sb_error *error) {
+    memset(version, 0, 65);
+    if (create) {
+        sb_create *plan = sb_platform_prepare_create(root, relative, error);
+        bool ok=plan && sb_platform_create_version(plan,version,error);sb_platform_create_close(plan);return ok;
+    }
+    unsigned objects = 0;
+    return version_walk(root, relative, directory, recursive, 0, &objects, version, error);
+}
+
 char *sb_platform_default_data_dir(sb_error *error) {
     PWSTR local = NULL;
     if (FAILED(SHGetKnownFolderPath(&FOLDERID_LocalAppData, 0, NULL, &local))) {
@@ -474,6 +574,17 @@ bool sb_platform_sha256(const void *bytes, size_t length, char hex[65], sb_error
     for (size_t i = 0; i < sizeof(digest); ++i) snprintf(hex + i * 2, 3, "%02x", digest[i]);
     return true;
 }
+bool sb_platform_file_sha256(sb_file *file,char hex[65],sb_error *error) {
+    BCRYPT_ALG_HANDLE algorithm=NULL;BCRYPT_HASH_HANDLE hash=NULL;unsigned char digest[32],*buffer=malloc(SB_TEXT_LIMIT);
+    bool ok=file && file->size<=268435456 && buffer && BCryptOpenAlgorithmProvider(&algorithm,BCRYPT_SHA256_ALGORITHM,NULL,0)==0 &&
+        BCryptCreateHash(algorithm,&hash,NULL,0,NULL,0,0)==0;
+    uint64_t offset=0;
+    while(ok && offset<file->size){size_t got=0;ok=sb_platform_read(file,offset,buffer,SB_TEXT_LIMIT,&got,error) && got>0 && BCryptHashData(hash,buffer,(ULONG)got,0)==0;offset+=got;}
+    if(ok)ok=BCryptFinishHash(hash,digest,sizeof(digest),0)==0;
+    if(hash)BCryptDestroyHash(hash);if(algorithm)BCryptCloseAlgorithmProvider(algorithm,0);free(buffer);
+    if(!ok){sb_fail(error,"Cannot hash a pinned program within the 256 MiB runtime limit.");return false;}
+    for(size_t i=0;i<sizeof(digest);++i)snprintf(hex+i*2,3,"%02x",digest[i]);return true;
+}
 
 sb_create *sb_platform_prepare_create(sb_root *root, const char *relative, sb_error *error) {
     size_t relative_length = strlen(relative);
@@ -514,6 +625,11 @@ sb_create *sb_platform_prepare_create(sb_root *root, const char *relative, sb_er
 }
 const char *sb_platform_create_target(sb_create *plan) { return plan->target; }
 const char *sb_platform_create_identity(sb_create *plan) { return plan->identity; }
+bool sb_platform_create_version(sb_create *plan,char version[65],sb_error *error) {
+    size_t capacity=strlen(plan->target)+strlen(plan->identity)+32;char *tuple=malloc(capacity);
+    int n=tuple?snprintf(tuple,capacity,"%zu:%s|%s",strlen(plan->target),plan->target,plan->identity):-1;
+    bool ok=n>=0 && sb_platform_sha256(tuple,(size_t)n,version,error);free(tuple);return ok;
+}
 void sb_platform_create_close(sb_create *plan) {
     if (plan) { sb_platform_close(plan->parent); free(plan->leaf); free(plan->target); free(plan); }
 }
@@ -572,6 +688,9 @@ bool sb_platform_create_text(sb_create *plan, const char *text, size_t length, s
 }
 
 sb_modify *sb_platform_prepare_modify(sb_root *root, const char *relative, sb_error *error) {
+    return sb_platform_prepare_modify_guarded(root,relative,NULL,error);
+}
+sb_modify *sb_platform_prepare_modify_guarded(sb_root *root, const char *relative, const char *version,sb_error *error) {
     sb_create *location = sb_platform_prepare_create(root, relative, error);
     if (!location) return NULL;
     typedef NTSTATUS (NTAPI *create_fn)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PIO_STATUS_BLOCK,
@@ -601,6 +720,9 @@ sb_modify *sb_platform_prepare_modify(sb_root *root, const char *relative, sb_er
     sb_modify *plan = valid ? calloc(1, sizeof(*plan)) : NULL;
     if (!plan) { CloseHandle(handle); sb_platform_create_close(location); sb_fail(error, "Modification requires a regular single-link file of at most 64 KiB."); return NULL; }
     plan->location = location; plan->handle = handle; plan->length = basic.nFileSizeLow;
+    if(version){char actual_version[65];if(!sb_platform_modify_version(plan,actual_version,error) || strcmp(actual_version,version)) {
+        sb_platform_modify_close(plan);sb_fail(error,"Physical target changed before exclusive edit; original bytes were not read.");return NULL;
+    }}
     plan->original = calloc(plan->length + 1, 1);
     DWORD got = 0;
     if (!plan->original || !ReadFile(handle, plan->original, (DWORD)plan->length, &got, NULL) || got != plan->length) {
@@ -614,6 +736,10 @@ sb_modify *sb_platform_prepare_modify(sb_root *root, const char *relative, sb_er
 const char *sb_platform_modify_target(sb_modify *plan) { return plan->location->target; }
 const char *sb_platform_modify_parent(sb_modify *plan) { return plan->location->identity; }
 const char *sb_platform_modify_identity(sb_modify *plan) { return plan->identity; }
+bool sb_platform_modify_version(sb_modify *plan,char version[65],sb_error *error) {
+    sb_file file={0};file.handle=plan->handle;file.path=wide(plan->location->target);file.size=plan->length;
+    bool ok=file.path && sb_platform_file_version(&file,version,error);free(file.path);return ok;
+}
 const char *sb_platform_modify_original(sb_modify *plan, size_t *length) { *length = plan->length; return plan->original; }
 void sb_platform_modify_close(sb_modify *plan) {
     if (plan) { CloseHandle(plan->handle); sb_platform_create_close(plan->location); free(plan->original); free(plan); }

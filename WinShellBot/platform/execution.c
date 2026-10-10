@@ -6,6 +6,7 @@
 #include "sb.h"
 #include "execution.h"
 #include "task_process.h"
+#include "sandbox.h"
 
 
 /* A 16 KiB UTF-8 page can expand to six JSON bytes per control byte,
@@ -28,6 +29,9 @@ typedef struct {
 } identity;
 
 struct sb_execution {
+    const sb_project *project;
+    sb_win_sandbox *sandbox;
+    char sandbox_error[256];
     bool configured, restricted_prepared, restricted_owner_rejected;
     bool agent_started, agent_healthy;
     sb_execution_profile profile;
@@ -274,6 +278,30 @@ failed:
     sb_execution_free(execution); return NULL;
 }
 
+bool sb_execution_restricted_verified(sb_execution *execution) { return execution && execution->sandbox != NULL && execution->tasks != NULL; }
+bool sb_execution_program_permitted(sb_execution *execution,const char *executable) {
+    if(!execution || !execution->sandbox)return true;
+    int n=executable?MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,executable,-1,NULL,0):0;
+    wchar_t *path=n?calloc((size_t)n,sizeof(*path)):NULL;
+    if(path)MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,executable,-1,path,n);
+    bool allowed=path && sb_win_sandbox_program(execution->sandbox,path);free(path);return allowed;
+}
+void sb_execution_prepare_project(sb_execution *execution,sb_host *host) {
+    if(!execution || !host->project || host->project->legacy_compatibility)return;
+    execution->project=host->project;
+    if(!host->project->enabled ||
+        !host->project->policy.execution_enabled || host->project->policy.default_identity!=SB_ID_RESTRICTED)return;
+    execution->configured=true;execution->profile=SB_EXEC_CONTROLLED;host->config.execution_profile=SB_EXEC_CONTROLLED;
+    sb_error error={0};
+    execution->sandbox=sb_win_sandbox_new(host,execution->instance,&error);
+    if(execution->sandbox) {
+        execution->tasks=sb_win_tasks_new_limited(SB_EXEC_USER,&host->config.limits);
+        if(execution->tasks){sb_win_tasks_restrict(execution->tasks,execution->sandbox);execution->restricted_prepared=true;execution->restricted_owner_rejected=true;}
+        else {sb_win_sandbox_free(execution->sandbox);execution->sandbox=NULL;sb_fail(&error,"Cannot initialize sandbox task receipts.");}
+    }
+    if(!execution->sandbox)snprintf(execution->sandbox_error,sizeof(execution->sandbox_error),"%s",*error.text?error.text:"Restricted backend initialization failed.");
+}
+
 void sb_execution_free(sb_execution *execution) {
     if (!execution) return;
     if (execution->pipe) {
@@ -286,6 +314,7 @@ void sb_execution_free(sb_execution *execution) {
     }
     if (execution->process) { WaitForSingleObject(execution->process, 3500); CloseHandle(execution->process); }
     sb_win_tasks_free(execution->tasks);
+    sb_win_sandbox_free(execution->sandbox);
     if (execution->restricted_token) CloseHandle(execution->restricted_token);
     sb_platform_mutex_free(execution->mutex);
     free(execution);
@@ -305,7 +334,7 @@ bool sb_execution_task_owned(sb_execution *execution, const char *actor, const c
 bool sb_execution_available(sb_execution *execution) {
     if (!execution) return false;
     sb_platform_mutex_lock(execution->mutex);
-    bool ok=execution->configured && ((execution->profile==SB_EXEC_USER && execution->tasks) ||
+    bool ok=execution->configured && (((execution->profile==SB_EXEC_USER || execution->sandbox) && execution->tasks) ||
         (execution->profile==SB_EXEC_ADMINISTRATOR && execution->agent_healthy && WaitForSingleObject(execution->process,0)==WAIT_TIMEOUT));
     sb_platform_mutex_unlock(execution->mutex);return ok;
 }
@@ -313,8 +342,8 @@ char *sb_execution_task(sb_execution *execution,const char *name,yyjson_val *arg
     if (!execution) { sb_fail(error,"Execution state unavailable.");return NULL; }
     sb_platform_mutex_lock(execution->mutex); char *reply=NULL;
     if (!execution->configured) sb_fail(error,"Command execution is disabled in local configuration.");
-    else if (execution->profile==SB_EXEC_CONTROLLED) sb_fail(error,"Controlled command execution is unavailable until its isolation and approval backend is verified.");
-    else if (execution->profile==SB_EXEC_USER) reply=sb_win_tasks_call(execution->tasks,name,arguments);
+    else if (execution->profile==SB_EXEC_CONTROLLED && !execution->sandbox) sb_fail(error,"Controlled command execution is unavailable until its isolation and approval backend is verified.");
+    else if (execution->profile==SB_EXEC_USER || execution->sandbox) reply=sb_win_tasks_call(execution->tasks,name,arguments);
     else if (!execution->agent_healthy || WaitForSingleObject(execution->process,0)!=WAIT_TIMEOUT) sb_fail(error,"Administrator agent unavailable; no automatic restart or fallback.");
     else {
         yyjson_mut_doc *doc=yyjson_mut_doc_new(NULL);
@@ -361,16 +390,24 @@ yyjson_mut_val *sb_execution_status(sb_execution *execution, yyjson_mut_doc *doc
     yyjson_mut_obj_add_bool(doc, result, "command_execution_available", available);
     yyjson_mut_obj_add_bool(doc, result, "task_tools_available", available);
     yyjson_mut_obj_add_bool(doc, result, "remote_approval_available", false);
-    yyjson_mut_obj_add_bool(doc, result, "controlled_isolation_verified", false);
+    yyjson_mut_obj_add_bool(doc, result, "controlled_isolation_verified", execution->sandbox != NULL);
+    if(*execution->sandbox_error)yyjson_mut_obj_add_strcpy(doc,result,"restricted_unavailable_reason",execution->sandbox_error);
+    if(execution->sandbox) {
+        yyjson_mut_obj_add_str(doc,result,"restricted_backend","Windows LPAC, exact readonly runtime resources, per-instance directory grants");
+        yyjson_mut_obj_add_bool(doc,result,"network_available",false);yyjson_mut_obj_add_bool(doc,result,"desktop_available",false);
+        yyjson_mut_obj_add_bool(doc,result,"child_processes_allowed",false);
+    }
     yyjson_mut_obj_add_bool(doc, result, "restricted_token_prepared", execution->restricted_prepared);
     yyjson_mut_obj_add_bool(doc, result, "restricted_owner_rejected", execution->restricted_owner_rejected);
-    yyjson_mut_obj_add_str(doc, result, "approval_mode", execution->profile == SB_EXEC_CONTROLLED ?
+    yyjson_mut_obj_add_str(doc, result, "approval_mode", execution->project ?
+        (execution->project->policy.approval_mode==SB_PROJECT_NEVER ? "never" : execution->project->policy.approval_mode==SB_PROJECT_WORKSPACE_AUTO ? "workspace_auto" : "always") : execution->profile == SB_EXEC_CONTROLLED ?
         (execution->approval == SB_APPROVAL_RULES ? "rules" : "always") : "preauthorized");
     yyjson_mut_obj_add_str(doc, result, "readiness", !execution->configured ? "disabled" : available ? "ready" : "unavailable");
-    if (!available) yyjson_mut_obj_add_str(doc,result,"unavailable_reason",!execution->configured ? "Command tasks are disabled in local configuration." : execution->profile==SB_EXEC_CONTROLLED ? "Complete controlled isolation and task approval are not implemented." : "Administrator agent unavailable.");
-    yyjson_mut_obj_add_uint(doc,result,"max_task_records",32);
-    yyjson_mut_obj_add_uint(doc,result,"max_active_tasks",8);
-    yyjson_mut_obj_add_uint(doc,result,"max_output_bytes_per_stream",262144);
+    if (!available) yyjson_mut_obj_add_strcpy(doc,result,"unavailable_reason",!execution->configured ? "Command tasks are disabled in local configuration." :
+        *execution->sandbox_error ? execution->sandbox_error : execution->profile==SB_EXEC_CONTROLLED ? "Complete controlled isolation and task approval are not implemented." : "Administrator agent unavailable.");
+    yyjson_mut_obj_add_uint(doc,result,"max_task_records",execution->project?execution->project->limits.task_records:32);
+    yyjson_mut_obj_add_uint(doc,result,"max_active_tasks",execution->project?execution->project->limits.active_tasks:8);
+    yyjson_mut_obj_add_uint(doc,result,"max_output_bytes_per_stream",execution->project?execution->project->limits.output_bytes:262144);
     yyjson_mut_obj_add_val(doc, result, "host_identity", identity_json(doc, &execution->host));
     yyjson_mut_obj_add_bool(doc, result, "administrator_agent_started", execution->agent_started);
     yyjson_mut_obj_add_bool(doc, result, "administrator_agent_alive", execution->agent_healthy);

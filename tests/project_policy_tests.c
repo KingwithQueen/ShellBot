@@ -144,6 +144,14 @@ int main(int argc, char **argv) {
     CHECK(sb_project_evaluate(&context, &operation).decision == SB_DECISION_DENY, "ordinary identity cannot replace restricted execution");
     operation.identity = SB_ID_RESTRICTED;
     CHECK(!strcmp(sb_project_evaluate(&context, &operation).reason, "restricted_backend_unverified"), "never cannot enable unfinished sandbox");
+    operation.restricted_backend_verified=true;
+    CHECK(sb_project_evaluate(&context,&operation).decision==SB_DECISION_ALLOW,"verified restricted backend obeys never within configured scope");
+    project->policy.approval_mode=SB_PROJECT_WORKSPACE_AUTO;
+    CHECK(sb_project_evaluate(&context,&operation).decision==SB_DECISION_PENDING,"verified restricted commands still require workspace_auto approval");
+    project->directories[0].read_only=true;
+    CHECK(sb_project_evaluate(&context,&operation).decision==SB_DECISION_PENDING,"verified restricted token enforces readonly without pretending account isolation");
+    project->directories[0].read_only=false;project->policy.approval_mode=SB_PROJECT_NEVER;
+    operation.restricted_backend_verified=false;
     context.project = scoped;
     operation.directory = &scoped->directories[0];
     CHECK(!strcmp(sb_project_evaluate(&context, &operation).reason, "restricted_backend_unverified"), "configured scoped project backend remains closed");

@@ -20,6 +20,9 @@ if ($Platform -eq 'x64') {
     $gatewayReport = Join-Path $repoRoot "build\validation\$Platform-$Configuration-m3.json"
     & $interpreter.Source (Join-Path $repoRoot 'tests\gateway_checks.py') --exe $executable --report $gatewayReport
     if ($LASTEXITCODE -ne 0) { throw "Gateway validation failed ($LASTEXITCODE). Report: $gatewayReport" }
+    $approvalReport = Join-Path $repoRoot "build\validation\$Platform-$Configuration-m4.json"
+    & $interpreter.Source (Join-Path $repoRoot 'tests\approval_checks.py') --exe $executable --report $approvalReport
+    if ($LASTEXITCODE -ne 0) { throw "Approval and restricted execution validation failed ($LASTEXITCODE). Report: $approvalReport" }
 }
 $suffix = if ($SkipCloseProbe) { '-core' } else { '-full' }
 $report = Join-Path $repoRoot "build\validation\$Platform-$Configuration$suffix.json"

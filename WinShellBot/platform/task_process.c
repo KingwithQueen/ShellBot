@@ -3,6 +3,7 @@
 #include "sb.h"
 #include "execution.h"
 #include "task_process.h"
+#include "sandbox.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -23,7 +24,7 @@ typedef struct task {
     const char *reason;
     task_input inputs[INPUT_RECORDS]; size_t input_count;
 } task;
-struct sb_win_tasks { SRWLOCK lock; task *items[TASK_RECORDS]; HANDLE stop, monitor; sb_execution_profile profile; bool elevated; sb_resource_limits limits; };
+struct sb_win_tasks { SRWLOCK lock; task *items[TASK_RECORDS]; HANDLE stop, monitor; sb_execution_profile profile; bool elevated; sb_resource_limits limits; sb_win_sandbox *sandbox; };
 typedef struct { task *item; unsigned stream; } reader_context;
 
 static char *serialize(yyjson_mut_doc *doc, yyjson_mut_val *root) {
@@ -189,6 +190,7 @@ void sb_win_tasks_free(sb_win_tasks *tasks) {
     SetEvent(tasks->stop); WaitForSingleObject(tasks->monitor, INFINITE); CloseHandle(tasks->monitor); CloseHandle(tasks->stop);
     for (size_t i = 0; i < TASK_RECORDS; ++i) task_free(tasks->items[i]); free(tasks);
 }
+void sb_win_tasks_restrict(sb_win_tasks *tasks, sb_win_sandbox *sandbox) { tasks->sandbox=sandbox;tasks->profile=SB_EXEC_CONTROLLED; }
 static yyjson_mut_val *snapshot(sb_win_tasks *tasks, task *item, yyjson_mut_doc *doc) {
     yyjson_mut_val *result = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_strcpy(doc, result, "task_id", item->id);
@@ -196,6 +198,7 @@ static yyjson_mut_val *snapshot(sb_win_tasks *tasks, task *item, yyjson_mut_doc 
     yyjson_mut_obj_add_strcpy(doc, result, "request_sha256", item->hash);
     yyjson_mut_obj_add_str(doc, result, "profile", sb_execution_profile_name(tasks->profile));
     yyjson_mut_obj_add_bool(doc, result, "elevated", tasks->elevated);
+    if(tasks->sandbox){yyjson_mut_obj_add_bool(doc,result,"appcontainer",true);yyjson_mut_obj_add_bool(doc,result,"less_privileged_appcontainer",true);yyjson_mut_obj_add_bool(doc,result,"child_processes_allowed",false);}
     yyjson_mut_obj_add_uint(doc, result, "process_id", item->pid);
     yyjson_mut_obj_add_str(doc, result, "status", item->finished ? (item->reason ? item->reason : "completed") : "running");
     if (item->finished) yyjson_mut_obj_add_uint(doc, result, "exit_code", item->exit_code);
@@ -232,7 +235,7 @@ static char *start(sb_win_tasks *tasks, yyjson_val *args) {
     }
     if (slot >= tasks->limits.task_records || active >= tasks->limits.active_tasks) return fail("Task record or active process budget reached; records are never silently evicted.");
     wchar_t *exe = to_wide(executable), *directory = to_wide(cwd), *line = calloc(32768,sizeof(wchar_t)), *env = environment(token_env); size_t used = 0;
-    bool valid = absolute_exe(exe) && directory && line && env && quote(line,&used,exe);
+    bool valid = absolute_exe(exe) && directory && line && env && (!tasks->sandbox || sb_win_sandbox_program(tasks->sandbox,exe)) && quote(line,&used,exe);
     size_t idx,max; yyjson_val *argument;
     yyjson_arr_foreach(argv,idx,max,argument) { wchar_t *wide = to_wide(sb_string(argument)); valid = valid && wide && quote(line,&used,wide); free(wide); }
     if (!valid) { free(exe); free(directory); free(line); free(env); return fail("Executable must be an absolute local .exe path; arguments must be bounded Unicode strings."); }
@@ -247,18 +250,23 @@ static char *start(sb_win_tasks *tasks, yyjson_val *args) {
     ok = ok && item->bytes[0] && item->bytes[1] && CreatePipe(&child_input,&item->input,&security,4096) && SetHandleInformation(item->input,HANDLE_FLAG_INHERIT,0);
     for(unsigned i=0;ok && i<2;++i) ok=CreatePipe(&item->output[i],&child_output[i],&security,4096) && SetHandleInformation(item->output[i],HANDLE_FLAG_INHERIT,0);
     item->job=CreateJobObjectW(NULL,NULL); item->input_event=CreateEventW(NULL,FALSE,FALSE,NULL);
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits={0}; limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE|JOB_OBJECT_LIMIT_ACTIVE_PROCESS; limits.BasicLimitInformation.ActiveProcessLimit=64;
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits={0}; limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE|JOB_OBJECT_LIMIT_ACTIVE_PROCESS; limits.BasicLimitInformation.ActiveProcessLimit=tasks->sandbox?1:64;
     ok=ok && item->job && item->input_event && SetInformationJobObject(item->job,JobObjectExtendedLimitInformation,&limits,sizeof(limits));
-    SIZE_T attribute_size=0; InitializeProcThreadAttributeList(NULL,1,0,&attribute_size);
+    DWORD attribute_count=tasks->sandbox?5:1;
+    SIZE_T attribute_size=0; InitializeProcThreadAttributeList(NULL,attribute_count,0,&attribute_size);
     LPPROC_THREAD_ATTRIBUTE_LIST attributes=attribute_size?malloc(attribute_size):NULL;
-    bool initialized=attributes && InitializeProcThreadAttributeList(attributes,1,0,&attribute_size);
+    bool initialized=attributes && InitializeProcThreadAttributeList(attributes,attribute_count,0,&attribute_size);
     HANDLE inherited[]={child_input,child_output[0],child_output[1]};
     ok=ok && initialized && UpdateProcThreadAttribute(attributes,0,PROC_THREAD_ATTRIBUTE_HANDLE_LIST,inherited,sizeof(inherited),NULL,NULL);
+    if(ok && tasks->sandbox)ok=sb_win_sandbox_attributes(tasks->sandbox,attributes);
     STARTUPINFOEXW startup={0}; startup.StartupInfo.cb=sizeof(startup); startup.StartupInfo.dwFlags=STARTF_USESTDHANDLES; startup.StartupInfo.hStdInput=child_input; startup.StartupInfo.hStdOutput=child_output[0]; startup.StartupInfo.hStdError=child_output[1]; startup.lpAttributeList=attributes;
     PROCESS_INFORMATION process={0};
-    ok=ok && CreateProcessW(exe,line,NULL,NULL,TRUE,CREATE_SUSPENDED|CREATE_NO_WINDOW|CREATE_UNICODE_ENVIRONMENT|EXTENDED_STARTUPINFO_PRESENT,env,directory,&startup.StartupInfo,&process);
+    unsigned phase=1;
+    ok=ok && CreateProcessW(exe,line,NULL,NULL,TRUE,CREATE_SUSPENDED|(tasks->sandbox?DETACHED_PROCESS:CREATE_NO_WINDOW)|CREATE_UNICODE_ENVIRONMENT|EXTENDED_STARTUPINFO_PRESENT,env,directory,&startup.StartupInfo,&process);
     if(process.hProcess) { item->process=process.hProcess; item->pid=process.dwProcessId; }
-    if(ok) ok=AssignProcessToJobObject(item->job,item->process)!=FALSE;
+    if(ok){phase=2;ok=AssignProcessToJobObject(item->job,item->process)!=FALSE;}
+    if(ok && tasks->sandbox){phase=3;ok=sb_win_sandbox_token(tasks->sandbox,item->process);}
+    DWORD native_error=GetLastError();
     if(initialized) DeleteProcThreadAttributeList(attributes); free(attributes);
     if(child_input) CloseHandle(child_input); for(unsigned i=0;i<2;++i) if(child_output[i]) CloseHandle(child_output[i]);
     free(exe);free(directory);free(line);free(env);
@@ -269,7 +277,7 @@ static char *start(sb_win_tasks *tasks, yyjson_val *args) {
     item->started=sb_platform_millis();
     if(ok) ok=ResumeThread(process.hThread)!=(DWORD)-1;
     if(process.hThread) CloseHandle(process.hThread);
-    if(!ok) { if(item->process) TerminateProcess(item->process,125); task_free(item); return fail("Cannot create and contain the task process. No uncontained process is resumed."); }
+    if(!ok) { if(item->process) TerminateProcess(item->process,125); task_free(item);char message[192];snprintf(message,sizeof(message),"Cannot create and contain task (phase %u, Windows error %lu). No uncontained process is resumed.",phase,native_error);return fail(message); }
     tasks->items[slot]=item;
     yyjson_mut_doc *doc=yyjson_mut_doc_new(NULL); if(!doc) return NULL;
     AcquireSRWLockExclusive(&item->lock); yyjson_mut_val *result=snapshot(tasks,item,doc); yyjson_mut_obj_add_bool(doc,result,"created_new",true); ReleaseSRWLockExclusive(&item->lock); return serialize(doc,result);

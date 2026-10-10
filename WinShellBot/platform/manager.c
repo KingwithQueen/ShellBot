@@ -4,6 +4,7 @@
 #include "sb_projects.h"
 #include "execution.h"
 #include "manager.h"
+#include "sandbox.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -121,6 +122,9 @@ static void reap(worker *w, const char *state) {
     if (w->pipe) CloseHandle(w->pipe);
     if (w->job) CloseHandle(w->job);
     w->process = w->pipe = w->job = NULL; w->state = state;
+    if(w->project && w->project->policy.default_identity==SB_ID_RESTRICTED) {
+        sb_error cleanup={0};if(!sb_win_sandbox_recover(w->project,&cleanup))w->state="cleanup_required";
+    }
 }
 static void refresh(manager *m, worker *w) {
     if (w->process && WaitForSingleObject(w->process, 0) != WAIT_TIMEOUT) {
@@ -155,6 +159,7 @@ static bool start_worker(manager *m, worker *w, sb_error *error) {
     refresh(m, w);
     if (w->process) return true;
     if (!w->project->enabled) { sb_fail(error, "Project is disabled."); return false; }
+    if(w->project->policy.default_identity==SB_ID_RESTRICTED && !sb_win_sandbox_recover(w->project,error))return false;
     if (!sb_audit_project(m->audit, "project_start_intent", w->project->id, w->project->policy_revision, w->pid)) {
         sb_fail(error, "Manager audit unavailable; project startup blocked."); return false;
     }
@@ -456,6 +461,16 @@ static bool preflight(manager *m, const char *data_dir, const char *bytes, size_
        including aliases. Account-trust projects retain their declared scope. */
     for (size_t i = 0; i < m->registry.project_count; ++i) {
         const sb_project *project = &m->registry.projects[i];
+        for(size_t j=0;j<project->policy.runtime_file_count;++j) {
+            char *relative=NULL;sb_root *parent=sb_platform_account_parent(project->policy.runtime_files[j],&relative,error);
+            if(!parent){free(relative);goto done;}
+            bool conflict=sb_platform_target_within(m->data_root,parent,relative,error);
+            for(size_t k=0;!conflict && k<m->registry.project_count;++k)
+                conflict=sb_platform_target_within(m->workers[k].data_root,parent,relative,error);
+            sb_platform_root_close(parent);free(relative);
+            if(*error->text)goto done;
+            if(conflict){sb_fail(error,"Restricted runtime resources overlap protected manager/project Data.");goto done;}
+        }
         if (project->policy.file_scope != SB_FILES_CONFIGURED) continue;
         for (size_t j = 0; j < project->directory_count; ++j) {
             sb_root *directory = sb_platform_root(project->directories[j].path, error);
@@ -474,7 +489,10 @@ done:
     yyjson_doc_free(source); return ok;
 }
 static int run_manager(const char *source, const char *data, bool http) {
-    sb_error error = {0}; size_t length = 0; char *bytes = sb_platform_load_config(source, &length, &error);
+    sb_error error = {0};size_t length=0;wchar_t *source_name=wide(source);
+    HANDLE source_pin=source_name?CreateFileW(source_name,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL):INVALID_HANDLE_VALUE;
+    free(source_name);
+    char *bytes=source_pin!=INVALID_HANDLE_VALUE?sb_platform_load_config(source,&length,&error):NULL;
     manager *m = calloc(1, sizeof(*m)); int code = 2;
     if (!m || !bytes || !preflight(m, data, bytes, length, &error)) goto done;
     m->stop = CreateEventW(NULL, TRUE, FALSE, NULL); if (!m->stop) goto done;
@@ -513,6 +531,7 @@ done:
         sb_config_free(&m->gateway_config);
         sb_projects_free(&m->registry); free(m);
     }
+    if(source_pin!=INVALID_HANDLE_VALUE)CloseHandle(source_pin);
     if (code) fprintf(stderr, "ShellBot: %s\n", *error.text ? error.text : "Manager startup failed.");
     return code;
 }
@@ -543,7 +562,7 @@ int sb_project_worker(int argc, wchar_t **argv) {
         sb_request_context ctx = {.actor = "manager-owner", .project = project, .policy_revision = project->policy_revision};
         const sb_project_directory *cwd = sb_project_directory_find(project, project->default_workspace_id);
         sb_project_operation op = {.tool = "task_start", .directory = cwd, .identity = SB_ID_CURRENT_USER};
-        host.config.execution_enabled = sb_project_evaluate(&ctx, &op).decision == SB_DECISION_ALLOW;
+        host.config.execution_enabled = sb_project_evaluate(&ctx, &op).decision != SB_DECISION_DENY;
     }
     host.lease = host.config.data_dir && data_identity ? sb_platform_lease_bound(host.config.data_dir, data_identity, &error) : NULL;
     if (!host.lease) goto done;
@@ -557,6 +576,7 @@ int sb_project_worker(int argc, wchar_t **argv) {
         }
     }
     host.execution = sb_execution_new(&host.config, &error); if (!host.execution) goto done;
+    sb_execution_prepare_project(host.execution,&host);
     host.audit = sb_audit_new(host.lease, host.config.audit_max_bytes, &error); if (!host.audit) goto done;
     host.policy = sb_policy_new(host.config.approval_ttl_seconds, host.audit, &error); if (!host.policy) goto done;
     sb_policy_limit(host.policy, host.config.limits.approval_records);

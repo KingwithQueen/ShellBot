@@ -1,4 +1,5 @@
 #include "sb.h"
+#include "sb_projects.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -6,7 +7,7 @@
 #define RECORD_LIMIT 64
 typedef enum { PENDING, APPROVED, RUNNING, COMPLETED, DENIED, EXPIRED, FAILED } state;
 typedef struct {
-    char id[33], digest[65], hash[65], actor[32], workspace[64];
+    char id[33], digest[65], hash[65], actor[64], workspace[64];
     char *target, *identity, *text, *original;
     char tool[16], operation[16], original_hash[65], file_identity[96], backup_id[33];
     size_t bytes;
@@ -14,6 +15,10 @@ typedef struct {
     state status;
     bool audit_warning;
     char error[256];
+    char project[64], instance[33], version[65];
+    char *cached;
+    uint64_t revision, next_offset, last_offset, budget, used, charge;
+    bool logical, pageable;
 } record;
 struct sb_policy { sb_mutex *mutex; sb_audit *audit; unsigned ttl, record_limit; record records[RECORD_LIMIT]; };
 
@@ -21,7 +26,7 @@ static const char *state_name(state status) {
     static const char *const names[] = {"pending", "approved", "running", "completed", "denied", "expired", "failed"};
     return names[status];
 }
-static void clear(record *r) { free(r->target); free(r->identity); free(r->text); free(r->original); memset(r, 0, sizeof(*r)); }
+static void clear(record *r) { free(r->target); free(r->identity); free(r->text); free(r->original); free(r->cached); memset(r, 0, sizeof(*r)); }
 static bool audit_record(sb_policy *policy, record *r, const char *event, const char *actor) {
     bool ok = sb_audit_append(policy->audit, event, actor, r->id, r->workspace, r->target, r->hash, r->bytes,
         *r->tool ? r->tool : NULL, *r->operation ? r->operation : NULL,
@@ -29,8 +34,11 @@ static bool audit_record(sb_policy *policy, record *r, const char *event, const 
     if (!ok) r->audit_warning = true;
     return ok;
 }
+static bool logical_read(const record *r) {
+    return r->logical && ((!strncmp(r->tool,"fs_",3) && strcmp(r->tool,"fs_write") && strcmp(r->tool,"fs_patch")) || !strcmp(r->tool,"image_view"));
+}
 static void expire(sb_policy *policy, record *r) {
-    if ((r->status == PENDING || r->status == APPROVED) && sb_platform_millis() >= r->deadline) {
+    if ((r->status == PENDING || r->status == APPROVED || (r->status==COMPLETED && logical_read(r))) && sb_platform_millis() >= r->deadline) {
         r->status = EXPIRED;
         audit_record(policy, r, "approval_expired", "host");
     }
@@ -51,13 +59,20 @@ static yyjson_mut_val *describe(yyjson_mut_doc *doc, record *r, bool full) {
     yyjson_mut_obj_add_strcpy(doc, data, "actor", r->actor);
     yyjson_mut_obj_add_strcpy(doc, data, "workspace_id", r->workspace);
     yyjson_mut_obj_add_strcpy(doc, data, "target", r->target);
-    yyjson_mut_obj_add_strcpy(doc, data, "sha256", r->hash);
+    yyjson_mut_obj_add_strcpy(doc, data, r->logical ? "operation_sha256" : "sha256", r->hash);
     yyjson_mut_obj_add_uint(doc, data, "bytes", r->bytes);
+    if (r->logical) {
+        yyjson_mut_obj_add_strcpy(doc, data, "project_id", r->project);
+        yyjson_mut_obj_add_uint(doc, data, "policy_revision", r->revision);
+        yyjson_mut_obj_add_strcpy(doc, data, "host_instance_id", r->instance);
+        yyjson_mut_obj_add_strcpy(doc, data, "target_version", r->version);
+        yyjson_mut_obj_add_uint(doc, data, "maximum_units", r->budget);
+        yyjson_mut_obj_add_uint(doc, data, "consumed_units", r->used);
+    }
     if (*r->tool) {
         yyjson_mut_obj_add_strcpy(doc, data, "tool", r->tool);
         yyjson_mut_obj_add_strcpy(doc, data, "operation", r->operation);
-        yyjson_mut_obj_add_strcpy(doc, data, "original_sha256", r->original_hash);
-        yyjson_mut_obj_add_bool(doc, data, "atomic_save", false);
+        if(!r->logical){yyjson_mut_obj_add_strcpy(doc, data, "original_sha256", r->original_hash);yyjson_mut_obj_add_bool(doc, data, "atomic_save", false);}
         if (*r->backup_id) yyjson_mut_obj_add_strcpy(doc, data, "backup_id", r->backup_id);
     }
     uint64_t now = sb_platform_millis();
@@ -89,6 +104,136 @@ void sb_policy_free(sb_policy *policy) {
         for (size_t i = 0; i < policy->record_limit; ++i) clear(&policy->records[i]);
         sb_platform_mutex_free(policy->mutex); free(policy);
     }
+}
+
+bool sb_policy_operation_begin(sb_host *host, const char *actor, const char *tool,
+    const char *parameters, const char *target, const char *version, const char *approval_id,
+    bool approval_required, uint64_t offset, uint64_t budget, yyjson_mut_doc *doc,
+    yyjson_mut_val **reply, char ticket[33]) {
+    sb_policy *policy = host->policy; record *r = NULL; sb_error error = {0};
+    *reply = NULL; *ticket = 0;
+    char digest[65];
+    if (!parameters || strlen(parameters) > SB_REQUEST_LIMIT || !actor || strlen(actor) >= 64 ||
+        !sb_platform_sha256(parameters, strlen(parameters), digest, &error)) {
+        *reply = error_data(doc, "Logical operation arguments exceed the approval budget."); return false;
+    }
+    sb_platform_mutex_lock(policy->mutex);
+    if (approval_id) {
+        r = find(policy, approval_id);
+        if (!r || !r->logical || strcmp(r->actor, actor) || strcmp(r->project, host->project->id) ||
+            r->revision != host->project->policy_revision || strcmp(r->instance, sb_execution_instance(host->execution)) ||
+            strcmp(r->tool, tool) || strcmp(r->digest, digest) || strcmp(r->target, target)) {
+            *reply = error_data(doc, "Approval does not match project, caller, instance or operation arguments."); goto blocked;
+        }
+    } else {
+        for (size_t i = 0; i < policy->record_limit; ++i) {
+            record *candidate = &policy->records[i];
+            if (candidate->logical && candidate->status!=DENIED && candidate->status!=EXPIRED && !strcmp(candidate->actor, actor) && !strcmp(candidate->tool, tool) &&
+                !strcmp(candidate->digest, digest) && !strcmp(candidate->target, target) &&
+                (!strcmp(candidate->version, version) || ((candidate->status==COMPLETED || candidate->status==FAILED) &&
+                    (!strcmp(tool,"fs_write") || !strcmp(tool,"fs_patch") || !strcmp(tool,"task_start"))))) {
+                r = candidate; break;
+            }
+        }
+    }
+    if (r) {
+        expire(policy, r);
+        bool reading=logical_read(r);
+        if(reading && sb_platform_millis()>=r->deadline){r->status=EXPIRED;*reply=describe(doc,r,false);goto blocked;}
+        if (reading && strcmp(r->version, version)) {
+            r->status = DENIED; audit_record(policy,r,"approval_target_changed",actor);
+            *reply = error_data(doc,"Approval target object or version changed; request a new approval."); goto blocked;
+        }
+        if ((r->status == COMPLETED || r->status == FAILED || r->status == APPROVED) && r->cached &&
+            (!r->pageable || offset == r->last_offset)) {
+            yyjson_doc *cached = yyjson_read(r->cached, strlen(r->cached), 0);
+            *reply = cached ? yyjson_val_mut_copy(doc, yyjson_doc_get_root(cached)) : error_data(doc, "Cached receipt is unavailable.");
+            if(cached && !strcmp(tool,"task_start")) {
+                yyjson_mut_val *data=yyjson_mut_obj_get(*reply,"structuredContent");
+                yyjson_mut_obj_remove_str(data,"created_new");yyjson_mut_obj_add_bool(doc,data,"created_new",false);
+                yyjson_mut_obj_add_bool(doc,data,"receipt_replayed",true);
+            }
+            yyjson_doc_free(cached); goto blocked;
+        }
+        if(reading && !r->pageable && r->status==COMPLETED && !r->cached) {
+            /* Large immutable image receipts are reproduced inside the original permit. */
+            if(!audit_record(policy,r,"operation_replayed",actor)){*reply=error_data(doc,"Audit unavailable; operation was not started.");goto blocked;}
+            r->status=RUNNING;r->charge=0;strcpy(ticket,r->id);
+            sb_platform_mutex_unlock(policy->mutex);return true;
+        }
+        if (r->status != APPROVED || sb_platform_millis() >= r->deadline) { *reply = describe(doc, r, false); goto blocked; }
+        if (strcmp(r->version, version)) { r->status = DENIED; audit_record(policy,r,"approval_target_changed",actor); *reply = error_data(doc, "Approval target object or version changed; request a new approval."); goto blocked; }
+        if (offset != r->next_offset || budget > r->budget - r->used) {
+            *reply = error_data(doc, "Approval page must continue at next_offset within the logical budget."); goto blocked;
+        }
+    } else {
+        if (!sb_audit_healthy(policy->audit)) { *reply = error_data(doc, "Audit unavailable; operation was not started."); goto blocked; }
+        for (size_t i = 0; i < policy->record_limit; ++i) if (!*policy->records[i].id) { r = &policy->records[i]; break; }
+        if (!r) { *reply = error_data(doc, "Approval record budget exhausted; restart the worker after reviewing receipts."); goto blocked; }
+        unsigned char nonce[16];
+        r->target = sb_strdup(target); r->identity = sb_strdup(version); r->text = sb_strdup(parameters);
+        if (!r->target || !r->identity || !r->text || !sb_platform_random(nonce, sizeof(nonce), &error)) {
+            clear(r); *reply = error_data(doc, "Cannot allocate logical approval."); goto blocked;
+        }
+        for (size_t i = 0; i < sizeof(nonce); ++i) snprintf(r->id + i * 2, 3, "%02x", nonce[i]);
+        strcpy(r->actor, actor); strcpy(r->project, host->project->id); strcpy(r->instance, sb_execution_instance(host->execution));
+        strcpy(r->tool, tool); strcpy(r->operation, "logical"); strcpy(r->digest, digest); strcpy(r->hash, digest); strcpy(r->version, version);
+        yyjson_doc *arguments=yyjson_read(parameters,strlen(parameters),0);
+        const char *workspace=sb_string(yyjson_obj_get(yyjson_doc_get_root(arguments),"workspace_id"));
+        snprintf(r->workspace,sizeof(r->workspace),"%s",workspace?workspace:!strncmp(tool,"task_",5)?"task":"current-user");yyjson_doc_free(arguments);
+        r->revision = host->project->policy_revision; r->logical = true;
+        r->pageable = !strcmp(tool,"fs_read") || !strcmp(tool,"fs_list");
+        r->budget = !strcmp(tool,"fs_read") ? 1048576 : !strcmp(tool,"fs_list") ? 1000 : budget;
+        r->next_offset = offset; r->deadline = sb_platform_millis() + (uint64_t)policy->ttl * 1000;
+        r->status = approval_required ? PENDING : APPROVED;
+        if (!audit_record(policy,r,approval_required ? "approval_requested" : "operation_authorized",actor)) {
+            clear(r); *reply = error_data(doc, "Cannot record operation authorization."); goto blocked;
+        }
+        if (approval_required) { *reply = describe(doc, r, false); yyjson_mut_obj_add_str(doc,*reply,"action","Inspect and approve with the local project owner, then retry with approval_id."); goto blocked; }
+    }
+    if (!audit_record(policy,r,"operation_started",actor)) { *reply = error_data(doc,"Audit unavailable; operation was not started."); goto blocked; }
+    r->status = RUNNING; r->last_offset = offset; r->charge = budget; strcpy(ticket,r->id);
+    sb_platform_mutex_unlock(policy->mutex); return true;
+blocked:
+    sb_platform_mutex_unlock(policy->mutex); return false;
+}
+
+void sb_policy_operation_finish(sb_policy *policy, const char *ticket, yyjson_mut_val *result) {
+    sb_platform_mutex_lock(policy->mutex);
+    record *r = find(policy, ticket);
+    if (r && r->logical && r->status == RUNNING) {
+        bool failed = !result || yyjson_mut_get_bool(yyjson_mut_obj_get(result,"isError"));
+        yyjson_mut_val *data = yyjson_mut_obj_get(result,"structuredContent");
+        uint64_t next = yyjson_mut_get_uint(yyjson_mut_obj_get(data,"next_offset"));
+        bool more = yyjson_mut_get_bool(yyjson_mut_obj_get(data,"truncated")) || yyjson_mut_get_bool(yyjson_mut_obj_get(data,"has_more"));
+        if (r->pageable && !failed && next >= r->last_offset) { r->used += next - r->last_offset; r->next_offset = next; }
+        else if (!failed) r->used += r->charge;
+        r->status = failed ? FAILED : r->pageable && more && r->used < r->budget ? APPROVED : COMPLETED;
+        size_t size = 0; char *cached = result ? yyjson_mut_val_write(result,0,&size) : NULL;
+        free(r->cached); r->cached = size <= 524288 ? cached : NULL;
+        if (!r->cached) free(cached);
+        audit_record(policy,r,failed ? "operation_failed" : "operation_completed",r->actor);
+    }
+    sb_platform_mutex_unlock(policy->mutex);
+}
+
+yyjson_mut_val *sb_policy_write_authorized(sb_host *host, const char *actor, sb_workspace *workspace,
+    const char *path, const char *text, yyjson_mut_doc *doc, bool *failed) {
+    *failed = true; sb_error error = {0}; char hash[65];
+    size_t size = strlen(text); char *decoded = NULL; size_t length, consumed; const char *encoding;
+    if (workspace->read_only || size > SB_TEXT_LIMIT || !sb_decode((const unsigned char *)text,size,true,"utf-8",true,&decoded,&length,&consumed,&encoding,&error)) {
+        free(decoded); return error_data(doc, workspace->read_only ? "Workspace is read-only." : *error.text ? error.text : "Text exceeds 64 KiB.");
+    }
+    free(decoded);
+    sb_create *plan = sb_platform_prepare_create(workspace->root,path,&error);
+    char actual_version[65];bool same=plan && host->approved_target_version && sb_platform_create_version(plan,actual_version,&error) && !strcmp(actual_version,host->approved_target_version);
+    if(!same)sb_fail(&error,"Physical parent changed before file creation.");
+    bool ok = same && sb_platform_sha256(text,size,hash,&error) &&
+        sb_audit_append(host->audit,"write_started",actor,NULL,workspace->id,sb_platform_create_target(plan),hash,size,"fs_write","create",NULL,NULL);
+    if (ok) ok = sb_platform_create_text(plan,text,size,&error);
+    yyjson_mut_val *data = ok ? yyjson_mut_obj(doc) : error_data(doc,*error.text ? error.text : "Audit unavailable; creation was not started.");
+    if (ok) { yyjson_mut_obj_add_str(doc,data,"status","completed"); yyjson_mut_obj_add_strcpy(doc,data,"sha256",hash); yyjson_mut_obj_add_uint(doc,data,"bytes",size); }
+    sb_platform_create_close(plan); *failed = !ok; return data;
 }
 
 yyjson_mut_val *sb_policy_write(sb_host *host, const char *actor, sb_workspace *workspace,
@@ -224,6 +369,28 @@ static char *edited_text(const char *original, size_t length, const sb_edit_requ
     }
     memcpy(destination, position, strlen(position) + 1);
     return output;
+}
+yyjson_mut_val *sb_policy_modify_authorized(sb_host *host, const char *actor, sb_workspace *workspace,
+    const char *path, const sb_edit_request *request, yyjson_mut_doc *doc, bool *failed) {
+    *failed = true; sb_error error = {0}; char original_hash[65], hash[65], backup[33] = {0};
+    if (workspace->read_only) return error_data(doc,"Workspace is read-only.");
+    sb_modify *plan = sb_platform_prepare_modify_guarded(workspace->root,path,host->approved_target_version,&error);
+    size_t size = 0; const char *original = plan ? sb_platform_modify_original(plan,&size) : NULL;
+    char *output = NULL;
+    bool ok = original && sb_platform_sha256(original,size,original_hash,&error);
+    if (ok && strcmp(original_hash,request->expected_hash)) { sb_fail(&error,"expected_sha256 does not match the original file."); ok = false; }
+    if (ok) { output = edited_text(original,size,request,&error); ok = output != NULL; }
+    if (ok && size == strlen(output) && !memcmp(original,output,size)) { sb_fail(&error,"Modification does not change the file."); ok = false; }
+    if (ok) ok = sb_platform_sha256(output,strlen(output),hash,&error) && sb_platform_modify_backup(plan,host->lease,backup,&error);
+    if (ok) ok = sb_audit_append(host->audit,"backup_saved",actor,NULL,workspace->id,sb_platform_modify_target(plan),hash,strlen(output),request->tool,"edit",original_hash,backup);
+    if (ok) ok = sb_platform_modify_text(plan,output,strlen(output),&error);
+    yyjson_mut_val *data = ok ? yyjson_mut_obj(doc) : error_data(doc,*error.text ? error.text : "Audit unavailable; modification was not started.");
+    if (ok) {
+        yyjson_mut_obj_add_str(doc,data,"status","completed"); yyjson_mut_obj_add_strcpy(doc,data,"sha256",hash);
+        yyjson_mut_obj_add_strcpy(doc,data,"original_sha256",original_hash); yyjson_mut_obj_add_strcpy(doc,data,"backup_id",backup);
+        yyjson_mut_obj_add_bool(doc,data,"atomic_save",false); yyjson_mut_obj_add_uint(doc,data,"bytes",strlen(output));
+    }
+    free(output); sb_platform_modify_close(plan); *failed = !ok; return data;
 }
 yyjson_mut_val *sb_policy_modify(sb_host *host, const char *actor, sb_workspace *workspace,
                                 const char *path, const sb_edit_request *request,
@@ -378,7 +545,8 @@ char *sb_policy_owner_request(sb_policy *policy, const char *request, size_t len
                 else { result = error_data(doc, "Audit recording unavailable; approval was not granted."); goto serialize; }
             }
             else if ((!strcmp(command, "deny") || !strcmp(command, "revoke")) &&
-                     (r->status == PENDING || r->status == APPROVED)) {
+                     (r->status == PENDING || r->status == APPROVED ||
+                      (!strcmp(command,"revoke") && r->status==COMPLETED && logical_read(r)))) {
                 r->status = DENIED;
                 audit_record(policy, r, !strcmp(command, "deny") ? "approval_denied" : "approval_revoked", "local-owner");
             }

@@ -6,7 +6,7 @@
 #include <stdint.h>
 #include "yyjson.h"
 
-#define SB_VERSION "0.1.0-dev.10"
+#define SB_VERSION "0.1.0-dev.11"
 #define SB_MAX_ROOTS 16
 #define SB_MAX_WORKSPACES (SB_MAX_ROOTS * 2)
 #define SB_PATH_CAP 32768
@@ -69,6 +69,7 @@ typedef struct {
     bool http_mode;
     uint64_t started_ms;
     sb_execution *execution;
+    const char *approved_target_version, *approved_program_version; /* Private per-call worker guards; never parsed from JSON. */
 } sb_host;
 typedef struct {
     char *name;
@@ -109,6 +110,9 @@ sb_execution *sb_execution_new(const sb_config *config, sb_error *error);
 void sb_execution_free(sb_execution *execution);
 yyjson_mut_val *sb_execution_status(sb_execution *execution, yyjson_mut_doc *document);
 bool sb_execution_available(sb_execution *execution);
+bool sb_execution_restricted_verified(sb_execution *execution);
+bool sb_execution_program_permitted(sb_execution *execution, const char *executable);
+void sb_execution_prepare_project(sb_execution *execution, sb_host *host);
 bool sb_execution_task_owned(sb_execution *execution, const char *actor, const char *id);
 const char *sb_execution_instance(sb_execution *execution);
 char *sb_execution_task(sb_execution *execution, const char *name, yyjson_val *arguments, sb_error *error);
@@ -122,10 +126,17 @@ sb_root *sb_platform_root(const char *path, sb_error *error);
 void sb_platform_root_close(sb_root *root);
 bool sb_platform_roots_overlap(const sb_root *a, const sb_root *b);
 bool sb_platform_root_identity(const sb_root *root, char identity[50], sb_error *error);
+sb_root *sb_platform_account_parent(const char *absolute, char **relative, sb_error *error);
+bool sb_platform_target_within(sb_root *root, sb_root *parent, const char *relative, sb_error *error);
+/* Object metadata only: no file content is read when an approval is requested. */
+bool sb_platform_target_version(sb_root *root, const char *relative, bool directory,
+                                bool create, bool recursive, char version[65], sb_error *error);
 sb_file *sb_platform_open(sb_root *root, const char *relative, bool directory, sb_error *error);
 void sb_platform_close(sb_file *file);
 char *sb_platform_directory_path(sb_file *directory, sb_error *error);
 uint64_t sb_platform_size(sb_file *file);
+bool sb_platform_file_version(sb_file *file, char version[65], sb_error *error);
+bool sb_platform_file_sha256(sb_file *file, char hex[65], sb_error *error);
 bool sb_platform_read(sb_file *file, uint64_t offset, unsigned char *buffer,
                       size_t capacity, size_t *length, sb_error *error);
 bool sb_platform_list(sb_file *directory, size_t offset, size_t limit,
@@ -148,12 +159,15 @@ void sb_platform_mutex_unlock(sb_mutex *mutex);
 sb_create *sb_platform_prepare_create(sb_root *root, const char *relative, sb_error *error);
 const char *sb_platform_create_target(sb_create *plan);
 const char *sb_platform_create_identity(sb_create *plan);
+bool sb_platform_create_version(sb_create *plan, char version[65], sb_error *error);
 bool sb_platform_create_text(sb_create *plan, const char *text, size_t length, sb_error *error);
 void sb_platform_create_close(sb_create *plan);
 sb_modify *sb_platform_prepare_modify(sb_root *root, const char *relative, sb_error *error);
+sb_modify *sb_platform_prepare_modify_guarded(sb_root *root, const char *relative, const char *version, sb_error *error);
 const char *sb_platform_modify_target(sb_modify *plan);
 const char *sb_platform_modify_parent(sb_modify *plan);
 const char *sb_platform_modify_identity(sb_modify *plan);
+bool sb_platform_modify_version(sb_modify *plan, char version[65], sb_error *error);
 const char *sb_platform_modify_original(sb_modify *plan, size_t *length);
 bool sb_platform_modify_backup(sb_modify *plan, sb_lease *lease, char backup_id[33], sb_error *error);
 bool sb_platform_modify_text(sb_modify *plan, const char *text, size_t length, sb_error *error);
@@ -175,6 +189,15 @@ bool sb_audit_project(sb_audit *audit, const char *event, const char *project, u
 sb_policy *sb_policy_new(unsigned ttl, sb_audit *audit, sb_error *error);
 void sb_policy_limit(sb_policy *policy, unsigned records);
 void sb_policy_free(sb_policy *policy);
+bool sb_policy_operation_begin(sb_host *host, const char *actor, const char *tool,
+    const char *parameters, const char *target, const char *version, const char *approval_id,
+    bool approval_required, uint64_t offset, uint64_t budget, yyjson_mut_doc *doc,
+    yyjson_mut_val **reply, char ticket[33]);
+void sb_policy_operation_finish(sb_policy *policy, const char *ticket, yyjson_mut_val *result);
+yyjson_mut_val *sb_policy_write_authorized(sb_host *host, const char *actor, sb_workspace *workspace,
+    const char *path, const char *text, yyjson_mut_doc *doc, bool *failed);
+yyjson_mut_val *sb_policy_modify_authorized(sb_host *host, const char *actor, sb_workspace *workspace,
+    const char *path, const sb_edit_request *request, yyjson_mut_doc *doc, bool *failed);
 yyjson_mut_val *sb_policy_write(sb_host *host, const char *actor, sb_workspace *workspace,
                                const char *path, const char *text, const char *approval_id,
                                yyjson_mut_doc *document, bool *failed);

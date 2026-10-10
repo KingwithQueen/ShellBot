@@ -1,6 +1,6 @@
 # 项目管理器与工作进程
 
-更新日期：2026 年 10 月 10 日。程序版本：`0.1.0-dev.10`。M2 提供普通权限管理器、每项目独立工作进程和本机所有者命令行入口；M3 项目 HTTP 路由和 bearer 认证已接入，见 [项目网关](PROJECT_GATEWAY.md)。
+更新日期：2026 年 10 月 10 日。程序版本：`0.1.0-dev.11`。M2 提供普通管理器、独立工作进程与本机所有者入口；M3 提供项目 HTTP；M4 接通完整审批和实际 LPAC 后端，见 [项目审批与受限执行](PROJECT_APPROVALS.md)。
 
 ## 创建与配置
 
@@ -91,26 +91,28 @@ request.json 是一个 JSON-RPC 对象。例如使用逐请求协议读取当前
 
 任务超过并发或记录预算会被拒绝；已有幂等回执不会静默淘汰。未指定任务期限时使用 300000 毫秒与项目上限中的较小值。输出溢出和超时仅终止本任务 Job。备份沿用每实例 64 份上限，审计沿用项目 audit_max_bytes；持久回执、跨重启累计保存预算和恢复属于 M6。
 
-M2 实际可执行的范围：
+正常新项目在 M4 的实际范围：
 
 | 操作 | 当前行为 |
 | --- | --- |
 | 主机信息、能力与工具列表 | 固定项目上下文，只列本项目启用的工具；已有任务结果和取消保留归属校验 |
 | never 的已配置目录读取 | 实际句柄检查后可列表、读文本、搜索和查看图像 |
-| workspace_auto 的工作目录读取 | 自动允许；额外目录仍因需要 M4 审批而拒绝读取正文 |
-| always 的文件访问 | 返回 project_approval_adapter_unavailable，不读取正文或返回搜索摘要 |
-| 普通命令与输入 | 仅允许统一策略通过且无需新审批的 current_user 操作；配置目录隔离、只读上限及 restricted 未验收时拒绝 |
-| 正常新项目写入 | 自动写入适配未接通，返回 project_file_write_adapter_unavailable；待 M4 |
+| workspace_auto 的目录文件操作 | 工作目录自动，额外目录返回 pending；只读目录始终不可写 |
+| always 的文件访问 | 六个文件工具均返回有界 pending，经 owner 批准及物理版本复核后执行 |
+| 普通命令与输入 | always/workspace_auto 审批，never 自动；LPAC 每次启动验证真实权限，current_user 仍须账户可写范围且无只读目录 |
+| 正常新项目写入 | 按模式自动或审批；创建不覆盖，修改需原始哈希、独占打开与私有备份 |
 | 迁移项目文件修改 | 保留原 pending/批准/重试、对象与哈希复核、私有备份行为，各项目队列独立 |
-| 非目录列表内的账户文件 | 策略可保存 current_user 范围，实际文件适配待 M4，能力报告明确为 false |
+| 非目录列表内的账户文件 | 显式 current_user 范围允许省略 workspace_id、使用绝对本地盘符路径；物理只读覆盖保留 |
 | 项目管理员能力 | 固定不可用，包含从旧 administrator 配置迁移的项目；不请求 UAC |
 
-迁移项目的所有者请求通过 `--project-owner ID --request FILE --manager-data-dir DIR` 路由到本项目队列。FILE 使用旧所有者命令结构，例如 `{"command":"inspect","id":"审批编号"}`、approve、deny、revoke 或 list。MCP 工具没有批准接口。旧 `--approve --data-dir` 不连接管理器托管项目；不要把它与 project-owner 混用。
+所有项目的所有者请求通过 `--project-owner ID --request FILE --manager-data-dir DIR` 路由到原队列。FILE 使用 `{"command":"inspect","id":"审批编号"}`、approve、deny、revoke 或 list。M4 不建立第二套审批通道，MCP 没有批准接口。旧 `--approve --data-dir` 不连接管理器托管项目。
 
 停止和失败不自动重跑任务。文件审批回执与任务仍主要保存在内存，工作进程结束后失效；日志及私有备份保留。多个普通工作进程和 API 归属检查不构成对任意同账户程序的操作系统沙箱。
 
+管理器运行期钉住输入注册文件，阻止写入和替换；所有者配置入口导出新文件，再明确停止/重启切换。受限工作进程创建逐实例 ACL 授权前，先把路径、对象标识、专用 SID 和 profile 写入私有 sandbox-实例.jsonl 并刷新。停止先终止本人 Job，再按对象标识移除该 SID 的授权、清理 profile；包括任务新建文件，只清理联接对象，不跟随外部目标。保留原 owner/group 及其他 ACL；清理失败状态为 cleanup_required，阻止新启动。管理器被强制结束时，在下一次明确启动项目之前恢复。日志没有任务内容，恢复成功写保护的 .done 标记；不会恢复审批或重跑任务。
+
 ## 验证
 
-`scripts/test.ps1` 的 x64 流程依次执行 M1 配置/策略专项、M2 真实普通权限项目专项、M3 回环网关专项和既有核心回归。M2 使用固定原生辅助程序，不采用编码脚本载荷、不启动 legacy administrator 主机；迁移管理员项目仅验证普通工作进程启动及管理员操作拒绝。
+`scripts/test.ps1` 的 x64 流程依次执行 M1、M2、M3、M4 和既有核心回归。M4 使用真实原生程序对照 LPAC 和 current_user 权限，不采用编码脚本或请求 UAC；迁移管理员项目仍只验证普通工作进程与管理员拒绝。
 
 报告在 build/validation/x64-Debug-m2.json 与 x64-Release-m2.json，记录程序摘要、检查结果和独立测试 Data 目录。原始失败目录保留，dev.8 回退基线为 build/baseline-dev8-m2-20261010，dev.9 为 build/baseline-dev9-m3-20261010。独立机器、真实客户端和新版本 UAC 验收未执行；M2 当时用户离开，M3 用户已回来并恢复必要人工操作授权，但本阶段不需要提权测试。

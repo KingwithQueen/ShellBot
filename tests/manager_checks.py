@@ -167,7 +167,8 @@ def main():
         # Physical aliases cannot reuse a project's private Data.
         (folder / 'data-a').mkdir()
         alias = folder / 'data-alias'
-        subprocess.run(['cmd.exe', '/d', '/c', 'mklink', '/J', str(alias), str(folder / 'data-a')], capture_output=True, check=True, creationflags=flags)
+        linked = subprocess.run(['cmd.exe', '/d', '/c', 'mklink', '/J', str(alias), str(folder / 'data-a')], capture_output=True, creationflags=flags)
+        check(linked.returncode == 0, 'physical Data alias fixture created: ' + (linked.stdout + linked.stderr).decode(errors='replace').strip())
         alias_registry = copy.deepcopy(updated)
         alias_registry['projects'][1]['data_dir'] = str(alias)
         cli('--manager', '--projects', save('physical-data-alias.json', alias_registry), '--manager-data-dir', folder / 'rejected-manager', success=False)
@@ -182,9 +183,12 @@ def main():
         changed = copy.deepcopy(updated)
         changed['projects'][0]['policy_revision'] = 100
         changed['projects'][0]['enabled'] = False
-        configured.write_text(json.dumps(changed), encoding='utf-8')
-        check(control('--project-status', 'a')['project']['policy_revision'] == 2, 'editing disk configuration cannot mutate an active manager snapshot')
-        configured.write_bytes(on_disk)
+        try:
+            configured.write_text(json.dumps(changed), encoding='utf-8')
+            blocked=False
+        except PermissionError:blocked=True
+        check(blocked and configured.read_bytes()==on_disk,'active registry is pinned against disk edits')
+        check(control('--project-status', 'a')['project']['policy_revision'] == 2, 'active manager retains the original policy revision')
         control('--project-start', 'missing', success=False)
         statuses = control('--project-status')
         by_id = {p['project_id']: p for p in statuses['projects']}
@@ -194,6 +198,7 @@ def main():
             caps = tool(name, 'host_capabilities')
             check(caps['project_id'] == name and not caps['administrator_backend'], 'capabilities bound to project without administrator startup')
             check(caps['max_active_tasks'] == 1 and caps['max_output_bytes'] == 4096, 'project budgets reported')
+            check(caps['execution_status']['max_active_tasks']==1 and caps['execution_status']['max_output_bytes_per_stream']==4096,'execution status uses project budgets')
             check(tool(name, 'fs_read', {'workspace_id': 'same-workspace', 'path': 'unique.txt'})['text'] == 'content-' + name, 'same workspace id resolves inside its own project')
         tool('a', 'fs_read', {'workspace_id': 'same-workspace', 'path': 'unique.txt', 'project_id': 'b'}, failed=True)
         tool('confirm', 'fs_read', {'workspace_id': 'same-workspace', 'path': 'unique.txt'}, failed=True)
@@ -207,8 +212,8 @@ def main():
         listed = rpc('auto', 'tools/list')['result']['tools']
         check('fs_search' not in {item['name'] for item in listed}, 'tool listing respects the worker project tool switches')
         tool('restricted', 'task_start', {'workspace_id': 'same-workspace', 'executable': str(fixture), 'argv': ['wait'], 'request_key': 'denied', 'host_instance_id': by_id['restricted']['host_instance_id']}, failed=True)
-        tool('a', 'fs_write', {'workspace_id': 'same-workspace', 'path': 'blocked.txt', 'text': 'not written'}, failed=True)
-        check(not (folder / 'workspace-a' / 'blocked.txt').exists(), 'unimplemented automatic write has no side effects')
+        tool('a', 'fs_write', {'workspace_id': 'same-workspace', 'path': 'm4-auto.txt', 'text': 'automatic write'})
+        check((folder / 'workspace-a' / 'm4-auto.txt').read_text() == 'automatic write', 'never automatic write preserves configured project scope')
         for name in ('a', 'b'):
             instance = by_id[name]['host_instance_id']
             request = {'workspace_id': 'same-workspace', 'executable': str(fixture), 'argv': ['append'], 'request_key': 'same-key', 'host_instance_id': instance}

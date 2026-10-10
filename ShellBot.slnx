@@ -4,4 +4,5 @@
     <Platform Name="x86" />
   </Configurations>
   <Project Path="WinShellBot/WinShellBot.vcxproj" Id="d2b9ed97-6b77-49d9-8e85-a5b309fadbad" />
+  <Project Path="WinShellBot/SandboxProbe.vcxproj" Id="a674eb50-b5e5-43a1-9e24-b2bb66b185a4" />
 </Solution>

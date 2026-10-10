@@ -10,8 +10,8 @@ static yyjson_mut_val *task_error(yyjson_mut_doc *doc, bool *failed, const char 
 }
 yyjson_mut_val *sb_tasks_call(sb_host *host,const char *actor,const char *name,yyjson_val *args,yyjson_mut_doc *doc,bool *failed) {
     yyjson_mut_doc *request=yyjson_mut_doc_new(NULL); if(!request) return task_error(doc,failed,"Cannot allocate task request.");
-    yyjson_mut_val *parameters=yyjson_mut_obj(request); sb_file *directory=NULL; char *cwd=NULL,*canonical=NULL,*reply=NULL; sb_error error={0};
-    const char *workspace_id=NULL; char request_hash[65]={0}; const char *event_key=NULL;
+    yyjson_mut_val *parameters=yyjson_mut_obj(request); sb_file *directory=NULL,*program_file=NULL;sb_root *program_root=NULL;char *program_relative=NULL; char *cwd=NULL,*canonical=NULL,*reply=NULL; sb_error error={0};
+    const char *workspace_id=NULL; char request_hash[65]={0},program_hash[65]={0}; const char *event_key=NULL;
     if(!yyjson_is_obj(args)) { sb_fail(&error,"Task arguments must be an object."); goto done; }
     const char *instance=sb_string(yyjson_obj_get(args,"host_instance_id"));
     if (!instance || !sb_execution_instance(host->execution) || strcmp(instance,sb_execution_instance(host->execution))) {
@@ -28,6 +28,16 @@ yyjson_mut_val *sb_tasks_call(sb_host *host,const char *actor,const char *name,y
         directory=sb_platform_open(workspace->root,path?path:".",true,&error);
         if(!directory) goto done;
         cwd=sb_platform_directory_path(directory,&error); if(!cwd) goto done;
+        if(host->approved_program_version) {
+            char cwd_version[65],program_version[65];
+            program_root=sb_platform_account_parent(exe,&program_relative,&error);
+            program_file=program_root?sb_platform_open(program_root,program_relative,false,&error):NULL;
+            bool same=program_file && sb_platform_file_version(program_file,program_version,&error) && !strcmp(program_version,host->approved_program_version) &&
+                sb_platform_target_version(workspace->root,path?path:".",true,false,false,cwd_version,&error) && !strcmp(cwd_version,host->approved_target_version);
+            if(!same){sb_fail(&error,"Approved program or working-directory snapshot changed before task startup.");goto done;}
+            if(!sb_platform_file_sha256(program_file,program_hash,&error))goto done;
+            yyjson_mut_obj_add_strcpy(request,parameters,"executable_sha256",program_hash);
+        }
         yyjson_mut_obj_add_strcpy(request,parameters,"executable",exe);
         yyjson_mut_obj_add_val(request,parameters,"argv",yyjson_val_mut_copy(request,argv));
         yyjson_mut_obj_add_strcpy(request,parameters,"cwd",cwd);
@@ -70,13 +80,14 @@ yyjson_mut_val *sb_tasks_call(sb_host *host,const char *actor,const char *name,y
     }
     reply=sb_execution_task(host->execution,name,yyjson_doc_get_root(parsed),&error); yyjson_doc_free(parsed);
 done:
-    free(canonical);free(cwd);sb_platform_close(directory);yyjson_mut_doc_free(request);
+    free(canonical);free(cwd);sb_platform_close(directory);sb_platform_close(program_file);sb_platform_root_close(program_root);free(program_relative);yyjson_mut_doc_free(request);
     if(!reply) return task_error(doc,failed,*error.text?error.text:"Task backend unavailable.");
     yyjson_doc *response=yyjson_read(reply,strlen(reply),0);free(reply);
     if(!response) return task_error(doc,failed,"Task backend returned an invalid response; retry using the original request key.");
     yyjson_val *root=yyjson_doc_get_root(response); *failed=yyjson_get_bool(yyjson_obj_get(root,"_error"));
     yyjson_mut_val *result=yyjson_val_mut_copy(doc,root);
     yyjson_mut_obj_add_strcpy(doc,result,"host_instance_id",sb_execution_instance(host->execution));
+    if(*program_hash)yyjson_mut_obj_add_strcpy(doc,result,"executable_sha256",program_hash);
     if(!*failed && !strcmp(name,"task_start") && yyjson_get_bool(yyjson_obj_get(root,"created_new"))) {
         const char *id=sb_string(yyjson_obj_get(root,"task_id"));uint64_t pid=0;sb_integer(yyjson_obj_get(root,"process_id"),&pid);
         if(!sb_audit_task(host->audit,"task_started",actor,event_key,id,host->config.execution_profile,request_hash,name,pid)) yyjson_mut_obj_add_str(doc,result,"audit_warning","Task started but its result record could not be flushed; query the original task, do not rerun it.");

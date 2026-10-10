@@ -22,6 +22,7 @@
     <ClCompile Include="platform\owner.c"><Filter>源文件</Filter></ClCompile>
     <ClCompile Include="platform\manager.c"><Filter>源文件</Filter></ClCompile>
     <ClCompile Include="platform\execution.c"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="platform\sandbox.c"><Filter>源文件</Filter></ClCompile>
     <ClCompile Include="platform\task_process.c"><Filter>源文件</Filter></ClCompile>
     <ClCompile Include="..\core\tools\tasks.c"><Filter>源文件</Filter></ClCompile>
     <ClCompile Include="..\core\policy\approval.c"><Filter>源文件</Filter></ClCompile>
@@ -38,6 +39,7 @@
     <ClInclude Include="..\core\include\sb.h"><Filter>头文件</Filter></ClInclude>
     <ClInclude Include="..\core\include\sb_projects.h"><Filter>头文件</Filter></ClInclude>
     <ClInclude Include="platform\execution.h"><Filter>头文件</Filter></ClInclude>
+    <ClInclude Include="platform\sandbox.h"><Filter>头文件</Filter></ClInclude>
     <ClInclude Include="platform\manager.h"><Filter>头文件</Filter></ClInclude>
     <ClInclude Include="..\third_party\yyjson\yyjson.h"><Filter>头文件</Filter></ClInclude>
     <ClInclude Include="..\third_party\civetweb\include\civetweb.h"><Filter>头文件</Filter></ClInclude>

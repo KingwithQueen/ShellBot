@@ -4,11 +4,11 @@ ShellBot 是使用 C17 开发的电脑 MCP 主机。模型服务负责推理，S
 
 Windows 工程 WinShellBot 优先面向 Windows 10/11 x64。通用 C 核心与 Windows 接口分离，便于以后移植 Linux 和 macOS；Windows 7 以后单独编译和验证。
 
-后续开发按已确认的多项目和独立权限方案推进，见 [开发计划](docs/DEVELOPMENT_PLAN.md)及 [项目权限与执行身份](docs/EXECUTION_PERMISSIONS.md)。dev.10 已完成 M1 配置基础、M2 普通权限管理器和 M3 独立项目 HTTP 地址及认证，见 [项目配置说明](docs/PROJECT_CONFIGURATION.md)、[项目管理器](docs/PROJECT_MANAGER.md)及 [项目网关](docs/PROJECT_GATEWAY.md)。下一项为 M4 完整审批与受限执行。
+后续开发按已确认的多项目和独立权限方案推进，见 [开发计划](docs/DEVELOPMENT_PLAN.md)及 [项目权限与执行身份](docs/EXECUTION_PERMISSIONS.md)。dev.11 已接通 M4 全文件工具与命令审批、当前账户绝对文件路径及 Windows LPAC 受限执行，见 [项目审批与受限执行](docs/PROJECT_APPROVALS.md)。M1–M4 已完成本机开发与自动验证；下一项为 M5 共享管理员代理。
 
 ## 当前实现
 
-当前版本为 `0.1.0-dev.10`，是开发测试版本。程序只监听本机端口，域名与 cloudflared 隧道由已有环境完成，不要求域名检查；OAuth 与隧道管理暂缓。已实现：
+当前版本为 `0.1.0-dev.11`，是开发测试版本。程序只监听本机端口，域名与 cloudflared 隧道由已有环境完成，不要求域名检查；OAuth 与隧道管理暂缓。已实现：
 
 | 能力 | 当前行为 |
 | --- | --- |
@@ -18,27 +18,28 @@ Windows 工程 WinShellBot 优先面向 Windows 10/11 x64。通用 C 核心与 W
 | fs_read | UTF-8、UTF-16 LE/BE 读取、BOM 识别和 Unicode 分页；完整读取返回原始字节 SHA-256 |
 | fs_search | 文件名或 UTF-8/UTF-16 内容的字面量搜索，可选递归，内容结果包含行号与有界片段 |
 | image_view | PNG/JPEG 原文件作为原生 MCP image 内容返回，并返回头部尺寸信息 |
-| fs_write / fs_patch | 默认创建；显式覆盖或字面量替换须绑定原始哈希、本机审批和私有备份，UTF-8 原文与结果均限 64 KiB |
+| fs_write / fs_patch | 默认创建；覆盖和替换保留原始哈希、独占打开与私有备份；UTF-8 原文与结果均限 64 KiB；新项目按独立审批模式执行 |
 | 本机审批 | 查看完整请求、批准、拒绝、撤销、过期、绑定参数、并发重试与重启失效 |
 | 审批和写入审计 | 私有 JSONL 记录状态、执行结果和备份编号，跨重启保留，日志故障时阻止新批准和写入 |
 | 目录配置 | 最多 16 个显式目录，每个目录拥有独立 workspace_id，默认只读 |
 | M1 项目配置与策略 | format_version:1 多项目配置校验、三审批模式统一判断、身份与管理员许可分离、旧配置显式备份迁移；以 --manager 显式启动项目 |
 | M2 项目管理器 | 本机创建、配置、启停；独立普通工作进程、Data、任务、幂等记录、审批和备份；配额与本人 Job 清理 |
 | M3 项目 MCP 网关 | 一个回环端口、/projects/ID/mcp、逐项目 bearer、显式默认项目 /mcp、地址生成、有界并发和进程通信超时 |
+| M4 项目审批与受限任务 | 六个文件工具、命令启动和输入统一审批；原队列查看/批准/拒绝/撤销；有界分页和结果重试；LPAC 实际身份与权限验证后开放声明程序 |
 | 运行保护 | 数据目录实例锁、请求和结果大小上限；HTTP 令牌、Host/Origin 检查 |
 | 已有代理接入 | 默认接受本机代理的合法 Host/Origin 且要求 bearer；外部地址配置作为可选限制保留 |
 | 后台命令任务 | task_start、task_status、task_output、task_input、task_cancel；显式启用 user/administrator 后提供进程、输出、输入、超时和取消 |
 | 执行权限基础层 | 三档配置、真实身份与提升状态查询、受限所有者调用拒绝；管理员代理同账户启动、复用与退出已在 Server 2025 验收；启动 UAC 一次由用户观察确认，跨账户提权未覆盖 |
 
-文件工具检查实际打开的文件或目录句柄对应的最终路径，拒绝越界联接、符号链接、父目录跳转、绝对工具路径和 NTFS 数据流路径。文件名搜索跳过重解析目录。没有配置目录时只提供主机查询，不自动授权当前目录或整台电脑。
+文件工具检查实际打开的文件或目录句柄对应的最终路径，拒绝越界联接、符号链接、父目录跳转和 NTFS 数据流路径。目录工具路径须为相对路径；新项目只有显式授予 current_user 文件范围后，才可省略 workspace_id 使用绝对本地盘符路径，配置目录只读属性仍生效。文件名搜索跳过重解析目录。没有配置目录时不自动授权当前目录或整台电脑。
 
 本版支持 MCP `2025-03-26`、`2025-06-18`、`2025-11-25` 的初始化与工具子集，并支持 `2026-07-28` 的逐请求元数据、`server/discover`、工具调用和请求头镜像校验。新版成功结果包含 `resultType: complete` 和服务信息，发现与工具列表包含缓存范围。HTTP 不建立协议会话；GET `/mcp` 返回 405，不宣称 SSE、标准 MCP tasks 扩展或 elicitation；后台任务使用普通工具调用。本机待审批请求以工具错误及结构化状态返回，不伪装成客户端授权。依据：[MCP 工具规范](https://modelcontextprotocol.io/specification/2026-07-28/server/tools)、[HTTP 传输规范](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http)。
 
 旧单实例 HTTP 使用一个 bearer 身份；项目网关中每个项目使用独立 bearer，路由和凭据共同固定项目。默认不需要填写域名，仍验证 Host/Origin 格式和令牌；可选 public_url 启用域名限制并生成公共地址。实际客户端工具使用与本机自检分别记录。
 
-覆盖与局部修改采用锁定原文件并预先保存私有备份，返回 atomic_save:false，支持冲突拒绝和结果重试，不承诺崩溃原子性，见 [文本修改说明](docs/FILE_EDIT.md)。普通用户和管理员后台命令已实现，见 [命令任务说明](docs/COMMAND_TASKS.md)。完整受控隔离、规则与远程审批、审批/任务重启恢复、完整调用审计、桌面控制、PDF/Office/OCR 和完整项目管理仍待实现。
+覆盖与局部修改采用锁定原文件并预先保存私有备份，返回 atomic_save:false，支持冲突拒绝和结果重试，不承诺崩溃原子性，见 [文本修改说明](docs/FILE_EDIT.md)。命令行为见 [命令任务说明](docs/COMMAND_TASKS.md)。M4 受限后端只开放声明的程序与只读运行文件，禁用网络、Win32k 桌面调用和子进程；不保证通用解释器、GUI 或所有构建工具可运行。远程审批、审批/任务重启恢复、完整调用审计、桌面控制、PDF/Office/OCR 和管理界面仍待实现。
 
-未版本化的单实例运行配置仍使用 dev.7 的三档执行结构：controlled、user、administrator。显式启用 user/administrator 时沿用原命令预授权和单主机代理行为；默认关闭，controlled 的完整隔离仍未验收，命令不可用。项目配置将审批、文件范围、身份与管理员许可分开，通过 --manager 启动，加 --http 开启项目网关；--config 保持旧单实例入口。项目管理员后端不可用，完整审批与受限执行待 M4/M5。见 [项目配置说明](docs/PROJECT_CONFIGURATION.md)及 [项目权限与执行身份](docs/EXECUTION_PERMISSIONS.md)。
+未版本化的单实例运行配置仍使用 dev.7 的 controlled、user、administrator；原 controlled 命令保持不可用，原 user/administrator 预授权行为保留。项目配置将审批、文件范围、身份与管理员许可分开，通过 --manager 启动，加 --http 开启项目网关；--config 保持旧入口。M4 LPAC 仅用于正常新格式项目，项目管理员后端待 M5。见 [项目配置说明](docs/PROJECT_CONFIGURATION.md)及 [项目权限与执行身份](docs/EXECUTION_PERMISSIONS.md)。
 
 ## 构建与验证
 
@@ -55,7 +56,7 @@ python .\tests\smoke.py --exe .\out\x64\Release\WinShellBot.exe
 # 分别验证核心功能，明确排除仍在调查的关闭连接诊断：
 .\scripts\test.ps1 -Configuration Release -SkipCloseProbe
 # 核心报告必须匹配当前 Release 程序才能生成测试包：
-# 当前打包器另要求旧 dev.7 原生专项凭据；dev.10 M3 本轮不生成新包。
+# 当前打包器另要求旧 dev.7 原生专项凭据；dev.11 M4 本轮不生成新包。
 .\scripts\package-test.ps1
 ```
 
@@ -133,4 +134,4 @@ fs_search 的 mode 默认 filename；设为 content 可以搜索 UTF-8/UTF-16 �
 
 许可采用 [MIT 模板](LICENSE.txt)，版权年份和主体需在首次正式发行前补全；第三方组件保留各自许可，见[依赖记录](third_party/README.md)。
 
-旧版本包、基线与原始报告继续保留。M2 已由用户提交推送为 `2dd0d84`；本轮 M3 仍是 main 上未提交、未推送的本地更改，没有新包。当前验收范围与剩余项目以 IMPLEMENTATION_STATUS.md 为准，以上旧版本结果只适用于对应程序摘要。
+旧版本包、基线与原始报告继续保留。M3 已由用户提交推送为 `cb2d26b`；本轮 M4 是 main 上未提交、未推送的本地更改，没有新包。M3 完整回退基线为 build/baseline-dev10-m4-20261010。当前验收范围与剩余项目以 IMPLEMENTATION_STATUS.md 和 [M4 交接](docs/HANDOFF_20261010_M4.md)为准，旧版本结果只适用于对应程序摘要。

@@ -166,7 +166,7 @@ static bool directories(sb_project *project, yyjson_val *array, bool workspace) 
 static bool policy_parse(sb_project_policy *policy, yyjson_val *value) {
     static const char *const allowed[] = {"approval_mode", "files", "execution", "tools"};
     static const char *const file_keys[] = {"scope", "current_user_read_only"};
-    static const char *const execution_keys[] = {"enabled", "default_identity", "administrator_allowed"};
+    static const char *const execution_keys[] = {"enabled", "default_identity", "administrator_allowed", "runtime_files"};
     policy->approval_mode = SB_PROJECT_ALWAYS;
     policy->file_scope = SB_FILES_CONFIGURED;
     policy->current_user_read_only = true;
@@ -209,6 +209,18 @@ static bool policy_parse(sb_project_policy *policy, yyjson_val *value) {
             else return false; /* Administrator always requires explicit operation selection. */
         }
         if (policy->administrator_allowed && (policy->file_scope != SB_FILES_CURRENT_USER || policy->default_identity == SB_ID_RESTRICTED)) return false;
+        yyjson_val *runtime = yyjson_obj_get(execution,"runtime_files");
+        if (runtime) {
+            if (policy->default_identity != SB_ID_RESTRICTED || !yyjson_is_arr(runtime) || yyjson_arr_size(runtime)>16) return false;
+            size_t i,n; yyjson_val *file;
+            yyjson_arr_foreach(runtime,i,n,file) {
+                const char *path = sb_string(file);
+                if (!sb_project_path_valid(path)) return false;
+                for(size_t j=0;j<policy->runtime_file_count;++j) if(!strcmp(policy->runtime_files[j],path))return false;
+                char *copy = sb_strdup(path); if(!copy)return false;
+                policy->runtime_files[policy->runtime_file_count++]=copy;
+            }
+        }
     }
     yyjson_val *tools = yyjson_obj_get(value, "tools");
     if (tools) {
@@ -326,6 +338,7 @@ void sb_projects_free(sb_project_registry *registry) {
         sb_project *project = &registry->projects[i];
         for (size_t j = 0; j < project->directory_count; ++j) free(project->directories[j].path);
         free(project->data_dir);
+        for(size_t j=0;j<project->policy.runtime_file_count;++j) free(project->policy.runtime_files[j]);
     }
     memset(registry, 0, sizeof(*registry));
 }

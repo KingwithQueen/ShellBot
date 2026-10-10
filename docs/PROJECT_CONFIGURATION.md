@@ -1,12 +1,12 @@
 # M1 项目配置与统一权限策略
 
-更新日期：2026 年 10 月 10 日。代码版本：`0.1.0-dev.10`。配置格式：`format_version: 1`。
+更新日期：2026 年 10 月 10 日。代码版本：`0.1.0-dev.11`。配置格式：`format_version: 1`。
 
-M1 完成配置数据模型、严格校验、统一 allow/deny/pending 判断和旧配置显式迁移。M2 普通管理器和项目工作进程见 [项目管理器](PROJECT_MANAGER.md)，M3 地址和认证见 [项目网关](PROJECT_GATEWAY.md)。完整审批适配、受限执行、共享管理员代理和远程审批仍待 M4–M6；`--config` 遇到版本化配置会在创建 Data 或初始化执行身份之前拒绝。
+M1 完成配置、统一判断和旧配置显式迁移；M2/M3 接入项目运行与地址。M4 已接通全文件/命令审批、当前账户文件适配和实际 LPAC 受限执行，见 [项目审批与受限执行](PROJECT_APPROVALS.md)。共享管理员代理和远程审批仍待 M5/M6；`--config` 遇到版本化配置会在创建 Data 或初始化执行身份之前拒绝。
 
 ## 配置和校验入口
 
-双项目样例在 [projects.example.json](../config/projects.example.json)：full-access 使用当前账户文件范围、never 和普通账户执行；workspace-only 有两个工作目录、目录外拒绝、workspace_auto 和 restricted。后者即使 execution.enabled 为 true，受限命令也保持不可用。项目样例只用于配置校验，不改变已运行实例。
+双项目样例在 [projects.example.json](../config/projects.example.json)：full-access 使用当前账户文件范围、never 和普通账户执行；workspace-only 有两个工作目录、目录外拒绝、workspace_auto 和 restricted。受限任务还需要所有者配置 runtime_files 并通过启动实测；样例没有替用户授权任何程序。配置校验不改变已运行实例。
 
 ```powershell
 .\out\x64\Release\WinShellBot.exe --validate-projects .\config\projects.example.json
@@ -39,9 +39,13 @@ policy.approval_mode 为 always、workspace_auto 或 never。always 对全部文
 
 policy.files.scope 为 configured 或 current_user。configured 仅包含工作目录和显式 extra_directories；current_user 额外允许账户可访问的文件范围，其他位置的 current_user_read_only 默认 true，必须显式 false 才能写。current_user_read_only 只可用于 current_user 范围。显式目录的 read_only 独立保留，不因全文件范围或 never 被覆盖。
 
-policy.execution 保存 enabled、default_identity 和 administrator_allowed。普通默认身份只能为 restricted 或 current_user。管理员操作须明确选择身份；正常新配置禁止向 restricted 或 configured 隔离项目授予 administrator_allowed。管理员配置许可与代理运行状态分开，M1 的项目管理员后端固定不可用，不能复用 dev.7 单主机代理冒充项目授权。
+policy.execution 保存 enabled、default_identity、administrator_allowed 和可选 runtime_files。普通默认身份只能为 restricted 或 current_user。管理员操作须明确选择身份；正常新配置禁止向 restricted 或 configured 隔离项目授予 administrator_allowed。M5 前项目管理员后端不可用，不能复用 dev.7 单主机代理冒充项目授权。
 
-受限命令返回 restricted_backend_unverified。configured 范围的 current_user 命令返回 directory_isolation_unavailable。对于正常新项目，当前账户文件范围只读、或任一显式目录只读时，任意账户命令返回 read_only_command_isolation_unavailable；普通进程无法强制执行这些写入上限。使用账户任意命令必须明确授予可写的账户范围并选择 current_user；这仍属于账户信任模式，不承诺项目间操作系统隔离。
+runtime_files 只允许 restricted，最多 16 个不重复绝对文件路径。运行时限本地盘符、普通单链接文件，分别授予只读/执行，并在整个工作进程期间保持读句柄，阻止写入、删除和替换。列表中的 .exe 才能作为 task_start 程序；可以额外列出它需要的 DLL 或只读资源，不能授予整个系统目录。管理器或任一项目 Data 内的文件不可列为运行资源。ShellBot-SandboxProbe.exe 是旁置的产品启动检查依赖，由主工程自动构建，不是用户测试夹具；缺失时受限后端不可用。
+
+未通过实际后端验证的受限命令返回 restricted_backend_unverified；验证结果只来自可信工作进程，JSON 不能自报。LPAC 启动检查确认实际身份和禁止操作后才开放命令，只读目录仍由操作系统执行。configured 范围的 current_user 命令返回 directory_isolation_unavailable。当前账户范围只读、或任一显式目录只读时，任意账户命令返回 read_only_command_isolation_unavailable。账户任意命令必须明确授予可写账户范围并选择 current_user；该模式属于账户信任，不承诺项目间操作系统隔离。
+
+current_user 文件范围可省略 workspace_id，传入绝对本地盘符 path；平台按物理父目录检查已配置目录的只读和审批类别，不能借绝对路径绕过只读目录。不确定物理类别时直接拒绝；UNC、设备、流和父目录跳转不属于此账户路径适配器。
 
 policy.tools 是现有十三个工具名的显式列表，空数组表示不允许新工具操作；未知及重复工具名拒绝。它独立于目录读写、execution.enabled 和管理员许可，不能单凭列出 task_start 开放命令。
 
@@ -53,7 +57,7 @@ policy.tools 是现有十三个工具名的显式列表，空数组表示不允�
 
 task_status、task_output、task_cancel 在后端确认项目及 actor 的任务归属后返回 allow，无需重复审批；项目停用或工具开关关闭后仍允许取得旧结果和取消本人任务。task_input 单独判断且需要同样的归属核验。M2 的 owned_task 来自本工作进程实际后端的归属查询，不是 MCP 参数；M1 的单元验证不等于真实网关跨项目认证验收。
 
-审批绑定契约包含项目、actor、policy_revision、操作摘要、对象身份、版本、期限和字节预算。当前 evaluator 没有接受 approved=true 或消费批准记录的接口：pending 仍需 M4 的审批状态机适配。M4 必须在读取正文前判断，并在执行前重新核验；分页许可、版本变化、预算消费和策略收窄的运行验证留待该里程碑。原有文件修改的摘要、锁、备份及审计保护继续保留。
+M4 在 evaluator 外复用原审批队列与所有者入口，绑定项目、actor、policy_revision、实例、规范参数、对象身份/版本、期限和预算；不接受 approved=true。未批准时仅核验路径和对象元数据，执行前重新核验，文件内容变化拒绝继续原许可。分页和重试见 [审批说明](PROJECT_APPROVALS.md)。原有修改摘要、独占打开、备份和审计保留。
 
 ## 旧配置显式迁移
 
@@ -73,8 +77,8 @@ dev.7 的读取自动、写入本机审批和已启用 user/administrator 命令
 
 ## 验证和仍待完成项
 
-scripts/build.ps1 另编译开发用 ShellBot-ProjectPolicyTests.exe，不属于产品运行依赖。scripts/test.ps1 的 x64 分支先运行 tests/project_checks.py、tests/manager_checks.py 和 tests/gateway_checks.py，再运行旧工具核心回归。配置专项覆盖三模式、跨项目同名目录、只读和目录外上限、任务归属、策略版本、不可用后端、严格配置拒绝、六类旧执行配置迁移、实际解析后的兼容策略、字节备份、重复输出拒绝和旧 Data 保留。
+scripts/build.ps1 另编译开发用 ShellBot-ProjectPolicyTests.exe，不属于产品依赖；ShellBot-SandboxProbe.exe 则为受限后端的运行依赖。x64 验证依次运行 M1、M2、M3、tests/approval_checks.py 的 M4 及旧核心回归。配置专项增加运行资源类型、路径、重复、身份和数量限制；原配置/迁移检查保留。
 
 Debug/Release 的最终结果及程序摘要见 [实现记录](IMPLEMENTATION_STATUS.md) 和 build/validation/x64-Debug-m1.json、x64-Release-m1.json。专项原始目录和失败报告保留在 tests/test-results；dev.7 基线在 build/baseline-dev7-m1-20261010。
 
-M2 已完成普通权限管理器、每项目工作进程、独立 Data/任务/审计、凭据环境排除、配额和故障处理，见 [管理器说明](PROJECT_MANAGER.md)。M3 已接项目路由与认证；M4/M5 接完整审批、受限执行和逐项目管理员授权。历史 HTTP close 问题、独立机器及真实 MCP 客户端验收仍单独记录。
+M1–M4 已完成本机自动验证；M5 接逐项目管理员授权。历史 HTTP close 问题、独立机器、通用程序兼容性及真实 MCP 客户端验收仍单独记录。

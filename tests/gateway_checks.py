@@ -368,7 +368,11 @@ def main():
         http('/mcp', changes={'Host': 'existing-proxy.invalid', 'Origin': 'https://existing-proxy.invalid'})
         changed = copy.deepcopy(default_value)
         changed['gateway']['default_project_id'] = 'b'
-        default_registry.write_text(json.dumps(changed), encoding='utf-8')
+        try:
+            default_registry.write_text(json.dumps(changed), encoding='utf-8')
+            blocked=False
+        except PermissionError:blocked=True
+        check(blocked,'active gateway registry refuses changes to the default route')
         http('/mcp')
         http('/mcp', token=tokens['b'], expected=401)
         control('--manager-stop', manager_data=default_data)

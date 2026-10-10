@@ -66,11 +66,11 @@ sb_policy_result sb_project_evaluate(const sb_request_context *context, const sb
         if (!project->policy.execution_enabled) return result(SB_DECISION_DENY, "execution_disabled");
         if (operation->identity != project->policy.default_identity)
             return result(SB_DECISION_DENY, "execution_identity_exceeds_policy");
-        if (operation->identity == SB_ID_RESTRICTED)
+        if (operation->identity == SB_ID_RESTRICTED && !operation->restricted_backend_verified)
             return result(SB_DECISION_DENY, "restricted_backend_unverified");
-        if (project->policy.file_scope != SB_FILES_CURRENT_USER && !project->legacy_compatibility)
+        if (operation->identity == SB_ID_CURRENT_USER && project->policy.file_scope != SB_FILES_CURRENT_USER && !project->legacy_compatibility)
             return result(SB_DECISION_DENY, "directory_isolation_unavailable");
-        if (!project->legacy_compatibility) {
+        if (!project->legacy_compatibility && operation->identity == SB_ID_CURRENT_USER) {
             if (project->policy.current_user_read_only)
                 return result(SB_DECISION_DENY, "read_only_command_isolation_unavailable");
             for (size_t i = 0; i < project->directory_count; ++i)

@@ -162,7 +162,7 @@
       <RuntimeLibrary Condition="'$(Configuration)'=='Release'">MultiThreaded</RuntimeLibrary>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>Ws2_32.lib;Bcrypt.lib;Shell32.lib;Ole32.lib;Uuid.lib;Advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>Ws2_32.lib;Bcrypt.lib;Shell32.lib;Ole32.lib;Uuid.lib;Advapi32.lib;Userenv.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Manifest>
       <AdditionalManifestFiles>$(MSBuildProjectDirectory)\app\shellbot.manifest;%(AdditionalManifestFiles)</AdditionalManifestFiles>
@@ -177,6 +177,8 @@
     <ClCompile Include="platform\manager.c" />
     <ClCompile Include="platform\execution.c" />
     <ClCompile Include="platform\task_process.c" />
+    <ClCompile Include="platform\sandbox.c" />
+    <ClInclude Include="platform\sandbox.h" />
     <ClCompile Include="..\core\tools\tasks.c" />
     <ClCompile Include="..\core\policy\approval.c" />
     <ClCompile Include="..\core\policy\audit.c" />
@@ -207,6 +209,13 @@
     <None Include="app\shellbot.manifest" />
     <None Include="app\external_mg_cry_internal_impl.inl" />
     <None Include="app\external_log_access.inl" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(Platform)'=='x64'">
+    <ProjectReference Include="SandboxProbe.vcxproj">
+      <Project>{A674EB50-B5E5-43A1-9E24-B2BB66B185A4}</Project>
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+      <LinkLibraryDependencies>false</LinkLibraryDependencies>
+    </ProjectReference>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

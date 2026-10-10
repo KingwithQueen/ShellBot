@@ -1,10 +1,39 @@
 # ShellBot 实现与验证记录
 
-更新日期：2026 年 10 月 10 日。程序版本：`0.1.0-dev.10`。仓库：`E:\Program\ShellBot`，分支 `main`。
+更新日期：2026 年 10 月 10 日。程序版本：`0.1.0-dev.11`。仓库：`E:\Program\ShellBot`，分支 `main`。
 
-当前基准提交为 `2dd0d84da8ffbac4903dae3f03066c40e237b1b9`，M2 由用户提交并推送；本地 HEAD 与 origin/main 跟踪引用一致。M3 是基于该提交的本地未提交更改，没有推送。保留解决方案项目身份、dev.9 回退基线及旧 ZIP；dev.10 是本机构建验证的开发候选，没有生成新测试包，完整项目权限及候选验收仍未完成。
+当前基准提交为 `cb2d26b7dc2552e2014cdcc3207342397365ce25`，M3 已由用户提交并推送；本地 HEAD 与 origin/main 跟踪引用一致，未重新查询远端。M4 是本地未提交更改，没有推送。保存完整 dev.10 回退基线 build/baseline-dev10-m4-20261010，保留原工程身份、旧包和全部旧基线。dev.11 为本地开发候选，没有生成新包，独立机器及实际客户端验收未完成。
 
-## dev.10 M3 项目 MCP 地址与认证
+## dev.11 M4 全工具审批与实际受限执行
+
+正常项目的 fs_list/read/search、image_view、fs_write/patch 和 task_start/input 统一接入策略与原审批队列；沿用本机 project-owner 查看、批准、拒绝、撤销及列表。always 在批准前仅返回元数据和待办，没有文件正文、搜索片段、图像或副作用；workspace_auto 按工作目录/额外目录分类，never 仍执行只读、工具、范围及身份上限。HTTP project-mcp 与 manager-owner 的批准按 actor 隔离。当前账户文件范围新增绝对本地盘符路径适配，按物理父目录保留显式只读覆盖，不能分类时拒绝。
+
+许可绑定项目、策略、实例、调用者、规范参数、对象身份/版本、期限和预算；执行前重新核验。读取分页按 next_offset 延续原许可，总量为 1 MiB 文本或 1000 个目录项；同页可重试，跳页及目标变化拒绝。大图像超缓存时在原版本/期限内重读，预算只计一次。自动纯读取不占审批记录；修改保留完成回执和原备份，拒绝重复副作用。记录不自动淘汰；用尽后需要所有者复核并明确重启。创建禁止覆盖；修改在读原文前独占核验、检查 expected_sha256、保存私有备份，仍不是崩溃原子保存。
+
+新增 Windows LPAC 后端：每工作进程独立 AppContainer profile/SID、零 capabilities、退出 ALL APPLICATION PACKAGES 授权、禁止 Win32k 和子进程、单进程 Job。实际 token 与 AccessCheck 对照及原生行为探针全部通过才开放任务；不足条件时保持不可用，文件工具可继续使用。TokenIsLessPrivilegedAppContainer 查询在开发机返回 ERROR_INVALID_PARAMETER，不把不支持的查询误当成证据。该后端开放精确声明的 readonly runtime_files，最多 16 个程序/DLL/资源，固定其读句柄；禁止管理 Data 作为运行资源。主工程会构建旁置产品依赖 ShellBot-SandboxProbe.exe，原生开发夹具不是产品依赖。
+
+批准后钉住实际程序，通过有界流式 SHA-256 将程序内容摘要绑定任务 request_key；原任务/输入幂等逻辑及归属、输出、取消、期限与环境允许列表保留。目录 ACL 初次授权最多 1024 个对象/16 层，不包含重解析点或多硬链接文件，不授予 WRITE_DAC/WRITE_OWNER。活动注册配置文件被钉住，禁止写入与替换；所有者可导出新配置再明确重启。
+
+每次 ACL 变更前刷新受保护的恢复日志，记录 profile/SID、物理路径及对象标识，没有内容和凭据。正常停止先杀本人 Job，再清理该实例 SID 授权和 profile；清理包括任务新建文件，对联接只处理链接对象。原 owner/group/其他 ACL 保留。管理器异常退出后，在显式启动前恢复，成功保存受保护的 .done 回执；清理失败状态 cleanup_required 阻止新启动。恢复不重跑操作，也不恢复批准和任务。
+
+完整测试统计、程序摘要及最终证据见 [M4 交接](HANDOFF_20261010_M4.md)、build/validation/m4-local-acceptance.json 和 m4-source-manifest.json。x64 Debug/Release 的报告为 x64-{Debug,Release}-{m1,m2,m3,m4,core}.json，各报告绑定对应程序 SHA-256。M4 固定原生程序对照实际普通账户与 LPAC：目录外读取、只读写入、管理日志、改 ACL、所有者管道、父进程注入、注册表、网络、子进程和 Win32k；另测运行期间新增联接的外部目标拒绝、下次启动已有联接拒绝、停止恢复原 ACL 和新文件授权、明确重启实测。64 KiB HTTP 写入及超缓存图像重试也通过；保留测试文件不含 bearer 值。
+
+初次通过额外 Windows PowerShell 宿主运行时，旧 M2 联接夹具创建曾被拒绝，直接运行通过，改为当前宿主执行全流程后不再阻塞；宿主相关性是本机观察，不作为根因结论。新增配置写保护使旧“运行时改注册文件”测试按预期被拒绝，M2/M3 断言同步为写保护及原策略/路由保持有效。核心初次因测试仍断言 dev.10 失败，更新至 dev.11 后通过。独立失败目录保留，早期汇总报告由最终报告替换；build/validation/m4-initial-validation-failures.json 保存工具输出的诊断摘要，明确不是原始报告副本。最终复核补齐已完成读取许可的撤销/到期、实际项目审批模式与配额报告，再对新程序完整回归。构建审批两次出现连接中断、操作未执行，经相同审批流程重试完成；没有绕过审查、降低安全断言、关闭编译警告或修改系统工具链。
+
+用户已允许必要人工操作，M4 不需要 UAC，未运行管理员专项。核心继续跳过管理员启动、开发机不可用的硬链接夹具和历史 close 诊断，不把 skipped 计为通过。LPAC 初期只支持兼容已声明资源和无网络/子进程/Win32k 的原生程序，不宣称通用 PowerShell、GUI、构建工具或所有 Windows 版本兼容；它不是只暴露 cwd 的虚拟机，也不隔离已获账户/管理员权限的程序。M5 共享管理员代理、M6 远程审批与持久任务、独立 Windows/Server、真实 MCP 客户端及已有公网隧道验收仍待完成。本轮未改实际配置、用户 Data 或隧道，未提交、推送或打包。
+
+| 最终 M4 本机检查 | Debug | Release |
+| --- | --- | --- |
+| M1 配置/策略 | 418 | 418 |
+| M2 实际项目进程 | 224 | 222 |
+| M3 实际 HTTP 网关 | 333 | 336 |
+| M4 审批及 LPAC | 584 | 587 |
+| 旧核心，排除 close/UAC | 2418 | 2418 |
+| 总计 | 3977 | 3981 |
+
+十份报告均匹配最终主程序，M1 原生策略程序摘要也已核对；解决方案 x64 Release 增量构建通过且程序摘要未改变。dev.10 回退的 96 个 Git 文件与基准提交逐个 blob 一致，原 Debug/Release 与原回执一致，四份旧包摘要核对通过。当前源码/文档清单为 103 文件，最终未发现主程序或原生探针/夹具残留。计数差异包含时序轮询及保留文件数量。
+
+## dev.10 M3 项目 MCP 地址与认证（历史基线）
 
 普通管理器新增可选 --http，仍共用回环端口 8765。每项目 /projects/ID/mcp 和 /projects/ID/healthz 只接受该项目独立 bearer；/mcp、/healthz 只有显式 default_project_id 时绑定该项目，不通过客户端参数选择项目。缺失、无效或重复令牌阻止整个网关启动；凭据只进入管理器缓冲，不进入工作进程消息、子进程环境、生成地址或日志。--project-links 返回本机及可选公共地址，不探测域名或更改已有隧道，见 [项目网关](PROJECT_GATEWAY.md)。
 
@@ -107,11 +136,11 @@ HTTP 仅监听 127.0.0.1，要求 bearer，拒绝格式错误的 Host/Origin、U
 
 先前 dev.2 的 Debug 与 Release x64 核心套件各通过 521 项断言。测试启动真实 stdio 和 HTTP 进程，包含 Unicode 分页、图像字节、多根目录、目录联接逃逸、创建请求无副作用、查看完整内容、批准/拒绝/撤销/过期/重启失效、队列预算、目录实体替换、禁止覆盖、参数篡改、16 次并发写入重试、100 次并发 HTTP 查询、持续连接和本机停止。
 
-当前 dev.10 核心报告为 build/validation/x64-Debug-core.json 与 x64-Release-core.json；dev.9 原报告另存 build/baseline-dev9-m3-20261010/validation，dev.7 原报告在 build/baseline-dev7-m1-20261010/validation。核心范围明确排除关闭连接诊断，并通过 skipped 记录未执行的夹具和管理员启动。旧版本归档及 ZIP 保留；dev.5 Release 和两份 1515 项核心报告保存在 build/baseline-dev5-permissions-20261007，已交付 dev.5 ZIP 不变。
+当前 dev.11 核心报告为 build/validation/x64-Debug-core.json 与 x64-Release-core.json；dev.10 原报告另存 build/baseline-dev10-m4-20261010/validation，dev.9 在 build/baseline-dev9-m3-20261010/validation，dev.7 在 build/baseline-dev7-m1-20261010/validation。核心范围明确排除关闭连接诊断，并记录未执行的夹具和管理员启动。旧基线与 ZIP 保留。
 
 历史完整测试包含 100 次客户端主动关闭连接的诊断；开发机曾出现 WinError 10054 或响应提前结束，因此完整套件未通过。独立 Python 参考 HTTP 服务在当前机器同样复现：100 次 keep-alive 调用无失败，100 次 close 调用有 13 次失败。Windows PowerShell 原生 TCP 测试也复现，不是 Python 客户端专有现象。已尝试显式有界 linger、禁用 Nagle 和合并响应发送，不能据此声称根因已解决。网络配置、操作系统和实现的具体责任仍待进一步证据。
 
-旧 dev.2 Release 完整报告保存在 build/validation/x64-Release-full.json，关闭连接诊断为 100 次中失败 14 次，不通过重试隐藏失败。该文件不代表当前 dev.10 的报告，需按 artifact.sha256 区分。独立参考诊断为 build/http_reference_probe.py；测试报告、缓存和产物不入版本控制。dev.2 的直接 DLL 依赖为 WS2_32、bcrypt、SHELL32、ole32、ADVAPI32、KERNEL32，没有额外 CRT DLL。
+旧 dev.2 Release 完整报告保存在 build/validation/x64-Release-full.json，关闭连接诊断为 100 次中失败 14 次，不通过重试隐藏失败。该文件不代表当前 dev.11 的报告，需按 artifact.sha256 区分。独立参考诊断为 build/http_reference_probe.py；测试报告、缓存和产物不入版本控制。dev.2 的直接 DLL 依赖为 WS2_32、bcrypt、SHELL32、ole32、ADVAPI32、KERNEL32，没有额外 CRT DLL。
 
 ## Server 2025 测试交付
 

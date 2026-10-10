@@ -28,6 +28,8 @@ typedef struct {
     sb_execution_identity default_identity;
     bool administrator_allowed; /* Owner configuration, independent of agent availability. */
     uint32_t tools;
+    char *runtime_files[16]; /* Owner-configured, exact readonly executable/DLL resources. */
+    size_t runtime_file_count;
 } sb_project_policy;
 
 struct sb_project {
@@ -60,6 +62,7 @@ typedef struct {
     bool current_user_target; /* Trusted resolver classified an unlisted, account-accessible file. */
     sb_execution_identity identity;
     bool owned_task; /* Backend verified both project and authenticated actor, not a JSON boolean. */
+    bool restricted_backend_verified; /* Actual local sandbox verification, never accepted from JSON. */
 } sb_project_operation;
 
 typedef struct { sb_decision decision; const char *reason; } sb_policy_result;

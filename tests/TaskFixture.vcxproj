@@ -11,7 +11,7 @@
   <PropertyGroup><OutDir>$(MSBuildProjectDirectory)\..\out\$(Platform)\$(Configuration)\</OutDir><IntDir>$(MSBuildProjectDirectory)\..\build\$(Platform)\$(Configuration)\test-fixture\</IntDir><TargetName>ShellBot-TestFixture</TargetName></PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile><CompileAs>CompileAsC</CompileAs><LanguageStandard_C>stdc17</LanguageStandard_C><WarningLevel>Level4</WarningLevel><TreatWarningAsError>true</TreatWarningAsError><AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions><PreprocessorDefinitions>WINVER=0x0A00;_WIN32_WINNT=0x0A00;%(PreprocessorDefinitions)</PreprocessorDefinitions><RuntimeLibrary>MultiThreaded</RuntimeLibrary></ClCompile>
-    <Link><SubSystem>Console</SubSystem><AdditionalDependencies>Advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
+    <Link><SubSystem>Console</SubSystem><AdditionalDependencies>Advapi32.lib;Ws2_32.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
     <Manifest><AdditionalManifestFiles>$(MSBuildProjectDirectory)\..\WinShellBot\app\shellbot.manifest;%(AdditionalManifestFiles)</AdditionalManifestFiles></Manifest>
   </ItemDefinitionGroup>
   <ItemGroup><ClCompile Include="task_native_fixture.c" /></ItemGroup>
