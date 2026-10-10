@@ -59,18 +59,18 @@ sb_policy_result sb_project_evaluate(const sb_request_context *context, const sb
         if (!project->policy.administrator_allowed) return result(SB_DECISION_DENY, "administrator_not_allowed");
         if (project->policy.file_scope != SB_FILES_CURRENT_USER && !project->legacy_compatibility)
             return result(SB_DECISION_DENY, "administrator_incompatible_with_isolation");
-        /* The dev.7 single-host agent cannot establish a trusted project binding. */
-        return result(SB_DECISION_DENY, "project_administrator_backend_unavailable");
+        if (project->legacy_compatibility || !operation->administrator_backend_verified)
+            return result(SB_DECISION_DENY, "project_administrator_backend_unavailable");
     }
     if (command) {
         if (!project->policy.execution_enabled) return result(SB_DECISION_DENY, "execution_disabled");
-        if (operation->identity != project->policy.default_identity)
+        if (operation->identity != project->policy.default_identity && operation->identity != SB_ID_ADMINISTRATOR)
             return result(SB_DECISION_DENY, "execution_identity_exceeds_policy");
         if (operation->identity == SB_ID_RESTRICTED && !operation->restricted_backend_verified)
             return result(SB_DECISION_DENY, "restricted_backend_unverified");
         if (operation->identity == SB_ID_CURRENT_USER && project->policy.file_scope != SB_FILES_CURRENT_USER && !project->legacy_compatibility)
             return result(SB_DECISION_DENY, "directory_isolation_unavailable");
-        if (!project->legacy_compatibility && operation->identity == SB_ID_CURRENT_USER) {
+        if (!project->legacy_compatibility && operation->identity != SB_ID_RESTRICTED) {
             if (project->policy.current_user_read_only)
                 return result(SB_DECISION_DENY, "read_only_command_isolation_unavailable");
             for (size_t i = 0; i < project->directory_count; ++i)

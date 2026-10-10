@@ -1,8 +1,8 @@
 # M1 项目配置与统一权限策略
 
-更新日期：2026 年 10 月 10 日。代码版本：`0.1.0-dev.11`。配置格式：`format_version: 1`。
+更新日期：2026 年 10 月 10 日。代码版本：`0.1.0-dev.12`。配置格式：`format_version: 1`。
 
-M1 完成配置、统一判断和旧配置显式迁移；M2/M3 接入项目运行与地址。M4 已接通全文件/命令审批、当前账户文件适配和实际 LPAC 受限执行，见 [项目审批与受限执行](PROJECT_APPROVALS.md)。共享管理员代理和远程审批仍待 M5/M6；`--config` 遇到版本化配置会在创建 Data 或初始化执行身份之前拒绝。
+M1 完成配置、统一判断和旧配置显式迁移；M2/M3 接入项目运行与地址。M4 接通全文件/命令审批、当前账户文件适配和实际 LPAC 受限执行，见 [项目审批与受限执行](PROJECT_APPROVALS.md)。M5 接通[共享管理员代理](SHARED_ADMINISTRATOR.md)，远程审批和持久恢复留待 M6；`--config` 遇到版本化配置会在创建 Data 或初始化执行身份之前拒绝。
 
 ## 配置和校验入口
 
@@ -39,7 +39,7 @@ policy.approval_mode 为 always、workspace_auto 或 never。always 对全部文
 
 policy.files.scope 为 configured 或 current_user。configured 仅包含工作目录和显式 extra_directories；current_user 额外允许账户可访问的文件范围，其他位置的 current_user_read_only 默认 true，必须显式 false 才能写。current_user_read_only 只可用于 current_user 范围。显式目录的 read_only 独立保留，不因全文件范围或 never 被覆盖。
 
-policy.execution 保存 enabled、default_identity、administrator_allowed 和可选 runtime_files。普通默认身份只能为 restricted 或 current_user。管理员操作须明确选择身份；正常新配置禁止向 restricted 或 configured 隔离项目授予 administrator_allowed。M5 前项目管理员后端不可用，不能复用 dev.7 单主机代理冒充项目授权。
+policy.execution 保存 enabled、default_identity、administrator_allowed 和可选 runtime_files。普通默认身份只能为 restricted 或 current_user。管理员操作须明确选择 identity:administrator；正常新配置禁止向 restricted 或 configured 隔离项目授予 administrator_allowed。许可只允许使用已由所有者启动的共享代理，不隐式请求 UAC；命令还必须开启 enabled。运行期 allow/revoke 不写回注册配置，持久更新继续导出配置并明确重启。
 
 runtime_files 只允许 restricted，最多 16 个不重复绝对文件路径。运行时限本地盘符、普通单链接文件，分别授予只读/执行，并在整个工作进程期间保持读句柄，阻止写入、删除和替换。列表中的 .exe 才能作为 task_start 程序；可以额外列出它需要的 DLL 或只读资源，不能授予整个系统目录。管理器或任一项目 Data 内的文件不可列为运行资源。ShellBot-SandboxProbe.exe 是旁置的产品启动检查依赖，由主工程自动构建，不是用户测试夹具；缺失时受限后端不可用。
 
@@ -73,7 +73,7 @@ M4 在 evaluator 外复用原审批队列与所有者入口，绑定项目、act
 
 dev.7 的读取自动、写入本机审批和已启用 user/administrator 命令预授权不能等价映射到一个新的统一审批模式。兼容封装保留原始 roots/read_only、http、execution 档位及 controlled 的 always/rules、审批期限和审计预算；不把原 user/administrator 转成全盘文件工具访问，也不免除文件写入审批。新 project.data_dir 是 M2 工作进程独立数据位置，legacy_config.data_dir 仅保留来源记录；旧任务和审批回执不迁移。兼容项目不允许同时写入新 policy、workspaces 或其他覆盖字段。
 
-兼容 user 的命令仍明确保留原账户信任和预授权语义；controlled 的未完成执行继续拒绝；administrator 不转成普通账户执行，且在新项目层仍因缺少可信代理而拒绝。迁移成功不启动项目，也不触发 UAC。
+兼容 user 的命令仍明确保留原账户信任和预授权语义；controlled 的未完成执行继续拒绝；administrator 不转成普通账户执行，兼容项目仍不允许注册 M5 共享代理。迁移成功不启动项目，也不触发 UAC。
 
 ## 验证和仍待完成项
 
@@ -81,4 +81,4 @@ scripts/build.ps1 另编译开发用 ShellBot-ProjectPolicyTests.exe，不属于
 
 Debug/Release 的最终结果及程序摘要见 [实现记录](IMPLEMENTATION_STATUS.md) 和 build/validation/x64-Debug-m1.json、x64-Release-m1.json。专项原始目录和失败报告保留在 tests/test-results；dev.7 基线在 build/baseline-dev7-m1-20261010。
 
-M1–M4 已完成本机自动验证；M5 接逐项目管理员授权。历史 HTTP close 问题、独立机器、通用程序兼容性及真实 MCP 客户端验收仍单独记录。
+M5 已接逐项目管理员授权。历史 HTTP close 问题、独立机器、通用程序兼容性及真实 MCP 客户端验收仍单独记录。

@@ -24,7 +24,7 @@ typedef struct task {
     const char *reason;
     task_input inputs[INPUT_RECORDS]; size_t input_count;
 } task;
-struct sb_win_tasks { SRWLOCK lock; task *items[TASK_RECORDS]; HANDLE stop, monitor; sb_execution_profile profile; bool elevated; sb_resource_limits limits; sb_win_sandbox *sandbox; };
+struct sb_win_tasks { SRWLOCK lock; task *items[TASK_RECORDS]; HANDLE stop, monitor, worker; sb_execution_profile profile; bool elevated; sb_resource_limits limits; sb_win_sandbox *sandbox; };
 typedef struct { task *item; unsigned stream; } reader_context;
 
 static char *serialize(yyjson_mut_doc *doc, yyjson_mut_val *root) {
@@ -139,6 +139,9 @@ static DWORD WINAPI monitor_tasks(void *parameter) {
             task *item = tasks->items[i]; if (!item) continue;
             AcquireSRWLockExclusive(&item->lock);
             if (!item->finished) {
+                if (tasks->worker && WaitForSingleObject(tasks->worker,0) != WAIT_TIMEOUT && !item->reason) {
+                    item->reason="cancelled"; TerminateJobObject(item->job,125); SetEvent(item->input_event);
+                }
                 JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting = {0};
                 bool queried = QueryInformationJobObject(item->job, JobObjectBasicAccountingInformation, &accounting, sizeof(accounting), NULL) != FALSE;
                 if (!queried && !item->reason) { item->reason = "failed"; TerminateJobObject(item->job, 125); }
@@ -188,9 +191,32 @@ sb_win_tasks *sb_win_tasks_new_limited(sb_execution_profile profile, const sb_re
 void sb_win_tasks_free(sb_win_tasks *tasks) {
     if (!tasks) return;
     SetEvent(tasks->stop); WaitForSingleObject(tasks->monitor, INFINITE); CloseHandle(tasks->monitor); CloseHandle(tasks->stop);
-    for (size_t i = 0; i < TASK_RECORDS; ++i) task_free(tasks->items[i]); free(tasks);
+    for (size_t i = 0; i < TASK_RECORDS; ++i) task_free(tasks->items[i]);
+    if (tasks->worker) CloseHandle(tasks->worker); free(tasks);
+}
+bool sb_win_tasks_watch_worker(sb_win_tasks *tasks, HANDLE worker) {
+    HANDLE copy=NULL;
+    if (!tasks || !worker || !DuplicateHandle(GetCurrentProcess(),worker,GetCurrentProcess(),&copy,SYNCHRONIZE,FALSE,0)) return false;
+    AcquireSRWLockExclusive(&tasks->lock);
+    if (tasks->worker) { ReleaseSRWLockExclusive(&tasks->lock); CloseHandle(copy); return false; }
+    tasks->worker=copy; ReleaseSRWLockExclusive(&tasks->lock); return true;
 }
 void sb_win_tasks_restrict(sb_win_tasks *tasks, sb_win_sandbox *sandbox) { tasks->sandbox=sandbox;tasks->profile=SB_EXEC_CONTROLLED; }
+bool sb_win_tasks_cancel_all(sb_win_tasks *tasks) {
+    if (!tasks) return true;
+    bool ok = true;
+    AcquireSRWLockExclusive(&tasks->lock);
+    for (size_t i = 0; i < TASK_RECORDS; ++i) {
+        task *item = tasks->items[i]; if (!item) continue;
+        AcquireSRWLockExclusive(&item->lock);
+        if (!item->finished) {
+            if (TerminateJobObject(item->job, 125)) { item->reason = "cancelled"; SetEvent(item->input_event); }
+            else ok = false;
+        }
+        ReleaseSRWLockExclusive(&item->lock);
+    }
+    ReleaseSRWLockExclusive(&tasks->lock); return ok;
+}
 static yyjson_mut_val *snapshot(sb_win_tasks *tasks, task *item, yyjson_mut_doc *doc) {
     yyjson_mut_val *result = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_strcpy(doc, result, "task_id", item->id);

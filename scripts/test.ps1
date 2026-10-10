@@ -23,6 +23,9 @@ if ($Platform -eq 'x64') {
     $approvalReport = Join-Path $repoRoot "build\validation\$Platform-$Configuration-m4.json"
     & $interpreter.Source (Join-Path $repoRoot 'tests\approval_checks.py') --exe $executable --report $approvalReport
     if ($LASTEXITCODE -ne 0) { throw "Approval and restricted execution validation failed ($LASTEXITCODE). Report: $approvalReport" }
+    $administratorReport = Join-Path $repoRoot "build\validation\$Platform-$Configuration-m5-ordinary.json"
+    & $interpreter.Source (Join-Path $repoRoot 'tests\shared_admin_checks.py') --exe $executable --report $administratorReport
+    if ($LASTEXITCODE -ne 0) { throw "Shared administrator ordinary validation failed ($LASTEXITCODE). Report: $administratorReport" }
 }
 $suffix = if ($SkipCloseProbe) { '-core' } else { '-full' }
 $report = Join-Path $repoRoot "build\validation\$Platform-$Configuration$suffix.json"

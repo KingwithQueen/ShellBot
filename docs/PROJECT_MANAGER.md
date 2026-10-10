@@ -1,6 +1,6 @@
 # 项目管理器与工作进程
 
-更新日期：2026 年 10 月 10 日。程序版本：`0.1.0-dev.11`。M2 提供普通管理器、独立工作进程与本机所有者入口；M3 提供项目 HTTP；M4 接通完整审批和实际 LPAC 后端，见 [项目审批与受限执行](PROJECT_APPROVALS.md)。
+更新日期：2026 年 10 月 10 日。程序版本：`0.1.0-dev.12`。M2 提供普通管理器、独立工作进程与本机所有者入口；M3 提供项目 HTTP；M4 接通完整审批和实际 LPAC 后端，见 [项目审批与受限执行](PROJECT_APPROVALS.md)。M5 提供[共享管理员代理](SHARED_ADMINISTRATOR.md)。
 
 ## 创建与配置
 
@@ -22,7 +22,7 @@ $bot = 'E:/Program/ShellBot/out/x64/Release/WinShellBot.exe'
 
 ## 启动、查询和停止
 
-管理器必须由普通、未提升的账户启动；已提升、低完整性、受限或 AppContainer 入口会被拒绝。管理器与工作进程均不启动管理员代理。
+管理器必须由普通、未提升的账户启动；已提升、低完整性、受限或 AppContainer 入口会被拒绝。管理器和工作进程保持普通令牌，不在项目启动时自动请求 UAC；仅本机所有者的 administrator-start 可启动共享代理。
 
 ```powershell
 & $bot --manager --projects E:/ShellBotSettings/projects.v2.json `
@@ -48,7 +48,7 @@ $bot = 'E:/Program/ShellBot/out/x64/Release/WinShellBot.exe'
 
 ## 本机请求入口
 
-本机管理使用受保护的所有者通道，核验实际连接令牌、账户及受限身份，不接受 MCP bearer 凭据。管理器省略 --http 时不监听 HTTP；启用 --http 后，项目 MCP 仍不能调用管理入口。管理员共享授权和远程审批尚未接入。
+本机管理使用受保护的所有者通道，核验实际连接令牌、账户及受限身份，不接受 MCP bearer 凭据。管理器省略 --http 时不监听 HTTP；启用 --http 后，项目 MCP 仍不能调用管理入口。administrator-start/status/stop 和 project-administrator-allow/revoke/owner 只供本机所有者；远程审批尚未接入。
 
 ```powershell
 & $bot --project-request project-a --request E:/ShellBotSettings/request.json `
@@ -103,9 +103,9 @@ request.json 是一个 JSON-RPC 对象。例如使用逐请求协议读取当前
 | 正常新项目写入 | 按模式自动或审批；创建不覆盖，修改需原始哈希、独占打开与私有备份 |
 | 迁移项目文件修改 | 保留原 pending/批准/重试、对象与哈希复核、私有备份行为，各项目队列独立 |
 | 非目录列表内的账户文件 | 显式 current_user 范围允许省略 workspace_id、使用绝对本地盘符路径；物理只读覆盖保留 |
-| 项目管理员能力 | 固定不可用，包含从旧 administrator 配置迁移的项目；不请求 UAC |
+| 项目管理员能力 | 已获许可的新 current_user 项目显式选 administrator，使用管理器持有的共享代理及独立审批；旧管理员迁移、restricted/configured 项目仍拒绝 |
 
-所有项目的所有者请求通过 `--project-owner ID --request FILE --manager-data-dir DIR` 路由到原队列。FILE 使用 `{"command":"inspect","id":"审批编号"}`、approve、deny、revoke 或 list。M4 不建立第二套审批通道，MCP 没有批准接口。旧 `--approve --data-dir` 不连接管理器托管项目。
+普通项目操作的所有者请求通过 `--project-owner ID --request FILE --manager-data-dir DIR` 路由到原队列；M5 管理员操作使用 `--project-administrator-owner` 路由到代理中的独立队列。FILE 使用 `{"command":"inspect","id":"审批编号"}`、approve、deny、revoke 或 list；两个队列不能互相批准。MCP 没有批准接口。旧 `--approve --data-dir` 不连接管理器托管项目。
 
 停止和失败不自动重跑任务。文件审批回执与任务仍主要保存在内存，工作进程结束后失效；日志及私有备份保留。多个普通工作进程和 API 归属检查不构成对任意同账户程序的操作系统沙箱。
 
@@ -113,6 +113,6 @@ request.json 是一个 JSON-RPC 对象。例如使用逐请求协议读取当前
 
 ## 验证
 
-`scripts/test.ps1` 的 x64 流程依次执行 M1、M2、M3、M4 和既有核心回归。M4 使用真实原生程序对照 LPAC 和 current_user 权限，不采用编码脚本或请求 UAC；迁移管理员项目仍只验证普通工作进程与管理员拒绝。
+`scripts/test.ps1` 的 x64 流程依次执行 M1、M2、M3、M4、M5 无 UAC 路径和既有核心回归。M4 使用真实原生程序对照 LPAC 和 current_user 权限，不采用编码脚本或请求 UAC；迁移管理员项目仍只验证普通工作进程与管理员拒绝。M5 真实提升、取消 UAC 和退出清理另由 Test-ShellBot-SharedAdministrator.ps1 显式运行，见共享代理说明。
 
-报告在 build/validation/x64-Debug-m2.json 与 x64-Release-m2.json，记录程序摘要、检查结果和独立测试 Data 目录。原始失败目录保留，dev.8 回退基线为 build/baseline-dev8-m2-20261010，dev.9 为 build/baseline-dev9-m3-20261010。独立机器、真实客户端和新版本 UAC 验收未执行；M2 当时用户离开，M3 用户已回来并恢复必要人工操作授权，但本阶段不需要提权测试。
+报告在 build/validation/x64-Debug-m2.json 与 x64-Release-m2.json，记录程序摘要、检查结果和独立测试 Data 目录。原始失败目录保留，dev.8 回退基线为 build/baseline-dev8-m2-20261010，dev.9 为 build/baseline-dev9-m3-20261010。M2 当时用户离开，M3 用户已回来并恢复必要人工操作授权；两阶段本身不需要提权测试。dev.12 M5 的人工 UAC 验证见 [M5 交接](HANDOFF_20261010_M5.md)，独立机器和真实客户端仍待验收。

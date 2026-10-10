@@ -6,7 +6,7 @@
 #include <stdint.h>
 #include "yyjson.h"
 
-#define SB_VERSION "0.1.0-dev.11"
+#define SB_VERSION "0.1.0-dev.12"
 #define SB_MAX_ROOTS 16
 #define SB_MAX_WORKSPACES (SB_MAX_ROOTS * 2)
 #define SB_PATH_CAP 32768
@@ -69,6 +69,10 @@ typedef struct {
     bool http_mode;
     uint64_t started_ms;
     sb_execution *execution;
+    bool administrator_backend; /* Trusted manager status, never read from tool arguments. */
+    bool administrator_host; /* Only the verified elevated project host sets this. */
+    char *(*administrator_call)(void *context, const char *name, yyjson_val *arguments);
+    void *administrator_context;
     const char *approved_target_version, *approved_program_version; /* Private per-call worker guards; never parsed from JSON. */
 } sb_host;
 typedef struct {

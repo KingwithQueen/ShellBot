@@ -27,6 +27,12 @@ static void usage(void) {
           "       WinShellBot --project-request | --project-owner ID --request FILE\n"
           "                  --manager-data-dir ABSOLUTE_DIR (local owner channel only)\n"
           "       WinShellBot --manager-stop --manager-data-dir ABSOLUTE_DIR\n"
+          "       WinShellBot --administrator-start | --administrator-status | --administrator-stop\n"
+          "                  --manager-data-dir ABSOLUTE_DIR (start explicitly requests UAC)\n"
+          "       WinShellBot --project-administrator-allow | --project-administrator-revoke ID\n"
+          "                  --manager-data-dir ABSOLUTE_DIR (owner only; current manager lifetime)\n"
+          "       WinShellBot --project-administrator-owner ID --request FILE --manager-data-dir ABSOLUTE_DIR\n"
+          "       WinShellBot --project-administrator-boundary-probe ID --manager-data-dir ABSOLUTE_DIR\n"
           "       WinShellBot --migrate-config OLD --output NEW --project-id ID\n"
           "                  --project-data-dir NEW_ABSOLUTE_DIR (backs up OLD; does not migrate Data)\n"
           "       WinShellBot --execution-status [--config FILE] [--data-dir ABSOLUTE_DIR]\n"
@@ -199,6 +205,7 @@ bad_args:
 int wmain(int argc, wchar_t **wide_argv) {
     if (argc >= 2 && !wcscmp(wide_argv[1], L"--project-worker")) return sb_project_worker(argc, wide_argv);
     if (argc >= 2 && !wcscmp(wide_argv[1], L"--execution-agent")) return sb_win_execution_agent(argc, wide_argv);
+    if (argc >= 2 && !wcscmp(wide_argv[1], L"--shared-administrator-agent")) return sb_win_execution_agent(argc, wide_argv);
     char **argv = calloc((size_t)argc, sizeof(*argv));
     if (!argv) return 2;
     for (int i = 0; i < argc; ++i) {

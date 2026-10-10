@@ -7,6 +7,7 @@
 #include "execution.h"
 #include "task_process.h"
 #include "sandbox.h"
+#include "shared_admin.h"
 
 
 /* A 16 KiB UTF-8 page can expand to six JSON bytes per control byte,
@@ -21,6 +22,7 @@
 #define SB_AGENT_QUERY 1u
 #define SB_AGENT_STOP 2u
 #define SB_AGENT_TASK 3u
+#define SB_AGENT_SHARED 4u
 
 typedef struct {
     DWORD magic, version, process_id, session_id, integrity;
@@ -172,13 +174,13 @@ static bool agent_query(sb_execution *execution) {
     return ok;
 }
 
-static bool start_agent(sb_execution *execution, sb_error *error) {
+static bool start_agent(sb_execution *execution, bool shared, sb_error *error) {
     unsigned char random[16]; char nonce[33];
     if (!sb_platform_random(random, sizeof(random), error)) return false;
     for (size_t i = 0; i < sizeof(random); ++i) snprintf(nonce + i * 2, 3, "%02x", random[i]);
     wchar_t name[128], arguments[128], image[SB_PATH_CAP];
     swprintf(name, 128, L"\\\\.\\pipe\\ShellBot-execution-%lu-%hs", GetCurrentProcessId(), nonce);
-    swprintf(arguments, 128, L"--execution-agent %lu %hs", GetCurrentProcessId(), nonce);
+    swprintf(arguments, 128, L"%ls %lu %hs", shared ? L"--shared-administrator-agent" : L"--execution-agent", GetCurrentProcessId(), nonce);
     DWORD image_size = GetModuleFileNameW(NULL, image, SB_PATH_CAP);
     if (!image_size || image_size >= SB_PATH_CAP) { sb_fail(error, "Cannot identify the administrator agent executable."); return false; }
     wchar_t sddl[384]; PSECURITY_DESCRIPTOR descriptor = NULL;
@@ -242,6 +244,9 @@ static bool start_agent(sb_execution *execution, sb_error *error) {
     if (strcmp(actual.user_sid, execution->agent.user_sid)) {
         sb_fail(error, "Administrator agent identity reply did not match the operating system."); return false;
     }
+    if (shared && (strcmp(actual.user_sid, execution->host.user_sid) || actual.session_id != execution->host.session_id)) {
+        sb_fail(error, "Shared administrator agent requires same-account elevation in the owner session; cross-account elevation is unavailable."); return false;
+    }
     return true;
 }
 
@@ -272,7 +277,7 @@ sb_execution *sb_execution_new(const sb_config *config, sb_error *error) {
         execution->tasks=sb_win_tasks_new_limited(SB_EXEC_USER, &config->limits);
         if (!execution->tasks) { sb_fail(error,"Cannot initialize ordinary user task execution.");goto failed; }
     }
-    if (execution->configured && execution->profile == SB_EXEC_ADMINISTRATOR && !start_agent(execution, error)) goto failed;
+    if (execution->configured && execution->profile == SB_EXEC_ADMINISTRATOR && !start_agent(execution, false, error)) goto failed;
     return execution;
 failed:
     sb_execution_free(execution); return NULL;
@@ -334,7 +339,7 @@ bool sb_execution_task_owned(sb_execution *execution, const char *actor, const c
 bool sb_execution_available(sb_execution *execution) {
     if (!execution) return false;
     sb_platform_mutex_lock(execution->mutex);
-    bool ok=execution->configured && (((execution->profile==SB_EXEC_USER || execution->sandbox) && execution->tasks) ||
+    bool ok=execution->configured && (execution->tasks ||
         (execution->profile==SB_EXEC_ADMINISTRATOR && execution->agent_healthy && WaitForSingleObject(execution->process,0)==WAIT_TIMEOUT));
     sb_platform_mutex_unlock(execution->mutex);return ok;
 }
@@ -343,7 +348,7 @@ char *sb_execution_task(sb_execution *execution,const char *name,yyjson_val *arg
     sb_platform_mutex_lock(execution->mutex); char *reply=NULL;
     if (!execution->configured) sb_fail(error,"Command execution is disabled in local configuration.");
     else if (execution->profile==SB_EXEC_CONTROLLED && !execution->sandbox) sb_fail(error,"Controlled command execution is unavailable until its isolation and approval backend is verified.");
-    else if (execution->profile==SB_EXEC_USER || execution->sandbox) reply=sb_win_tasks_call(execution->tasks,name,arguments);
+    else if (execution->tasks) reply=sb_win_tasks_call(execution->tasks,name,arguments);
     else if (!execution->agent_healthy || WaitForSingleObject(execution->process,0)!=WAIT_TIMEOUT) sb_fail(error,"Administrator agent unavailable; no automatic restart or fallback.");
     else {
         yyjson_mut_doc *doc=yyjson_mut_doc_new(NULL);
@@ -417,6 +422,57 @@ yyjson_mut_val *sb_execution_status(sb_execution *execution, yyjson_mut_doc *doc
     return result;
 }
 
+sb_execution *sb_win_shared_start(sb_error *error) {
+    sb_config config; sb_config_defaults(&config);
+    sb_execution *execution = sb_execution_new(&config, error);
+    sb_config_free(&config);
+    if (!execution) return NULL;
+    if (!start_agent(execution, true, error)) { sb_execution_free(execution); return NULL; }
+    return execution;
+}
+bool sb_win_shared_alive(sb_execution *execution) {
+    return execution && execution->agent_healthy && execution->process && WaitForSingleObject(execution->process, 0) == WAIT_TIMEOUT;
+}
+char *sb_win_shared_exchange(sb_execution *execution, const char *request, sb_error *error) {
+    if (!sb_win_shared_alive(execution)) { sb_fail(error, "Shared administrator agent unavailable; explicit owner startup required, no fallback."); return NULL; }
+    DWORD command = SB_AGENT_SHARED, received = 0;
+    size_t length = request ? strlen(request) : 0;
+    char *reply = malloc(SB_RESPONSE_LIMIT + 1u);
+    bool ok = length && length <= SB_REQUEST_LIMIT + 65536u && reply && transfer(execution->pipe, &command, sizeof(command), true) &&
+        transfer(execution->pipe, (void *)request, (DWORD)length, true) && transfer_some(execution->pipe, reply, SB_RESPONSE_LIMIT, false, &received) && received;
+    if (ok) { reply[received] = 0; return reply; }
+    free(reply); execution->agent_healthy = false;
+    if (execution->pipe) { CloseHandle(execution->pipe); execution->pipe = NULL; }
+    sb_fail(error, "Shared agent exchange failed; jobs are stopped, side effects may have occurred. Do not replay with new keys."); return NULL;
+}
+sb_execution *sb_win_administrator_host(const sb_config *config, const sb_project *project, const char *instance, sb_error *error) {
+    sb_config disabled = *config; disabled.execution_enabled = false;
+    sb_execution *execution = sb_execution_new(&disabled, error);
+    if (!execution) return NULL;
+    if (!execution->host.elevated || !execution->host.administrator_enabled || execution->host.restricted || execution->host.appcontainer ||
+        execution->host.integrity < SECURITY_MANDATORY_HIGH_RID) { sb_fail(error, "Administrator project host token invalid."); sb_execution_free(execution); return NULL; }
+    execution->project = project; execution->profile = SB_EXEC_ADMINISTRATOR; execution->configured = config->execution_enabled;
+    strcpy(execution->instance, instance);
+    execution->tasks = sb_win_tasks_new_limited(SB_EXEC_ADMINISTRATOR, &config->limits);
+    if (!execution->tasks) { sb_fail(error, "Cannot allocate administrator project tasks."); sb_execution_free(execution); return NULL; }
+    return execution;
+}
+bool sb_win_execution_cancel_all(sb_execution *execution) { return !execution || sb_win_tasks_cancel_all(execution->tasks); }
+bool sb_win_execution_watch_worker(sb_execution *execution, HANDLE worker) { return execution && sb_win_tasks_watch_worker(execution->tasks,worker); }
+bool sb_win_shared_worker(DWORD pid, HANDLE *process) {
+    *process = NULL; HANDLE token = NULL, self_token = NULL; identity peer = {0}, self = {0};
+    HANDLE candidate = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);
+    wchar_t image[SB_PATH_CAP], own[SB_PATH_CAP]; DWORD size = SB_PATH_CAP;
+    bool ok = candidate && WaitForSingleObject(candidate, 0) == WAIT_TIMEOUT && QueryFullProcessImageNameW(candidate, 0, image, &size) &&
+        GetModuleFileNameW(NULL, own, SB_PATH_CAP) && !_wcsicmp(image, own) && OpenProcessToken(candidate, TOKEN_QUERY, &token) &&
+        read_identity(token, &peer) && sb_win_owner_token_allowed(token) && !peer.elevated && !peer.administrator_enabled &&
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &self_token) && read_identity(self_token, &self) &&
+        !strcmp(peer.user_sid, self.user_sid) && peer.session_id == self.session_id;
+    if (token) CloseHandle(token); if (self_token) CloseHandle(self_token);
+    if (ok) *process = candidate; else if (candidate) CloseHandle(candidate);
+    return ok;
+}
+
 int sb_win_execution_agent(int argc, wchar_t **argv) {
     if (argc != 4 || !*argv[2] || wcslen(argv[3]) != 32 || wcsspn(argv[3], L"0123456789abcdef") != 32) return 2;
     wchar_t *end = NULL;
@@ -433,6 +489,12 @@ int sb_win_execution_agent(int argc, wchar_t **argv) {
         GetModuleFileNameW(NULL, self_image, SB_PATH_CAP) && !_wcsicmp(parent_image, self_image) &&
         WaitForSingleObject(parent, 0) == WAIT_TIMEOUT;
     if (!ok) { if (parent) CloseHandle(parent); return 2; }
+    bool shared = !wcscmp(argv[1], L"--shared-administrator-agent");
+    if (shared) {
+        HANDLE verified = NULL;
+        if (!sb_win_shared_worker((DWORD)parent_id, &verified)) { CloseHandle(parent); return 2; }
+        CloseHandle(verified);
+    }
     wchar_t name[128]; swprintf(name, 128, L"\\\\.\\pipe\\ShellBot-execution-%lu-%ls", parent_id, argv[3]);
     HANDLE pipe = CreateFileW(name, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
         SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, NULL);
@@ -440,23 +502,25 @@ int sb_win_execution_agent(int argc, wchar_t **argv) {
     ok = pipe != INVALID_HANDLE_VALUE && GetNamedPipeServerProcessId(pipe, &server) && server == parent_id &&
         SetNamedPipeHandleState(pipe, &message_mode, NULL, NULL);
     if (!ok) { if (pipe != INVALID_HANDLE_VALUE) CloseHandle(pipe); CloseHandle(parent); return 2; }
-    sb_win_tasks *tasks=sb_win_tasks_new(SB_EXEC_ADMINISTRATOR);
-    if (!tasks) { CloseHandle(pipe);CloseHandle(parent);return 2; }
+    sb_win_tasks *tasks=shared ? NULL : sb_win_tasks_new(SB_EXEC_ADMINISTRATOR);
+    sb_shared_admin *projects = shared ? sb_shared_admin_new() : NULL;
+    if (shared ? !projects : !tasks) { CloseHandle(pipe);CloseHandle(parent);return 2; }
     int result = 0;
     while (WaitForSingleObject(parent, 0) == WAIT_TIMEOUT) {
         DWORD command = 0, bytes = 0;
         if (!ReadFile(pipe, &command, sizeof(command), &bytes, NULL)) break;
         if (bytes != sizeof(command)) { result=2;break; }
-        if (command==SB_AGENT_TASK) {
-            char *request=malloc(65537);DWORD length=0;
-            bool read=request && ReadFile(pipe,request,65536,&length,NULL) && length;
+        if ((command==SB_AGENT_TASK && !shared) || (command==SB_AGENT_SHARED && shared)) {
+            DWORD maximum = shared ? SB_REQUEST_LIMIT + 65536u : 65536u;
+            char *request=malloc((size_t)maximum + 1);DWORD length=0;
+            bool read=request && ReadFile(pipe,request,maximum,&length,NULL) && length;
             yyjson_doc *doc=read?yyjson_read(request,length,0):NULL;free(request);
             yyjson_val *root=doc?yyjson_doc_get_root(doc):NULL;
             const char *operation=sb_string(yyjson_obj_get(root,"name"));
-            char *reply=operation?sb_win_tasks_call(tasks,operation,yyjson_obj_get(root,"arguments")):NULL;
+            char *reply=shared ? sb_shared_admin_request(projects, root) : operation?sb_win_tasks_call(tasks,operation,yyjson_obj_get(root,"arguments")):NULL;
             yyjson_doc_free(doc);
             size_t reply_length=reply?strlen(reply):0;
-            bool wrote=reply_length && reply_length<=SB_AGENT_TASK_REPLY_LIMIT && WriteFile(pipe,reply,(DWORD)reply_length,&bytes,NULL) && bytes==reply_length;
+            bool wrote=reply_length && reply_length<=(shared ? SB_RESPONSE_LIMIT : SB_AGENT_TASK_REPLY_LIMIT) && WriteFile(pipe,reply,(DWORD)reply_length,&bytes,NULL) && bytes==reply_length;
             free(reply);if (!wrote) { result=2;break; }continue;
         }
         if (command!=SB_AGENT_QUERY && command!=SB_AGENT_STOP) { result=2;break; }
@@ -464,6 +528,7 @@ int sb_win_execution_agent(int argc, wchar_t **argv) {
         if (command == SB_AGENT_STOP) break;
     }
     sb_win_tasks_free(tasks);
+    sb_shared_admin_free(projects);
     CloseHandle(pipe); CloseHandle(parent); return result;
 }
 

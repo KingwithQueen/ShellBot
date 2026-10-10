@@ -33,7 +33,7 @@ yyjson_mut_val *sb_tasks_call(sb_host *host,const char *actor,const char *name,y
             program_root=sb_platform_account_parent(exe,&program_relative,&error);
             program_file=program_root?sb_platform_open(program_root,program_relative,false,&error):NULL;
             bool same=program_file && sb_platform_file_version(program_file,program_version,&error) && !strcmp(program_version,host->approved_program_version) &&
-                sb_platform_target_version(workspace->root,path?path:".",true,false,false,cwd_version,&error) && !strcmp(cwd_version,host->approved_target_version);
+                sb_platform_file_version(directory,cwd_version,&error) && !strcmp(cwd_version,host->approved_target_version);
             if(!same){sb_fail(&error,"Approved program or working-directory snapshot changed before task startup.");goto done;}
             if(!sb_platform_file_sha256(program_file,program_hash,&error))goto done;
             yyjson_mut_obj_add_strcpy(request,parameters,"executable_sha256",program_hash);

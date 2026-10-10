@@ -63,6 +63,7 @@ typedef struct {
     sb_execution_identity identity;
     bool owned_task; /* Backend verified both project and authenticated actor, not a JSON boolean. */
     bool restricted_backend_verified; /* Actual local sandbox verification, never accepted from JSON. */
+    bool administrator_backend_verified; /* Verified manager-owned agent, not a client assertion. */
 } sb_project_operation;
 
 typedef struct { sb_decision decision; const char *reason; } sb_policy_result;

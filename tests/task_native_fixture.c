@@ -9,6 +9,8 @@
 #include <fcntl.h>
 #include <io.h>
 #include <winsock2.h>
+#include <sddl.h>
+#include <tlhelp32.h>
 
 static void json_string(const char *value) {
     const unsigned char *p = (const unsigned char *)value;
@@ -55,6 +57,23 @@ done:
     CloseHandle(token);
     return result;
 }
+static int exit_parent(void) {
+    /* Test-only crash of the ShellBot process that created this fixture.
+       No caller-supplied PID or process-name search is accepted. */
+    DWORD parent=0; HANDLE snapshot=CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0);
+    PROCESSENTRY32W entry={0}; entry.dwSize=sizeof(entry);
+    if (snapshot==INVALID_HANDLE_VALUE) return 2;
+    if (Process32FirstW(snapshot,&entry)) do {
+        if (entry.th32ProcessID==GetCurrentProcessId()) { parent=entry.th32ParentProcessID; break; }
+    } while (Process32NextW(snapshot,&entry));
+    CloseHandle(snapshot);
+    HANDLE process=parent ? OpenProcess(PROCESS_TERMINATE|PROCESS_QUERY_LIMITED_INFORMATION,FALSE,parent) : NULL;
+    wchar_t image[32768]; DWORD size=32768;
+    BOOL ok=process && QueryFullProcessImageNameW(process,0,image,&size);
+    const wchar_t *name=ok ? wcsrchr(image,L'\\') : NULL;
+    ok=ok && name && !_wcsicmp(name+1,L"WinShellBot.exe") && TerminateProcess(process,86);
+    if (process) CloseHandle(process); return ok ? 0 : 3;
+}
 
 static BOOL open_test(const wchar_t *path,DWORD access,DWORD flags) {
     HANDLE file=CreateFileW(path,access,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,NULL,OPEN_EXISTING,flags,NULL);
@@ -84,6 +103,21 @@ int wmain(int argc, wchar_t **argv) {
     if (argc != 2) return 2;
     if (_setmode(_fileno(stdin), _O_BINARY) == -1 || _setmode(_fileno(stdout), _O_BINARY) == -1) return 2;
     if (!wcscmp(argv[1], L"identity")) return identity();
+    if (!wcscmp(argv[1], L"exit-parent")) return exit_parent();
+    if (!wcscmp(argv[1], L"protect")) {
+        HANDLE token=NULL; TOKEN_ELEVATION elevation={0}; DWORD got=0;
+        BOOL elevated=OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&token) &&
+            GetTokenInformation(token,TokenElevation,&elevation,sizeof(elevation),&got) && elevation.TokenIsElevated;
+        if (token) CloseHandle(token); if (!elevated) return 2;
+        PSECURITY_DESCRIPTOR descriptor=NULL;
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;FA;;;SY)(A;;FA;;;BA)",SDDL_REVISION_1,&descriptor,NULL)) return 2;
+        SECURITY_ATTRIBUTES attributes={sizeof(attributes),descriptor,FALSE};
+        HANDLE file=CreateFileW(L"admin-only.txt",GENERIC_READ|GENERIC_WRITE|WRITE_DAC,FILE_SHARE_READ,NULL,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,NULL);
+        BOOL ok=file!=INVALID_HANDLE_VALUE && WriteFile(file,"administrator fixture",21,&got,NULL) && got==21 &&
+            SetKernelObjectSecurity(file,DACL_SECURITY_INFORMATION,attributes.lpSecurityDescriptor);
+        if (file!=INVALID_HANDLE_VALUE) CloseHandle(file); LocalFree(descriptor);
+        return ok ? 0 : 3;
+    }
     if (!wcscmp(argv[1], L"append")) {
         HANDLE file = CreateFileW(L"once.txt", FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         DWORD written = 0;

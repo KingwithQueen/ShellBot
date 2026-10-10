@@ -152,6 +152,30 @@ int main(int argc, char **argv) {
     CHECK(sb_project_evaluate(&context,&operation).decision==SB_DECISION_PENDING,"verified restricted token enforces readonly without pretending account isolation");
     project->directories[0].read_only=false;project->policy.approval_mode=SB_PROJECT_NEVER;
     operation.restricted_backend_verified=false;
+    /* M5 verifies the backend separately from both project permission and the
+       operation approval mode. These checks never launch an elevated process. */
+    operation.identity=SB_ID_ADMINISTRATOR; project->policy.administrator_allowed=true;
+    CHECK(!strcmp(sb_project_evaluate(&context,&operation).reason,"administrator_incompatible_with_isolation"),"administrator never bypasses directory isolation");
+    project->policy.file_scope=SB_FILES_CURRENT_USER; project->policy.default_identity=SB_ID_CURRENT_USER;
+    CHECK(!strcmp(sb_project_evaluate(&context,&operation).reason,"project_administrator_backend_unavailable"),"project permit does not manufacture an agent");
+    operation.administrator_backend_verified=true;
+    CHECK(sb_project_evaluate(&context,&operation).decision==SB_DECISION_ALLOW,"verified shared backend permits explicit administrator task in never");
+    project->policy.approval_mode=SB_PROJECT_ALWAYS;
+    CHECK(sb_project_evaluate(&context,&operation).decision==SB_DECISION_PENDING,"administrator still requires always approval");
+    operation.tool="fs_read";
+    CHECK(sb_project_evaluate(&context,&operation).decision==SB_DECISION_PENDING,"administrator file read still requires approval");
+    project->policy.approval_mode=SB_PROJECT_WORKSPACE_AUTO;
+    CHECK(sb_project_evaluate(&context,&operation).decision==SB_DECISION_ALLOW,"administrator workspace file follows workspace_auto");
+    operation.tool="task_start";
+    CHECK(sb_project_evaluate(&context,&operation).decision==SB_DECISION_PENDING,"administrator workspace command remains pending");
+    project->directories[0].read_only=true;
+    CHECK(!strcmp(sb_project_evaluate(&context,&operation).reason,"read_only_command_isolation_unavailable"),"administrator command cannot bypass readonly grant");
+    operation.tool="fs_write";
+    CHECK(!strcmp(sb_project_evaluate(&context,&operation).reason,"read_only"),"administrator file write respects readonly");
+    project->directories[0].read_only=false; project->policy.administrator_allowed=false;
+    CHECK(!strcmp(sb_project_evaluate(&context,&operation).reason,"administrator_not_allowed"),"agent existence cannot grant a project permission");
+    operation.administrator_backend_verified=false; operation.identity=SB_ID_RESTRICTED; operation.tool="task_start";
+    project->policy.file_scope=SB_FILES_CONFIGURED; project->policy.default_identity=SB_ID_RESTRICTED; project->policy.approval_mode=SB_PROJECT_NEVER;
     context.project = scoped;
     operation.directory = &scoped->directories[0];
     CHECK(!strcmp(sb_project_evaluate(&context, &operation).reason, "restricted_backend_unverified"), "configured scoped project backend remains closed");

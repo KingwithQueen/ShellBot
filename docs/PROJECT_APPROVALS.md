@@ -1,6 +1,6 @@
 # M4 项目审批与受限执行
 
-日期：2026 年 10 月 10 日。版本：0.1.0-dev.11。本文描述正常 format_version:1 项目的实际行为；旧单实例和 legacy_config 迁移项目保留既有授权语义。开发机证据见 [实现记录](IMPLEMENTATION_STATUS.md)，继续开发见 [M4 交接](HANDOFF_20261010_M4.md)。
+日期：2026 年 10 月 10 日。版本：0.1.0-dev.12。本文描述正常 format_version:1 项目的实际行为；旧单实例和 legacy_config 迁移项目保留既有授权语义。开发机证据见 [实现记录](IMPLEMENTATION_STATUS.md)，管理员操作与独立审批见 [共享管理员代理](SHARED_ADMINISTRATOR.md)。[M4 交接](HANDOFF_20261010_M4.md)保留历史基线。
 
 ## 三种模式与范围
 
@@ -63,4 +63,4 @@ fs_read 单页最多 64 KiB，同一许可总计最多 1 MiB；fs_list 单页最
 
 目录启动授权最多 1024 个对象、16 层，拒绝已有重解析点及硬链接文件；读写目录只授予文件访问及删除，不授予改 ACL 或所有者。ACL 变更前写入并刷新受保护恢复日志。停止先杀本人 Job，再移除该实例 SID 的 ACL，保留其他授权及 owner/group，包含新建文件；不跟随后来出现的联接外部目标。强制结束管理器时，下一次显式启动项目先恢复；清理最多 10000 个对象、64 层，失败状态 cleanup_required 阻止继续启动。恢复日志不会恢复批准、任务或副作用。
 
-此初期后端支持兼容上述限制的原生程序，禁用子进程、网络、GUI/Win32k，未增授 registry/COM 等能力。依赖这些能力的 PowerShell、GUI、构建工具或第三方程序可能启动失败；失败不会退回 current_user 或 administrator。LPAC 仍使用 Windows 平台运行资源及自身 profile，不等于只暴露 cwd 的虚拟机，也不抵抗已经授权的普通账户/管理员程序。其他 Windows 版本、独立机器及实际工具兼容性尚需验收；M5 项目管理员和 M6 远程审批/持久恢复未交付。
+此初期后端支持兼容上述限制的原生程序，禁用子进程、网络、GUI/Win32k，未增授 registry/COM 等能力。依赖这些能力的 PowerShell、GUI、构建工具或第三方程序可能启动失败；失败不会退回 current_user 或 administrator。LPAC 仍使用 Windows 平台运行资源及自身 profile，不等于只暴露 cwd 的虚拟机，也不抵抗已经授权的普通账户/管理员程序。其他 Windows 版本、独立机器及实际工具兼容性尚需验收；M5 管理员代理不向 LPAC 项目开放，M6 远程审批/持久恢复未交付。

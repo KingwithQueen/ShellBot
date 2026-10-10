@@ -176,6 +176,8 @@
     <ClCompile Include="platform\owner.c" />
     <ClCompile Include="platform\manager.c" />
     <ClCompile Include="platform\execution.c" />
+    <ClCompile Include="platform\shared_admin.c" />
+    <ClInclude Include="platform\shared_admin.h" />
     <ClCompile Include="platform\task_process.c" />
     <ClCompile Include="platform\sandbox.c" />
     <ClInclude Include="platform\sandbox.h" />
