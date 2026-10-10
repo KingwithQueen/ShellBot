@@ -14,6 +14,9 @@ if ($Platform -eq 'x64') {
     $policyExecutable = Join-Path $repoRoot "out\$Platform\$Configuration\ShellBot-ProjectPolicyTests.exe"
     & $interpreter.Source (Join-Path $repoRoot 'tests\project_checks.py') --exe $executable --policy-exe $policyExecutable --report $projectReport
     if ($LASTEXITCODE -ne 0) { throw "Project validation failed ($LASTEXITCODE). Report: $projectReport" }
+    $managerReport = Join-Path $repoRoot "build\validation\$Platform-$Configuration-m2.json"
+    & $interpreter.Source (Join-Path $repoRoot 'tests\manager_checks.py') --exe $executable --report $managerReport
+    if ($LASTEXITCODE -ne 0) { throw "Manager validation failed ($LASTEXITCODE). Report: $managerReport" }
 }
 $suffix = if ($SkipCloseProbe) { '-core' } else { '-full' }
 $report = Join-Path $repoRoot "build\validation\$Platform-$Configuration$suffix.json"

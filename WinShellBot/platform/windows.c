@@ -109,6 +109,37 @@ void sb_platform_root_close(sb_root *root) {
     if (root) { CloseHandle(root->handle); free(root->path); free(root); }
 }
 
+bool sb_platform_roots_overlap(const sb_root *a, const sb_root *b) {
+    if (!a || !b) return false;
+    FILE_ID_INFO ai = {0}, bi = {0};
+    if (GetFileInformationByHandleEx(a->handle, FileIdInfo, &ai, sizeof(ai)) &&
+        GetFileInformationByHandleEx(b->handle, FileIdInfo, &bi, sizeof(bi)) &&
+        ai.VolumeSerialNumber == bi.VolumeSerialNumber && !memcmp(&ai.FileId, &bi.FileId, sizeof(ai.FileId))) return true;
+    /* Volume GUID paths also normalize alternate drive letters/mount points. */
+    wchar_t *ap = calloc(SB_PATH_CAP, sizeof(wchar_t)), *bp = calloc(SB_PATH_CAP, sizeof(wchar_t));
+    if (!ap || !bp) { free(ap); free(bp); return true; } /* Cannot prove separation. */
+    DWORD an = GetFinalPathNameByHandleW(a->handle, ap, SB_PATH_CAP, FILE_NAME_NORMALIZED | VOLUME_NAME_GUID);
+    DWORD bn = GetFinalPathNameByHandleW(b->handle, bp, SB_PATH_CAP, FILE_NAME_NORMALIZED | VOLUME_NAME_GUID);
+    const wchar_t *av = an && an < SB_PATH_CAP ? ap : a->path;
+    const wchar_t *bv = bn && bn < SB_PATH_CAP ? bp : b->path;
+    size_t al = wcslen(av), bl = wcslen(bv);
+    while (al && av[al - 1] == L'\\') --al;
+    while (bl && bv[bl - 1] == L'\\') --bl;
+    size_t length = al < bl ? al : bl;
+    bool overlap = !_wcsnicmp(av, bv, length) && (al == bl || (al < bl ? bv : av)[length] == L'\\');
+    free(ap); free(bp); return overlap;
+}
+
+bool sb_platform_root_identity(const sb_root *root, char identity[50], sb_error *error) {
+    FILE_ID_INFO info = {0};
+    if (!root || !GetFileInformationByHandleEx(root->handle, FileIdInfo, &info, sizeof(info))) {
+        sb_fail(error, "Cannot resolve directory object identity."); return false;
+    }
+    snprintf(identity, 50, "%016llx:", (unsigned long long)info.VolumeSerialNumber);
+    for (size_t i = 0; i < sizeof(info.FileId.Identifier); ++i) snprintf(identity + 17 + i * 2, 3, "%02x", info.FileId.Identifier[i]);
+    return true;
+}
+
 static bool relative_path(wchar_t *path) {
     if (*path == L'\\' || *path == L'/') return false;
     wchar_t *component = path;
@@ -249,15 +280,22 @@ char *sb_platform_default_data_dir(sb_error *error) {
 }
 
 sb_lease *sb_platform_lease(const char *directory, sb_error *error) {
+    return sb_platform_lease_bound(directory, NULL, error);
+}
+sb_lease *sb_platform_lease_bound(const char *directory, const char *identity, sb_error *error) {
     wchar_t *path = wide(directory);
     if (!path) { sb_fail(error, "Invalid data directory."); return NULL; }
-    int result = SHCreateDirectoryExW(NULL, path, NULL);
+    int result = identity ? ERROR_ALREADY_EXISTS : SHCreateDirectoryExW(NULL, path, NULL);
     if (result != ERROR_SUCCESS && result != ERROR_ALREADY_EXISTS && result != ERROR_FILE_EXISTS) {
         free(path); sb_fail(error, "Cannot create data directory. Use an absolute path."); return NULL;
     }
     free(path);
     sb_root *root = sb_platform_root(directory, error);
     if (!root) return NULL;
+    char actual[50];
+    if (identity && (!sb_platform_root_identity(root, actual, error) || strcmp(identity, actual))) {
+        sb_platform_root_close(root); sb_fail(error, "Project Data identity changed since manager startup."); return NULL;
+    }
     size_t size = wcslen(root->path) + 20;
     wchar_t *lock = calloc(size, sizeof(*lock));
     if (lock) swprintf(lock, size, L"%ls\\.shellbot.lock", root->path);

@@ -1,8 +1,32 @@
 # ShellBot 实现与验证记录
 
-更新日期：2026 年 10 月 10 日。程序版本：`0.1.0-dev.8`。仓库：`E:\Program\ShellBot`，分支 `main`。
+更新日期：2026 年 10 月 10 日。程序版本：`0.1.0-dev.9`。仓库：`E:\Program\ShellBot`，分支 `main`。
 
-当前本地基准提交为 `284b6b915dbe91737ce86dbea0770a55a4146355`（创建项目）。本轮实现仍是本地未提交更改，没有推送；保留用户更新的解决方案项目身份。main 是默认分支，master 已在先前迁移中删除。dev.8 M1 是本机构建验证的开发候选，本轮没有生成新测试包；已交付 dev.7 ZIP 保留，第一阶段未完成。
+当前基准提交为 `5f9d177b3e95b32733bceaec201ab0353b980d10`，M1 由用户提交并推送；本地 HEAD 与 origin/main 跟踪引用一致。M2 是基于该提交的本地未提交更改，没有推送。保留解决方案项目身份、dev.8 回退基线及旧 ZIP；dev.9 是本机构建验证的开发候选，没有生成新测试包，第一阶段仍未整体完成。
+
+## dev.9 M2 管理器与项目工作进程
+
+新增 WinShellBot/platform/manager.c 与 manager.h，复用同一 asInvoker 程序的管理器和工作进程角色。项目创建和配置导出新文件及原字节私有备份，配置更新由程序递增策略版本；管理器固定启动快照，本机所有者可启停和查询项目，方法见 [项目管理器](PROJECT_MANAGER.md)。
+
+每项目独立普通进程、Data 对象身份与实例锁、任务及幂等空间、审批队列、备份和审计。私有继承通信只传本项目快照，双方核验管理进程及同一程序；工作进程的句柄继承清单与环境允许列表排除其他管理句柄、全部项目凭据变量和未知环境变量。管理器固定四个所有者服务线程，同项目忙时拒绝排队，工作进程通信有 8 秒期限，断线或超时不自动重发操作。项目任务并发、记录、输出、期限、审批记录和整个 Job 内存预算已接入。
+
+工作进程绑定 project、actor、policy_revision，实际任务后端确认归属；模型参数不能改上下文。文件工具在读取正文前判断策略，并沿用实际句柄路径核验。never 的已配置目录读取与普通账户命令、workspace_auto 的工作目录读取可用；always 及额外目录待审批读取拒绝正文访问，正常新项目自动写入、未列目录的账户文件适配、完整受限执行及项目管理员后端继续不可用。迁移项目保留普通文件读取、原审批修改和私有备份，旧 administrator 配置不触发 UAC、不降级运行管理员命令。
+
+管理器先保存 build/baseline-dev8-m2-20261010，包含 M1 源码、文档、程序和报告。独立测试 Data 与回执位于 build/m2-tests 的各轮目录，原始失败目录保留。未改用户实际配置、Data、隧道或系统安全设置。启动期间创建的 Data、同目录 alias、卷/文件标识及管理目录重叠会被核验；配置目录范围不公开管理状态目录。普通账户任意程序的操作系统权限不因进程拆分而被隔离。
+
+| 最终本机验证 | 结果与报告 |
+| --- | --- |
+| Debug / Release 构建 | C17 /W4 /WX，主程序及两个原生测试程序通过 |
+| Debug / Release M1 回归 | 各 405 项，build/validation/x64-Debug-m1.json、x64-Release-m1.json |
+| Debug / Release M2 | 各 220 项，build/validation/x64-Debug-m2.json、x64-Release-m2.json |
+| Debug 既有核心 | 2421 项，build/validation/x64-Debug-core.json |
+| Release 既有核心 | 2403 项，build/validation/x64-Release-core.json |
+
+M2 使用实际进程验证五项目运行、同名 workspace 和幂等键、跨项目任务编号与实例拒绝、凭据环境排除、策略模式与工具开关、审批和备份各自存储、任务预算、项目停止/崩溃、管理器正常退出/强制结束及无关进程保留。全部报告摘要匹配最终程序；断言数包含时序轮询，因此不同轮次核心数量可不同。
+
+最终 Debug 为 2551296 字节，SHA-256 `8964c59be4f586023697bef42e3092302be9f386b6e35f1ab8deb0be76bc7f80`；Release 为 687616 字节，SHA-256 `92f7ec1e3d9764efd4ccd6afeb4bdbd4cd425c01532e311376a6e3c67dcbc343`。
+
+用户明确要求离开期间不做 UAC 或其他人工测试，本轮未运行。核心回归继续跳过管理员启动授权、开发机不支持的硬链接夹具及历史 Connection: close 诊断；这些不是通过项。独立 Windows/Server 2025、真实 MCP 客户端和管理员后端仍未验收。M3 项目 HTTP 路由/认证、M4 完整审批/受限执行、M5 共享管理员代理保持后续范围；本轮没有启动任何公网或域名验证。
 
 ## dev.8 M1 项目配置与统一权限策略
 
@@ -19,10 +43,10 @@
 | 最终验证 | 结果与报告 |
 | --- | --- |
 | Debug / Release 构建 | C17，/W4 /WX；主程序、原生任务夹具及新策略测试程序均通过 |
-| Debug M1 | passed，405 项（原生策略 180、CLI 配置/迁移 225）；build/validation/x64-Debug-m1.json |
-| Release M1 | passed，405 项（原生策略 180、CLI 配置/迁移 225）；build/validation/x64-Release-m1.json |
-| Debug 既有核心回归 | passed，2406 项；build/validation/x64-Debug-core.json |
-| Release 既有核心回归 | passed，2424 项；build/validation/x64-Release-core.json |
+| Debug M1 | passed，405 项（原生策略 180、CLI 配置/迁移 225）；build/baseline-dev8-m2-20261010/validation/x64-Debug-m1.json |
+| Release M1 | passed，405 项（原生策略 180、CLI 配置/迁移 225）；build/baseline-dev8-m2-20261010/validation/x64-Release-m1.json |
+| Debug 既有核心回归 | passed，2406 项；build/baseline-dev8-m2-20261010/validation/x64-Debug-core.json |
+| Release 既有核心回归 | passed，2424 项；build/baseline-dev8-m2-20261010/validation/x64-Release-core.json |
 
 M1 验证包括列表/读取/搜索/图像共同审批、目录外及只读拒绝、跨项目同名 workspace 绑定、策略版本、任务归属、工具关闭、身份上限和后端不可用。配置专项对六种 execution 来源（controlled/user/administrator × 开/关）实际迁移并读取新配置再运行策略判断，校验原字节备份、原配置/旧 Data 保留、重复输出/备份冲突拒绝及兼容字段不能扩权。原始专项证据分别在 tests/test-results/20261010-081917-m1-2d3fa371 和 20261010-081944-m1-d208f4bd，首轮通过的较早候选报告另存 build/validation/m1-initial-pass-20261010，不能代替最终摘要匹配报告。
 
@@ -58,11 +82,11 @@ HTTP 仅监听 127.0.0.1，要求 bearer，拒绝格式错误的 Host/Origin、U
 
 先前 dev.2 的 Debug 与 Release x64 核心套件各通过 521 项断言。测试启动真实 stdio 和 HTTP 进程，包含 Unicode 分页、图像字节、多根目录、目录联接逃逸、创建请求无副作用、查看完整内容、批准/拒绝/撤销/过期/重启失效、队列预算、目录实体替换、禁止覆盖、参数篡改、16 次并发写入重试、100 次并发 HTTP 查询、持续连接和本机停止。
 
-当前 dev.8 核心报告为 build/validation/x64-Debug-core.json 与 x64-Release-core.json；dev.7 原报告另存 build/baseline-dev7-m1-20261010/validation。核心范围明确排除关闭连接诊断，并通过 skipped 记录未执行的夹具和管理员启动授权。旧版本归档及 ZIP 保留；dev.5 Release 和两份 1515 项核心报告保存在 build/baseline-dev5-permissions-20261007，已交付 dev.5 ZIP 不变。
+当前 dev.9 核心报告为 build/validation/x64-Debug-core.json 与 x64-Release-core.json；dev.7 原报告另存 build/baseline-dev7-m1-20261010/validation。核心范围明确排除关闭连接诊断，并通过 skipped 记录未执行的夹具和管理员启动授权。旧版本归档及 ZIP 保留；dev.5 Release 和两份 1515 项核心报告保存在 build/baseline-dev5-permissions-20261007，已交付 dev.5 ZIP 不变。
 
 历史完整测试包含 100 次客户端主动关闭连接的诊断；开发机曾出现 WinError 10054 或响应提前结束，因此完整套件未通过。独立 Python 参考 HTTP 服务在当前机器同样复现：100 次 keep-alive 调用无失败，100 次 close 调用有 13 次失败。Windows PowerShell 原生 TCP 测试也复现，不是 Python 客户端专有现象。已尝试显式有界 linger、禁用 Nagle 和合并响应发送，不能据此声称根因已解决。网络配置、操作系统和实现的具体责任仍待进一步证据。
 
-旧 dev.2 Release 完整报告保存在 build/validation/x64-Release-full.json，关闭连接诊断为 100 次中失败 14 次，不通过重试隐藏失败。该文件不代表当前 dev.3 的报告，需按 artifact.sha256 区分。独立参考诊断为 build/http_reference_probe.py；测试报告、缓存和产物不入版本控制。dev.2 的直接 DLL 依赖为 WS2_32、bcrypt、SHELL32、ole32、ADVAPI32、KERNEL32，没有额外 CRT DLL。
+旧 dev.2 Release 完整报告保存在 build/validation/x64-Release-full.json，关闭连接诊断为 100 次中失败 14 次，不通过重试隐藏失败。该文件不代表当前 dev.9 的报告，需按 artifact.sha256 区分。独立参考诊断为 build/http_reference_probe.py；测试报告、缓存和产物不入版本控制。dev.2 的直接 DLL 依赖为 WS2_32、bcrypt、SHELL32、ole32、ADVAPI32、KERNEL32，没有额外 CRT DLL。
 
 ## Server 2025 测试交付
 
@@ -109,7 +133,7 @@ dev.3 的 Windows PowerShell 5.1 全部核心及基本 HTTP 检查通过，包�
 
 ## 剩余工作
 
-当前下一项为 M2 管理器与项目工作进程，随后按主计划继续受限执行和管理权限隔离、独立远程审批、审批/任务重启恢复及完整审计、实际客户端图像和工具使用、目标系统独立验证、连接关闭根因和修复及正式发行版权主体。普通用户和管理员后台任务、输入、取消与进程树清理已有 dev.7 本机证据，dev.8 本轮回归普通任务；管理员新版本与 Server 2025 命令回归仍待独立验收。覆盖和局部替换已实现，原子保存及故障恢复验收仍待后续；OAuth、隧道管理与域名检查按用户要求暂缓。
+当前下一项为 M3 项目 HTTP 路由与认证，随后按主计划继续受限执行和管理权限隔离、独立远程审批、审批/任务重启恢复及完整审计、实际客户端图像和工具使用、目标系统独立验证、连接关闭根因和修复及正式发行版权主体。普通用户和管理员后台任务、输入、取消与进程树清理已有 dev.7 本机证据，dev.9 本轮回归普通任务与项目生命周期；管理员新版本与 Server 2025 命令回归仍待独立验收。覆盖和局部替换已实现，原子保存及故障恢复验收仍待后续；OAuth、隧道管理与域名检查按用户要求暂缓。
 
 ## dev.4 外部地址与内容搜索
 

@@ -4,11 +4,11 @@ ShellBot 是使用 C17 开发的电脑 MCP 主机。模型服务负责推理，S
 
 Windows 工程 WinShellBot 优先面向 Windows 10/11 x64。通用 C 核心与 Windows 接口分离，便于以后移植 Linux 和 macOS；Windows 7 以后单独编译和验证。
 
-后续开发按已确认的多项目和独立权限方案推进，见 [开发计划](docs/DEVELOPMENT_PLAN.md)及 [项目权限与执行身份](docs/EXECUTION_PERMISSIONS.md)。dev.8 已完成 M1 的项目配置、统一策略判断和显式迁移，见 [项目配置说明](docs/PROJECT_CONFIGURATION.md)；项目工作进程和独立 MCP 链接仍待 M2/M3。
+后续开发按已确认的多项目和独立权限方案推进，见 [开发计划](docs/DEVELOPMENT_PLAN.md)及 [项目权限与执行身份](docs/EXECUTION_PERMISSIONS.md)。dev.9 已完成 M1 配置基础和 M2 普通权限管理器、独立项目工作进程，见 [项目配置说明](docs/PROJECT_CONFIGURATION.md)及 [项目管理器](docs/PROJECT_MANAGER.md)；独立 HTTP 链接与认证待 M3。
 
 ## 当前实现
 
-当前版本为 `0.1.0-dev.8`，是第一阶段的开发测试版本。程序只监听本机端口，域名与 cloudflared 隧道由已有环境完成，不要求域名检查；OAuth 与隧道管理暂缓。已实现：
+当前版本为 `0.1.0-dev.9`，是第一阶段的开发测试版本。程序只监听本机端口，域名与 cloudflared 隧道由已有环境完成，不要求域名检查；OAuth 与隧道管理暂缓。已实现：
 
 | 能力 | 当前行为 |
 | --- | --- |
@@ -22,7 +22,8 @@ Windows 工程 WinShellBot 优先面向 Windows 10/11 x64。通用 C 核心与 W
 | 本机审批 | 查看完整请求、批准、拒绝、撤销、过期、绑定参数、并发重试与重启失效 |
 | 审批和写入审计 | 私有 JSONL 记录状态、执行结果和备份编号，跨重启保留，日志故障时阻止新批准和写入 |
 | 目录配置 | 最多 16 个显式目录，每个目录拥有独立 workspace_id，默认只读 |
-| M1 项目配置与策略 | format_version:1 多项目配置校验、三审批模式统一判断、身份与管理员许可分离、旧配置显式备份迁移；新注册配置运行尚未开放 |
+| M1 项目配置与策略 | format_version:1 多项目配置校验、三审批模式统一判断、身份与管理员许可分离、旧配置显式备份迁移；以 --manager 显式启动项目 |
+| M2 项目管理器 | 本机创建、配置、启停；独立普通工作进程、Data、任务、幂等记录、审批和备份；配额与本人 Job 清理 |
 | 运行保护 | 数据目录实例锁、请求和结果大小上限；HTTP 令牌、Host/Origin 检查 |
 | 已有代理接入 | 默认接受本机代理的合法 Host/Origin 且要求 bearer；外部地址配置作为可选限制保留 |
 | 后台命令任务 | task_start、task_status、task_output、task_input、task_cancel；显式启用 user/administrator 后提供进程、输出、输入、超时和取消 |
@@ -36,7 +37,7 @@ HTTP 每个运行实例使用一个已有 bearer 身份。默认不需要填写�
 
 覆盖与局部修改采用锁定原文件并预先保存私有备份，返回 atomic_save:false，支持冲突拒绝和结果重试，不承诺崩溃原子性，见 [文本修改说明](docs/FILE_EDIT.md)。普通用户和管理员后台命令已实现，见 [命令任务说明](docs/COMMAND_TASKS.md)。完整受控隔离、规则与远程审批、审批/任务重启恢复、完整调用审计、桌面控制、PDF/Office/OCR 和完整项目管理仍待实现。
 
-未版本化的单实例运行配置仍使用 dev.7 的三档执行结构：controlled、user、administrator。显式启用 user/administrator 时沿用原命令预授权和单主机代理行为；默认关闭，controlled 的完整隔离仍未验收，命令不可用。dev.8 的新项目配置已将审批、文件范围、身份与管理员许可分开，但目前只能校验和迁移，不能通过 --config 启动。见 [项目配置说明](docs/PROJECT_CONFIGURATION.md)及 [项目权限与执行身份](docs/EXECUTION_PERMISSIONS.md)。
+未版本化的单实例运行配置仍使用 dev.7 的三档执行结构：controlled、user、administrator。显式启用 user/administrator 时沿用原命令预授权和单主机代理行为；默认关闭，controlled 的完整隔离仍未验收，命令不可用。dev.9 的项目配置已将审批、文件范围、身份与管理员许可分开，并通过 --manager 启动；--config 保持旧单实例入口。项目管理员后端不可用，完整审批与受限执行待 M4/M5。见 [项目配置说明](docs/PROJECT_CONFIGURATION.md)及 [项目权限与执行身份](docs/EXECUTION_PERMISSIONS.md)。
 
 ## 构建与验证
 
@@ -53,7 +54,7 @@ python .\tests\smoke.py --exe .\out\x64\Release\WinShellBot.exe
 # 分别验证核心功能，明确排除仍在调查的关闭连接诊断：
 .\scripts\test.ps1 -Configuration Release -SkipCloseProbe
 # 核心报告必须匹配当前 Release 程序才能生成测试包：
-# 当前打包器另要求旧 dev.7 原生专项凭据；dev.8 M1 本轮不生成新包。
+# 当前打包器另要求旧 dev.7 原生专项凭据；dev.9 M2 本轮不生成新包。
 .\scripts\package-test.ps1
 ```
 

@@ -4,6 +4,61 @@
 
 #define KEYS(object, names) sb_config_keys(object, names, sizeof(names) / sizeof((names)[0]))
 
+char *sb_projects_edit(const char *bytes, size_t length, const char *project_json,
+                       size_t project_length, const char *id, bool configure, sb_error *error) {
+    sb_project_registry original = {0}, candidate = {0};
+    yyjson_doc *source = NULL, *project = NULL;
+    yyjson_mut_doc *doc = NULL;
+    char *json = NULL;
+    if (!sb_identifier(id) || (configure && !bytes)) goto invalid;
+    if (bytes && !sb_projects_parse(&original, bytes, length, error)) goto done;
+    bool exists = sb_project_find(&original, id) != NULL;
+    if (configure != exists) { sb_fail(error, configure ? "Unknown project id." : "Project id already exists."); goto done; }
+    project = project_json && project_length <= SB_TEXT_LIMIT ? yyjson_read(project_json, project_length, 0) : NULL;
+    yyjson_val *item = yyjson_doc_get_root(project);
+    const char *new_id = sb_string(yyjson_obj_get(item, "id"));
+    if (!yyjson_is_obj(item) || !new_id || strcmp(new_id, id)) goto invalid;
+    source = bytes ? yyjson_read(bytes, length, 0) : NULL;
+    if (bytes && !source) goto invalid;
+    doc = yyjson_mut_doc_new(NULL);
+    if (!doc) goto invalid;
+    yyjson_mut_val *root = source ? yyjson_val_mut_copy(doc, yyjson_doc_get_root(source)) : yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+    yyjson_mut_val *projects = source ? yyjson_mut_obj_get(root, "projects") : yyjson_mut_arr(doc);
+    if (!source) {
+        yyjson_mut_obj_add_uint(doc, root, "format_version", SB_PROJECT_FORMAT);
+        yyjson_mut_obj_add_val(doc, root, "projects", projects);
+    }
+    yyjson_mut_val *replacement = yyjson_val_mut_copy(doc, item);
+    if (configure) {
+        const sb_project *old = sb_project_find(&original, id);
+        if (old->policy_revision == UINT64_MAX) { sb_fail(error, "Policy revision is exhausted."); goto done; }
+        /* Validate the source including duplicates before replacing its revision. */
+        yyjson_mut_val *probe = yyjson_mut_obj(doc), *array = yyjson_mut_arr(doc);
+        yyjson_mut_obj_add_uint(doc, probe, "format_version", SB_PROJECT_FORMAT);
+        yyjson_mut_arr_add_val(array, yyjson_val_mut_copy(doc, item));
+        yyjson_mut_obj_add_val(doc, probe, "projects", array);
+        char *check = yyjson_mut_val_write(probe, 0, NULL);
+        bool valid = check && sb_projects_parse(&candidate, check, strlen(check), error);
+        free(check); sb_projects_free(&candidate);
+        if (!valid) goto done;
+        yyjson_mut_obj_remove_key(replacement, "policy_revision");
+        yyjson_mut_obj_add_uint(doc, replacement, "policy_revision", old->policy_revision + 1);
+        size_t idx = 0;
+        for (; idx < original.project_count; ++idx) if (!strcmp(original.projects[idx].id, id)) break;
+        yyjson_mut_arr_replace(projects, idx, replacement);
+    } else yyjson_mut_arr_add_val(projects, replacement);
+    json = yyjson_mut_write(doc, 0, NULL);
+    if (!json || !sb_projects_parse(&candidate, json, strlen(json), error)) { free(json); json = NULL; }
+    goto done;
+invalid:
+    sb_fail(error, "Invalid project definition or configuration command.");
+done:
+    sb_projects_free(&original); sb_projects_free(&candidate);
+    yyjson_doc_free(source); yyjson_doc_free(project); yyjson_mut_doc_free(doc);
+    return json;
+}
+
 static bool separator(char c) { return c == '/' || c == '\\'; }
 static unsigned char folded(char c) {
     if (separator(c)) return '/';
@@ -207,9 +262,10 @@ static bool legacy_parse(sb_project *project, yyjson_val *value, sb_error *error
 
 static bool project_parse(sb_project *project, yyjson_val *value, sb_error *error) {
     static const char *const allowed[] = {"id", "policy_revision", "enabled", "token_env", "data_dir", "default_workspace_id",
-        "workspaces", "extra_directories", "policy", "approval_ttl_seconds", "audit_max_bytes", "legacy_config"};
+        "workspaces", "extra_directories", "policy", "approval_ttl_seconds", "audit_max_bytes", "legacy_config", "resources"};
     static const char *const legacy_keys[] = {"id", "policy_revision", "enabled", "data_dir", "legacy_config"};
     uint64_t number;
+    project->limits = (sb_resource_limits){8, 32, 262144, 3600000, 64, 512};
     if (!KEYS(value, allowed) || !copy_id(project->id, yyjson_obj_get(value, "id")) ||
         !bool_field(value, "enabled", true, &project->enabled) ||
         !number_field(value, "policy_revision", 1, 1, UINT64_MAX, &project->policy_revision)) return false;
@@ -238,6 +294,20 @@ static bool project_parse(sb_project *project, yyjson_val *value, sb_error *erro
         !number_field(value, "approval_ttl_seconds", 300, 1, 600, &number)) return false;
     project->approval_ttl_seconds = (unsigned)number;
     if (!number_field(value, "audit_max_bytes", SB_AUDIT_LIMIT, 4096, 64u * 1024u * 1024u, &project->audit_max_bytes)) return false;
+    yyjson_val *resources = yyjson_obj_get(value, "resources");
+    if (resources) {
+        static const char *const keys[] = {"max_active_tasks", "max_task_records", "max_output_bytes", "max_timeout_ms", "max_approval_records", "worker_memory_mb"};
+        unsigned *fields[] = {&project->limits.active_tasks, &project->limits.task_records, &project->limits.output_bytes,
+            &project->limits.task_timeout_ms, &project->limits.approval_records, &project->limits.worker_memory_mb};
+        static const unsigned minimum[] = {1, 1, 1024, 100, 1, 16};
+        static const unsigned maximum[] = {8, 32, 262144, 3600000, 64, 4096};
+        if (!KEYS(resources, keys)) return false;
+        for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i) {
+            if (!number_field(resources, keys[i], *fields[i], minimum[i], maximum[i], &number)) return false;
+            *fields[i] = (unsigned)number;
+        }
+        if (project->limits.task_records < project->limits.active_tasks) return false;
+    }
     yyjson_val *cwd = yyjson_obj_get(value, "default_workspace_id");
     if (cwd) {
         if (!copy_id(project->default_workspace_id, cwd)) return false;
@@ -321,7 +391,9 @@ char *sb_projects_summary(const sb_project_registry *registry) {
     yyjson_mut_val *root = yyjson_mut_obj(doc), *projects = yyjson_mut_arr(doc);
     yyjson_mut_doc_set_root(doc, root);
     yyjson_mut_obj_add_uint(doc, root, "format_version", registry->format_version);
-    yyjson_mut_obj_add_bool(doc, root, "runtime_available", false);
+    yyjson_mut_obj_add_bool(doc, root, "runtime_available", true);
+    yyjson_mut_obj_add_bool(doc, root, "runtime_started", false);
+    yyjson_mut_obj_add_bool(doc, root, "http_gateway_available", false);
     yyjson_mut_obj_add_val(doc, root, "projects", projects);
     for (size_t i = 0; i < registry->project_count; ++i) {
         const sb_project *project = &registry->projects[i];

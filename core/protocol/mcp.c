@@ -1,4 +1,5 @@
 #include "sb.h"
+#include "sb_projects.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -102,6 +103,9 @@ char *sb_dispatch(sb_host *host, sb_protocol *protocol, const char *request,
     bool modern = meta_version != NULL || (http_version && !strcmp(http_version, "2026-07-28"));
     if (!input) {
         rpc_error(output, response, -32700, "Parse error or request limit exceeded."); *http_status = 400;
+    } else if (host->project && (!context || context->project != host->project || !context->actor ||
+        context->policy_revision != host->project->policy_revision)) {
+        rpc_error(output, response, -32003, "Project context binding mismatch."); *http_status = 403;
     } else if (!yyjson_is_obj(root) || !unambiguous(root, 0) || !version || strcmp(version, "2.0") ||
         !method || !*method || (id && !id_valid) || (params && !yyjson_is_obj(params))) {
         rpc_error(output, response, -32600, "Invalid Request."); *http_status = 400;
@@ -157,7 +161,7 @@ char *sb_dispatch(sb_host *host, sb_protocol *protocol, const char *request,
         rpc_error(output, response, -32600, "Initialize and send notifications/initialized first.");
     } else if (!strcmp(method, "tools/list")) {
         if (yyjson_obj_get(params, "cursor")) rpc_error(output, response, -32602, "No tool-list cursor is supported.");
-        else yyjson_mut_obj_add_val(output, response, "result", sb_tools_list(output));
+        else yyjson_mut_obj_add_val(output, response, "result", sb_project_tools_list(host, output));
     } else if (!strcmp(method, "tools/call")) {
         const char *name = sb_string(yyjson_obj_get(params, "name"));
         yyjson_val *arguments = yyjson_obj_get(params, "arguments");

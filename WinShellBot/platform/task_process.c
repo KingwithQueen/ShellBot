@@ -17,17 +17,26 @@ typedef struct task {
     SRWLOCK lock;
     char id[33], key[65], hash[65], actor[64];
     HANDLE job, process, input, output[2], readers[2], writer, input_event;
-    unsigned char *bytes[2]; size_t lengths[2];
+    unsigned char *bytes[2]; size_t lengths[2], output_cap;
     bool output_done[2], input_closed, input_failed, finished;
     DWORD pid, exit_code; uint64_t started, timeout;
     const char *reason;
     task_input inputs[INPUT_RECORDS]; size_t input_count;
 } task;
-struct sb_win_tasks { SRWLOCK lock; task *items[TASK_RECORDS]; HANDLE stop, monitor; sb_execution_profile profile; bool elevated; };
+struct sb_win_tasks { SRWLOCK lock; task *items[TASK_RECORDS]; HANDLE stop, monitor; sb_execution_profile profile; bool elevated; sb_resource_limits limits; };
 typedef struct { task *item; unsigned stream; } reader_context;
 
 static char *serialize(yyjson_mut_doc *doc, yyjson_mut_val *root) {
     yyjson_mut_doc_set_root(doc, root); char *json = yyjson_mut_write(doc, 0, NULL); yyjson_mut_doc_free(doc); return json;
+}
+bool sb_win_tasks_owned(sb_win_tasks *tasks, const char *actor, const char *id) {
+    if (!tasks || !actor || !id) return false;
+    bool found = false;
+    AcquireSRWLockShared(&tasks->lock);
+    for (size_t i = 0; i < TASK_RECORDS; ++i)
+        if (tasks->items[i] && !strcmp(tasks->items[i]->actor, actor) && !strcmp(tasks->items[i]->id, id)) found = true;
+    ReleaseSRWLockShared(&tasks->lock);
+    return found;
 }
 static char *fail(const char *message) {
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL); if (!doc) return NULL;
@@ -89,7 +98,7 @@ static DWORD WINAPI read_output(void *parameter) {
     task *item = context.item; unsigned stream = context.stream; unsigned char chunk[4096]; DWORD got;
     while (ReadFile(item->output[stream], chunk, sizeof(chunk), &got, NULL) && got) {
         AcquireSRWLockExclusive(&item->lock);
-        size_t remaining = OUTPUT_CAP - item->lengths[stream], copy = got < remaining ? got : remaining;
+        size_t remaining = item->output_cap - item->lengths[stream], copy = got < remaining ? got : remaining;
         memcpy(item->bytes[stream] + item->lengths[stream], chunk, copy); item->lengths[stream] += copy;
         if (copy < got && !item->reason) { item->reason = "output_limit"; TerminateJobObject(item->job, 124); }
         ReleaseSRWLockExclusive(&item->lock);
@@ -158,12 +167,17 @@ static void task_free(task *item) {
     free(item->bytes[0]); free(item->bytes[1]); free(item);
 }
 sb_win_tasks *sb_win_tasks_new(sb_execution_profile profile) {
+    const sb_resource_limits limits = {8,32,262144,3600000,64,512};
+    return sb_win_tasks_new_limited(profile, &limits);
+}
+sb_win_tasks *sb_win_tasks_new_limited(sb_execution_profile profile, const sb_resource_limits *limits) {
     HANDLE token = NULL; TOKEN_ELEVATION elevation = {0}; DWORD bytes = 0;
     bool ok = OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token) && sb_win_owner_token_allowed(token) &&
         GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &bytes);
     if (token) CloseHandle(token);
     if (!ok || profile == SB_EXEC_CONTROLLED || (profile == SB_EXEC_USER && elevation.TokenIsElevated) || (profile == SB_EXEC_ADMINISTRATOR && !elevation.TokenIsElevated)) return NULL;
     sb_win_tasks *tasks = calloc(1, sizeof(*tasks)); if (!tasks) return NULL;
+    tasks->limits = *limits;
     InitializeSRWLock(&tasks->lock); tasks->profile = profile; tasks->elevated = elevation.TokenIsElevated != 0;
     tasks->stop = CreateEventW(NULL, TRUE, FALSE, NULL);
     if (tasks->stop) tasks->monitor = CreateThread(NULL, 0, monitor_tasks, tasks, 0, NULL);
@@ -201,10 +215,10 @@ static char *start(sb_win_tasks *tasks, yyjson_val *args) {
     const char *token_env = sb_string(yyjson_obj_get(args, "token_env"));
     yyjson_val *argv = yyjson_obj_get(args, "argv"); uint64_t timeout = 0;
     if (!key_valid(key) || !actor || !*actor || strlen(actor) >= 64 || !hash || strlen(hash) != 64 || strspn(hash,"0123456789abcdef") != 64 ||
-        !token_env || !sb_integer(yyjson_obj_get(args, "timeout_ms"), &timeout) || timeout < 100 || timeout > 3600000 || !yyjson_is_arr(argv) || yyjson_arr_size(argv) > 64) return fail("Invalid normalized task request.");
+        !token_env || !sb_integer(yyjson_obj_get(args, "timeout_ms"), &timeout) || timeout < 100 || timeout > tasks->limits.task_timeout_ms || !yyjson_is_arr(argv) || yyjson_arr_size(argv) > 64) return fail("Invalid normalized task request.");
     size_t slot = TASK_RECORDS, active = 0;
     for (size_t i = 0; i < TASK_RECORDS; ++i) {
-        task *old = tasks->items[i]; if (!old) { if (slot == TASK_RECORDS) slot = i; continue; }
+        task *old = tasks->items[i]; if (!old) { if (slot == TASK_RECORDS && i < tasks->limits.task_records) slot = i; continue; }
         AcquireSRWLockExclusive(&old->lock);
         bool same = !strcmp(old->actor,actor) && !strcmp(old->key,key);
         if (!old->finished) ++active;
@@ -216,7 +230,7 @@ static char *start(sb_win_tasks *tasks, yyjson_val *args) {
         }
         ReleaseSRWLockExclusive(&old->lock);
     }
-    if (slot == TASK_RECORDS || active >= TASK_ACTIVE) return fail("Task record or active process budget reached; records are never silently evicted.");
+    if (slot >= tasks->limits.task_records || active >= tasks->limits.active_tasks) return fail("Task record or active process budget reached; records are never silently evicted.");
     wchar_t *exe = to_wide(executable), *directory = to_wide(cwd), *line = calloc(32768,sizeof(wchar_t)), *env = environment(token_env); size_t used = 0;
     bool valid = absolute_exe(exe) && directory && line && env && quote(line,&used,exe);
     size_t idx,max; yyjson_val *argument;
@@ -227,7 +241,8 @@ static char *start(sb_win_tasks *tasks, yyjson_val *args) {
     InitializeSRWLock(&item->lock); strcpy(item->key,key); strcpy(item->hash,hash); strcpy(item->actor,actor); item->timeout=timeout;
     unsigned char random[16]; sb_error error={0}; bool ok = sb_platform_random(random,sizeof(random),&error);
     for(size_t i=0;ok && i<16;++i) snprintf(item->id+i*2,3,"%02x",random[i]);
-    item->bytes[0]=malloc(OUTPUT_CAP); item->bytes[1]=malloc(OUTPUT_CAP);
+    item->output_cap=tasks->limits.output_bytes;
+    item->bytes[0]=malloc(item->output_cap); item->bytes[1]=malloc(item->output_cap);
     SECURITY_ATTRIBUTES security={sizeof(security),NULL,TRUE}; HANDLE child_input=NULL,child_output[2]={NULL,NULL};
     ok = ok && item->bytes[0] && item->bytes[1] && CreatePipe(&child_input,&item->input,&security,4096) && SetHandleInformation(item->input,HANDLE_FLAG_INHERIT,0);
     for(unsigned i=0;ok && i<2;++i) ok=CreatePipe(&item->output[i],&child_output[i],&security,4096) && SetHandleInformation(item->output[i],HANDLE_FLAG_INHERIT,0);

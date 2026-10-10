@@ -15,7 +15,7 @@ typedef struct {
     bool audit_warning;
     char error[256];
 } record;
-struct sb_policy { sb_mutex *mutex; sb_audit *audit; unsigned ttl; record records[RECORD_LIMIT]; };
+struct sb_policy { sb_mutex *mutex; sb_audit *audit; unsigned ttl, record_limit; record records[RECORD_LIMIT]; };
 
 static const char *state_name(state status) {
     static const char *const names[] = {"pending", "approved", "running", "completed", "denied", "expired", "failed"};
@@ -36,7 +36,7 @@ static void expire(sb_policy *policy, record *r) {
     }
 }
 static record *find(sb_policy *policy, const char *id) {
-    for (size_t i = 0; i < RECORD_LIMIT; ++i) if (*policy->records[i].id && !strcmp(policy->records[i].id, id)) return &policy->records[i];
+    for (size_t i = 0; i < policy->record_limit; ++i) if (*policy->records[i].id && !strcmp(policy->records[i].id, id)) return &policy->records[i];
     return NULL;
 }
 static yyjson_mut_val *error_data(yyjson_mut_doc *doc, const char *message) {
@@ -78,12 +78,15 @@ sb_policy *sb_policy_new(unsigned ttl, sb_audit *audit, sb_error *error) {
     sb_policy *policy = calloc(1, sizeof(*policy));
     if (policy) policy->mutex = sb_platform_mutex_new();
     if (!policy || !policy->mutex) { free(policy); sb_fail(error, "Cannot allocate approval policy."); return NULL; }
-    policy->ttl = ttl; policy->audit = audit;
+    policy->ttl = ttl; policy->audit = audit; policy->record_limit = RECORD_LIMIT;
     return policy;
+}
+void sb_policy_limit(sb_policy *policy, unsigned records) {
+    if (policy && records && records <= RECORD_LIMIT) policy->record_limit = records;
 }
 void sb_policy_free(sb_policy *policy) {
     if (policy) {
-        for (size_t i = 0; i < RECORD_LIMIT; ++i) clear(&policy->records[i]);
+        for (size_t i = 0; i < policy->record_limit; ++i) clear(&policy->records[i]);
         sb_platform_mutex_free(policy->mutex); free(policy);
     }
 }
@@ -142,7 +145,7 @@ yyjson_mut_val *sb_policy_write(sb_host *host, const char *actor, sb_workspace *
             audit_record(policy, r, ok ? "write_completed" : "write_failed", actor);
         }
     } else {
-        for (size_t i = 0; i < RECORD_LIMIT; ++i) {
+        for (size_t i = 0; i < policy->record_limit; ++i) {
             record *candidate = &policy->records[i];
             if (!*candidate->id) continue;
             expire(policy, candidate);
@@ -151,7 +154,7 @@ yyjson_mut_val *sb_policy_write(sb_host *host, const char *actor, sb_workspace *
         }
         if (!r) {
             if (!sb_audit_healthy(policy->audit)) { data = error_data(doc, "Audit recording unavailable; new approvals are blocked."); goto done; }
-            for (size_t i = 0; i < RECORD_LIMIT; ++i) {
+            for (size_t i = 0; i < policy->record_limit; ++i) {
                 record *candidate = &policy->records[i];
                 if (!*candidate->id || (candidate->status != RUNNING && sb_platform_millis() >= candidate->deadline)) {
                     r = candidate; clear(r); break;
@@ -294,7 +297,7 @@ yyjson_mut_val *sb_policy_modify(sb_host *host, const char *actor, sb_workspace 
     if (ready) ready = sb_platform_sha256(output, strlen(output), output_hash, &error);
     sb_platform_mutex_lock(policy->mutex);
     if (!ready) { data = error_data(doc, *error.text ? error.text : "Cannot prepare the modification."); goto finish; }
-    for (size_t i = 0; i < RECORD_LIMIT; ++i) {
+    for (size_t i = 0; i < policy->record_limit; ++i) {
         record *candidate = &policy->records[i];
         if (!*candidate->id) continue;
         expire(policy, candidate);
@@ -305,7 +308,7 @@ yyjson_mut_val *sb_policy_modify(sb_host *host, const char *actor, sb_workspace 
     }
     if (!r) {
         if (!sb_audit_healthy(policy->audit)) { data = error_data(doc, "Audit recording unavailable; new approvals are blocked."); goto finish; }
-        for (size_t i = 0; i < RECORD_LIMIT; ++i) {
+        for (size_t i = 0; i < policy->record_limit; ++i) {
             record *candidate = &policy->records[i];
             if (!*candidate->id || (candidate->status != RUNNING && sb_platform_millis() >= candidate->deadline)) {
                 r = candidate; clear(r); break;
@@ -359,7 +362,7 @@ char *sb_policy_owner_request(sb_policy *policy, const char *request, size_t len
     if (!valid) result = error_data(doc, "Invalid owner request.");
     else if (!strcmp(command, "list") && !id) {
         result = yyjson_mut_obj(doc); yyjson_mut_val *items = yyjson_mut_arr(doc);
-        for (size_t i = 0; i < RECORD_LIMIT; ++i) if (*policy->records[i].id) {
+        for (size_t i = 0; i < policy->record_limit; ++i) if (*policy->records[i].id) {
             expire(policy, &policy->records[i]); yyjson_mut_arr_add_val(items, describe(doc, &policy->records[i], false));
         }
         yyjson_mut_obj_add_val(doc, result, "approvals", items);

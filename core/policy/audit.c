@@ -122,6 +122,35 @@ bool sb_audit_healthy(sb_audit *audit) {
     return healthy;
 }
 
+bool sb_audit_project(sb_audit *audit, const char *event, const char *project, uint64_t revision, uint64_t pid) {
+    if (!audit || !event || !project) return false;
+    sb_platform_mutex_lock(audit->mutex);
+    yyjson_mut_doc *doc = audit->healthy ? yyjson_mut_doc_new(NULL) : NULL;
+    yyjson_mut_val *root = doc ? yyjson_mut_obj(doc) : NULL;
+    bool ok = root && yyjson_mut_obj_add_uint(doc, root, "schema_version", 1) &&
+        yyjson_mut_obj_add_str(doc, root, "instance_id", audit->instance) &&
+        yyjson_mut_obj_add_str(doc, root, "version", SB_VERSION) &&
+        yyjson_mut_obj_add_uint(doc, root, "sequence", audit->sequence + 1) &&
+        yyjson_mut_obj_add_uint(doc, root, "time_unix_ms", sb_platform_unix_ms()) &&
+        yyjson_mut_obj_add_str(doc, root, "event", event) &&
+        yyjson_mut_obj_add_str(doc, root, "actor", "owner") &&
+        yyjson_mut_obj_add_str(doc, root, "project_id", project) &&
+        yyjson_mut_obj_add_uint(doc, root, "policy_revision", revision) &&
+        yyjson_mut_obj_add_uint(doc, root, "worker_pid", pid);
+    if (doc) yyjson_mut_doc_set_root(doc, root);
+    size_t length = 0; char *json = ok ? yyjson_mut_write(doc, 0, &length) : NULL;
+    char *line = json && length < 4096 ? malloc(length + 1) : NULL;
+    ok = ok && line && length + 1 <= audit->maximum - audit->bytes;
+    if (ok) {
+        memcpy(line, json, length); line[length] = '\n'; sb_error error = {0};
+        ok = sb_platform_journal_append(audit->journal, line, length + 1, &error);
+        if (ok) { audit->bytes += length + 1; ++audit->sequence; }
+    }
+    if (!ok) audit->healthy = false;
+    free(line); free(json); yyjson_mut_doc_free(doc);
+    sb_platform_mutex_unlock(audit->mutex); return ok;
+}
+
 void sb_audit_free(sb_audit *audit) {
     if (!audit) return;
     sb_audit_append(audit, "instance_closed", "host", NULL, NULL, NULL, NULL, 0, NULL, NULL, NULL, NULL);

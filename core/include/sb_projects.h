@@ -40,6 +40,7 @@ struct sb_project {
     sb_project_policy policy;
     unsigned approval_ttl_seconds;
     uint64_t audit_max_bytes;
+    sb_resource_limits limits;
     bool legacy_compatibility;
     sb_execution_profile legacy_profile;
     sb_execution_approval legacy_approval;
@@ -84,5 +85,8 @@ char *sb_projects_summary(const sb_project_registry *registry);
 /* Validates the same immutable legacy bytes that are later backed up. No Data migration. */
 char *sb_projects_migrate(const char *bytes, size_t length, const char *project_id,
                           const char *new_data_dir, sb_error *error);
+/* Owner CLI export to a new file. Existing registry is never modified in place. */
+char *sb_projects_edit(const char *bytes, size_t length, const char *project_json,
+                       size_t project_length, const char *id, bool configure, sb_error *error);
 
 #endif

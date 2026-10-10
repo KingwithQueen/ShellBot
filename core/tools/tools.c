@@ -1,4 +1,5 @@
 #include "sb.h"
+#include "sb_projects.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -54,6 +55,24 @@ yyjson_mut_val *sb_tools_list(yyjson_mut_doc *doc) {
         yyjson_mut_obj_add_bool(doc, annotations, "openWorldHint", task_tool);
         yyjson_mut_obj_add_val(doc, tool, "annotations", annotations);
         yyjson_mut_arr_add_val(array, tool);
+    }
+    return result;
+}
+
+static bool project_tool_visible(sb_host *host, const char *name) {
+    if (!host->project) return true;
+    int index = sb_project_tool_index(name);
+    /* Result polling and cancellation remain visible for already owned tasks. */
+    return index >= 0 && ((index == 9 || index == 10 || index == 12) ||
+        (host->project->enabled && (host->project->policy.tools & (UINT32_C(1) << index))));
+}
+yyjson_mut_val *sb_project_tools_list(sb_host *host, yyjson_mut_doc *doc) {
+    yyjson_mut_val *result = sb_tools_list(doc);
+    if (!host->project || !result) return result;
+    yyjson_mut_val *tools = yyjson_mut_obj_get(result, "tools");
+    for (size_t i = yyjson_mut_arr_size(tools); i; --i) {
+        const char *name = yyjson_mut_get_str(yyjson_mut_obj_get(yyjson_mut_arr_get(tools, i - 1), "name"));
+        if (!project_tool_visible(host, name)) yyjson_mut_arr_remove(tools, i - 1);
     }
     return result;
 }
@@ -158,7 +177,26 @@ yyjson_mut_val *sb_tool_call(sb_host *host, const char *actor, const char *name,
     for (size_t i = 0; i < tool_count(); ++i) if (!strcmp(name, definitions[i].name)) definition = &definitions[i];
     if (!definition) return failure(doc, "Unknown tool.");
     if (!arguments_valid(definition, args)) return failure(doc, "Invalid or unknown tool arguments.");
+    if (host->project) {
+        const sb_project *project = host->project;
+        const sb_project_directory *directory = sb_project_directory_find(project, sb_string(yyjson_obj_get(args, "workspace_id")));
+        sb_request_context context = {.actor = actor, .project = project, .policy_revision = project->policy_revision};
+        sb_project_operation operation = {.tool = name, .directory = directory,
+            .identity = (!strcmp(name, "task_start") || !strcmp(name, "task_input")) ? project->policy.default_identity : SB_ID_CURRENT_USER,
+            .owned_task = sb_execution_task_owned(host->execution, actor, sb_string(yyjson_obj_get(args, "task_id")))};
+        sb_policy_result decision = sb_project_evaluate(&context, &operation);
+        if (decision.decision == SB_DECISION_DENY) return failure(doc, decision.reason);
+        bool write = !strcmp(name, "fs_write") || !strcmp(name, "fs_patch");
+        if (decision.decision == SB_DECISION_PENDING && !(write && project->legacy_compatibility))
+            return failure(doc, "project_approval_adapter_unavailable: this operation requires M4 approval; no content accessed or operation executed.");
+        if (write && !project->legacy_compatibility)
+            return failure(doc, "project_file_write_adapter_unavailable: automatic project writes require M4.");
+    }
     yyjson_mut_val *data = yyjson_mut_obj(doc);
+    if (host->project) {
+        yyjson_mut_obj_add_str(doc, data, "project_id", host->project->id);
+        yyjson_mut_obj_add_uint(doc, data, "policy_revision", host->project->policy_revision);
+    }
     if (!strcmp(name, "host_info")) {
         char system[128], arch[16];
         sb_platform_info(system, sizeof(system), arch, sizeof(arch));
@@ -172,7 +210,8 @@ yyjson_mut_val *sb_tool_call(sb_host *host, const char *actor, const char *name,
     }
     if (!strcmp(name, "host_capabilities")) {
         yyjson_mut_val *tools = yyjson_mut_arr(doc), *roots = yyjson_mut_arr(doc), *versions = yyjson_mut_arr(doc);
-        for (size_t i = 0; i < tool_count(); ++i) yyjson_mut_arr_add_str(doc, tools, definitions[i].name);
+        for (size_t i = 0; i < tool_count(); ++i)
+            if (project_tool_visible(host, definitions[i].name)) yyjson_mut_arr_add_str(doc, tools, definitions[i].name);
         for (size_t i = 0; i < host->config.workspace_count; ++i) {
             yyjson_mut_val *root = yyjson_mut_obj(doc);
             yyjson_mut_obj_add_strcpy(doc, root, "workspace_id", host->config.workspaces[i].id);
@@ -188,9 +227,9 @@ yyjson_mut_val *sb_tool_call(sb_host *host, const char *actor, const char *name,
         yyjson_mut_obj_add_val(doc, data, "protocol_versions", versions);
         yyjson_mut_obj_add_uint(doc, data, "max_text_bytes", SB_TEXT_LIMIT);
         yyjson_mut_obj_add_uint(doc, data, "max_image_bytes", SB_IMAGE_LIMIT);
-        yyjson_mut_obj_add_bool(doc, data, "file_write", true);
-        yyjson_mut_obj_add_bool(doc, data, "file_overwrite", true);
-        yyjson_mut_obj_add_bool(doc, data, "file_patch", true);
+        yyjson_mut_obj_add_bool(doc, data, "file_write", !host->project || host->project->legacy_compatibility);
+        yyjson_mut_obj_add_bool(doc, data, "file_overwrite", !host->project || host->project->legacy_compatibility);
+        yyjson_mut_obj_add_bool(doc, data, "file_patch", !host->project || host->project->legacy_compatibility);
         yyjson_mut_obj_add_bool(doc, data, "atomic_overwrite", false);
         yyjson_mut_obj_add_uint(doc, data, "max_edit_bytes", SB_TEXT_LIMIT);
         yyjson_mut_obj_add_uint(doc, data, "max_backups_per_instance", 64);
@@ -199,7 +238,19 @@ yyjson_mut_val *sb_tool_call(sb_host *host, const char *actor, const char *name,
         yyjson_mut_obj_add_bool(doc, data, "desktop_control", false);
         yyjson_mut_obj_add_bool(doc, data, "oauth", false);
         yyjson_mut_obj_add_bool(doc, data, "approval", true);
-        yyjson_mut_obj_add_str(doc, data, "approval_mode", "local-owner");
+        yyjson_mut_obj_add_str(doc, data, "approval_mode", host->project && !host->project->legacy_compatibility ?
+            (host->project->policy.approval_mode == SB_PROJECT_NEVER ? "never" : host->project->policy.approval_mode == SB_PROJECT_WORKSPACE_AUTO ? "workspace_auto" : "always") : "local-owner");
+        if (host->project) {
+            yyjson_mut_obj_add_bool(doc, data, "project_approval_adapter", false);
+            yyjson_mut_obj_add_bool(doc, data, "unlisted_account_file_adapter", false);
+            yyjson_mut_obj_add_bool(doc, data, "administrator_backend", false);
+            yyjson_mut_obj_add_uint(doc, data, "max_active_tasks", host->config.limits.active_tasks);
+            yyjson_mut_obj_add_uint(doc, data, "max_task_records", host->config.limits.task_records);
+            yyjson_mut_obj_add_uint(doc, data, "max_output_bytes", host->config.limits.output_bytes);
+            yyjson_mut_obj_add_uint(doc, data, "max_timeout_ms", host->config.limits.task_timeout_ms);
+            yyjson_mut_obj_add_uint(doc, data, "max_approval_records", host->config.limits.approval_records);
+            yyjson_mut_obj_add_uint(doc, data, "worker_memory_mb", host->config.limits.worker_memory_mb);
+        }
         yyjson_mut_obj_add_bool(doc, data, "durable_approvals", false);
         yyjson_mut_obj_add_bool(doc, data, "durable_audit", true);
         yyjson_mut_obj_add_bool(doc, data, "audit_healthy", sb_audit_healthy(host->audit));

@@ -61,7 +61,7 @@ def main():
         source_bytes = legacy_path.read_bytes()
         response = run(["--migrate-config", str(legacy_path), "--output", str(destination),
                         "--project-id", "legacy-default", "--project-data-dir", str(data)])
-        check(response["migrated"] and not response["data_migrated"] and not response["runtime_available"], "migration stays configuration-only")
+        check(response["migrated"] and not response["data_migrated"] and not response["runtime_started"], "migration stays configuration-only")
         backup = Path(str(destination) + ".legacy-backup.json")
         check(legacy_path.read_bytes() == source_bytes == backup.read_bytes(), "backup and original bytes match exactly")
         migrated = json.loads(destination.read_bytes())
@@ -89,7 +89,7 @@ def main():
         check(native_result["status"] == "passed" and native_checks > 100, "meaningful native policy matrix completed")
         example = json.loads((repo / "config" / "projects.example.json").read_text(encoding="utf-8"))
         summary = validate(example)
-        check(len(summary["projects"]) == 2 and not summary["runtime_available"], "two permission projects parse without runtime activation")
+        check(len(summary["projects"]) == 2 and not summary["runtime_started"], "two permission projects parse without runtime activation")
         check(summary["projects"][0]["approval_mode"] == "never" and summary["projects"][1]["approval_mode"] == "workspace_auto", "different approval modes retained")
         check(not any(key in json.dumps(summary) for key in ("SHELLBOT_FULL_TOKEN", "ShellBotWorkspace")), "summary omits credential references and actual directory paths")
         minimal = {"format_version": 1, "projects": [{"id": "minimal", "token_env": "TOKEN_MIN", "data_dir": str(folder / "minimal-data")}]}

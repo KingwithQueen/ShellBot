@@ -6,8 +6,9 @@
 #include <stdint.h>
 #include "yyjson.h"
 
-#define SB_VERSION "0.1.0-dev.8"
+#define SB_VERSION "0.1.0-dev.9"
 #define SB_MAX_ROOTS 16
+#define SB_MAX_WORKSPACES (SB_MAX_ROOTS * 2)
 #define SB_PATH_CAP 32768
 #define SB_REQUEST_LIMIT (1024u * 1024u)
 #define SB_TEXT_LIMIT 65536u
@@ -40,7 +41,10 @@ typedef struct {
     bool read_only;
 } sb_workspace;
 typedef struct {
-    sb_workspace workspaces[SB_MAX_ROOTS];
+    unsigned active_tasks, task_records, output_bytes, task_timeout_ms, approval_records, worker_memory_mb;
+} sb_resource_limits;
+typedef struct {
+    sb_workspace workspaces[SB_MAX_WORKSPACES];
     size_t workspace_count;
     unsigned port;
     char token_env[64];
@@ -53,10 +57,11 @@ typedef struct {
     bool execution_enabled;
     sb_execution_profile execution_profile;
     sb_execution_approval execution_approval;
+    sb_resource_limits limits;
 } sb_config;
 typedef struct {
     sb_config config;
-    const sb_project *project; /* Trusted manager binding; M1 does not start project hosts. */
+    const sb_project *project; /* Immutable worker binding, never selected by tool parameters. */
     sb_lease *lease;
     sb_policy *policy;
     sb_owner *owner;
@@ -104,6 +109,7 @@ sb_execution *sb_execution_new(const sb_config *config, sb_error *error);
 void sb_execution_free(sb_execution *execution);
 yyjson_mut_val *sb_execution_status(sb_execution *execution, yyjson_mut_doc *document);
 bool sb_execution_available(sb_execution *execution);
+bool sb_execution_task_owned(sb_execution *execution, const char *actor, const char *id);
 const char *sb_execution_instance(sb_execution *execution);
 char *sb_execution_task(sb_execution *execution, const char *name, yyjson_val *arguments, sb_error *error);
 yyjson_mut_val *sb_tasks_call(sb_host *host, const char *actor, const char *name, yyjson_val *arguments, yyjson_mut_doc *document, bool *failed);
@@ -114,6 +120,8 @@ uint64_t sb_platform_unix_ms(void);
 void sb_platform_info(char *system, size_t capacity, char *arch, size_t arch_capacity);
 sb_root *sb_platform_root(const char *path, sb_error *error);
 void sb_platform_root_close(sb_root *root);
+bool sb_platform_roots_overlap(const sb_root *a, const sb_root *b);
+bool sb_platform_root_identity(const sb_root *root, char identity[50], sb_error *error);
 sb_file *sb_platform_open(sb_root *root, const char *relative, bool directory, sb_error *error);
 void sb_platform_close(sb_file *file);
 char *sb_platform_directory_path(sb_file *directory, sb_error *error);
@@ -125,6 +133,7 @@ bool sb_platform_list(sb_file *directory, size_t offset, size_t limit,
 void sb_platform_entries_free(sb_entry *entries, size_t count);
 char *sb_platform_default_data_dir(sb_error *error);
 sb_lease *sb_platform_lease(const char *directory, sb_error *error);
+sb_lease *sb_platform_lease_bound(const char *directory, const char *identity, sb_error *error);
 void sb_platform_lease_close(sb_lease *lease);
 bool sb_platform_random(unsigned char *buffer, size_t size, sb_error *error);
 char *sb_platform_load_config(const char *path, size_t *length, sb_error *error);
@@ -161,8 +170,10 @@ bool sb_audit_append(sb_audit *audit, const char *event, const char *actor, cons
                      const char *tool, const char *operation, const char *original_hash, const char *backup_id);
 void sb_audit_free(sb_audit *audit);
 bool sb_audit_task(sb_audit *audit, const char *event, const char *actor, const char *key, const char *task_id, sb_execution_profile profile, const char *hash, const char *operation, uint64_t pid);
+bool sb_audit_project(sb_audit *audit, const char *event, const char *project, uint64_t revision, uint64_t pid);
 
 sb_policy *sb_policy_new(unsigned ttl, sb_audit *audit, sb_error *error);
+void sb_policy_limit(sb_policy *policy, unsigned records);
 void sb_policy_free(sb_policy *policy);
 yyjson_mut_val *sb_policy_write(sb_host *host, const char *actor, sb_workspace *workspace,
                                const char *path, const char *text, const char *approval_id,
@@ -175,12 +186,16 @@ sb_owner *sb_owner_start(sb_host *host, sb_error *error);
 void sb_owner_stop(sb_owner *owner);
 bool sb_owner_stopping(sb_owner *owner);
 int sb_owner_command(const char *data_dir, const char *command, const char *id, sb_error *error);
+typedef char *(*sb_owner_handler)(void *context, const char *request, size_t length);
+sb_owner *sb_owner_start_handler(const char *data_dir, sb_owner_handler handler, void *context, sb_error *error);
+char *sb_owner_exchange(const char *data_dir, const char *request, size_t length, sb_error *error);
 
 char *sb_base64(const unsigned char *data, size_t length);
 bool sb_decode(const unsigned char *data, size_t length, bool end_of_file,
                const char *encoding, bool at_start, char **text, size_t *text_length,
                size_t *consumed, const char **detected, sb_error *error);
 yyjson_mut_val *sb_tools_list(yyjson_mut_doc *document);
+yyjson_mut_val *sb_project_tools_list(sb_host *host, yyjson_mut_doc *document);
 yyjson_mut_val *sb_search(sb_workspace *workspace, const char *path, const char *query,
                          bool recursive, bool content, size_t maximum, size_t per_file,
                          size_t total_bytes, yyjson_mut_doc *document, sb_error *error);

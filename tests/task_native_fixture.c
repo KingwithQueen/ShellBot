@@ -36,9 +36,11 @@ static int identity(void) {
     if (length <= 0) goto done;
     utf8 = malloc((size_t)length);
     if (!utf8 || !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, directory, -1, utf8, length, NULL, NULL)) goto done;
-    printf("{\"elevated\":%s,\"pid\":%lu,\"token_inherited\":%s,\"cwd\":",
+    printf("{\"elevated\":%s,\"pid\":%lu,\"token_inherited\":%s,\"project_tokens_inherited\":%s,\"canary_inherited\":%s,\"cwd\":",
            elevation.TokenIsElevated ? "true" : "false", GetCurrentProcessId(),
-           GetEnvironmentVariableW(L"SHELLBOT_TOKEN", NULL, 0) ? "true" : "false");
+           GetEnvironmentVariableW(L"SHELLBOT_TOKEN", NULL, 0) ? "true" : "false",
+           (GetEnvironmentVariableW(L"SHELLBOT_A_TOKEN", NULL, 0) || GetEnvironmentVariableW(L"SHELLBOT_B_TOKEN", NULL, 0)) ? "true" : "false",
+           GetEnvironmentVariableW(L"SHELLBOT_M2_CANARY", NULL, 0) ? "true" : "false");
     json_string(utf8);
     puts("}");
     result = ferror(stdout) ? 3 : 0;

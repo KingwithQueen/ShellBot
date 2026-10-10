@@ -7,6 +7,7 @@
 #include "execution.h"
 #include "task_process.h"
 
+
 /* A 16 KiB UTF-8 page can expand to six JSON bytes per control byte,
    in addition to the lossless base64 representation and task metadata. */
 #define SB_AGENT_TASK_REPLY_LIMIT 262144u
@@ -264,7 +265,7 @@ sb_execution *sb_execution_new(const sb_config *config, sb_error *error) {
         execution->restricted_owner_rejected = execution->restricted_prepared && !sb_win_owner_token_allowed(execution->restricted_token);
     }
     if (execution->configured && execution->profile == SB_EXEC_USER) {
-        execution->tasks=sb_win_tasks_new(SB_EXEC_USER);
+        execution->tasks=sb_win_tasks_new_limited(SB_EXEC_USER, &config->limits);
         if (!execution->tasks) { sb_fail(error,"Cannot initialize ordinary user task execution.");goto failed; }
     }
     if (execution->configured && execution->profile == SB_EXEC_ADMINISTRATOR && !start_agent(execution, error)) goto failed;
@@ -292,6 +293,14 @@ void sb_execution_free(sb_execution *execution) {
 
 
 const char *sb_execution_instance(sb_execution *execution) { return execution ? execution->instance : NULL; }
+
+bool sb_execution_task_owned(sb_execution *execution, const char *actor, const char *id) {
+    if (!execution) return false;
+    sb_platform_mutex_lock(execution->mutex);
+    bool owned = sb_win_tasks_owned(execution->tasks, actor, id);
+    sb_platform_mutex_unlock(execution->mutex);
+    return owned;
+}
 
 bool sb_execution_available(sb_execution *execution) {
     if (!execution) return false;

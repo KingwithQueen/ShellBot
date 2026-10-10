@@ -8,7 +8,7 @@
 #include <string.h>
 #include <wchar.h>
 
-struct sb_owner { HANDLE pipe, stop, thread; void *user; sb_policy *policy; bool http; };
+struct sb_owner { HANDLE pipe, stop, thread; void *user; sb_policy *policy; bool http; sb_owner_handler handler; void *context; sb_owner *children[3]; };
 
 static void *token_user(HANDLE token) {
     DWORD size = 0;
@@ -53,9 +53,9 @@ static bool finish(HANDLE handle, OVERLAPPED *overlapped, HANDLE stop, DWORD tim
     }
     return GetOverlappedResult(handle, overlapped, transferred, FALSE) != FALSE;
 }
-static bool transfer(HANDLE pipe, HANDLE stop, void *buffer, DWORD length, bool write) {
+static bool transfer_timed(HANDLE pipe, HANDLE stop, void *buffer, DWORD length, bool write, unsigned timeout) {
     DWORD offset = 0;
-    uint64_t deadline = sb_platform_millis() + 5000;
+    uint64_t deadline = sb_platform_millis() + timeout;
     while (offset < length) {
         uint64_t now = sb_platform_millis();
         if (now >= deadline || (stop && WaitForSingleObject(stop, 0) == WAIT_OBJECT_0)) return false;
@@ -70,6 +70,9 @@ static bool transfer(HANDLE pipe, HANDLE stop, void *buffer, DWORD length, bool 
         offset += got;
     }
     return true;
+}
+static bool transfer(HANDLE pipe, HANDLE stop, void *buffer, DWORD length, bool write) {
+    return transfer_timed(pipe, stop, buffer, length, write, 5000);
 }
 static bool owner_peer(sb_owner *owner) {
     if (!ImpersonateNamedPipeClient(owner->pipe)) return false;
@@ -100,14 +103,15 @@ static DWORD WINAPI serve(void *parameter) {
         CloseHandle(overlapped.hEvent);
         if (connected && WaitForSingleObject(owner->stop, 0) != WAIT_OBJECT_0) {
             uint32_t length = 0;
-            if (transfer(owner->pipe, owner->stop, &length, sizeof(length), false) && length && length <= 4096) {
-                char request[4096];
-                if (transfer(owner->pipe, owner->stop, request, length, false) && owner_peer(owner)) {
+            if (transfer(owner->pipe, owner->stop, &length, sizeof(length), false) && length && length <= (owner->handler ? SB_REQUEST_LIMIT : 4096)) {
+                char *request = malloc(length);
+                if (request && owner_peer(owner) && transfer(owner->pipe, owner->stop, request, length, false)) {
                     yyjson_doc *input = yyjson_read(request, length, 0);
                     yyjson_val *root = yyjson_doc_get_root(input);
                     const char *command = sb_string(yyjson_obj_get(root, "command"));
                     bool stop_request = yyjson_is_obj(root) && yyjson_obj_size(root) == 1 && command && !strcmp(command, "stop");
-                    char *response = stop_request ? sb_strdup(owner->http ? "{\"status\":\"stopping\"}" :
+                    bool manager_stop = owner->handler && yyjson_is_obj(root) && yyjson_obj_size(root) == 1 && command && !strcmp(command, "manager-stop");
+                    char *response = owner->handler ? owner->handler(owner->context, request, length) : stop_request ? sb_strdup(owner->http ? "{\"status\":\"stopping\"}" :
                         "{\"error\":\"For stdio, close the client input stream to stop.\"}") : sb_policy_owner_request(owner->policy, request, length);
                     yyjson_doc_free(input);
                     if (response && strlen(response) <= SB_RESPONSE_LIMIT) {
@@ -118,22 +122,25 @@ static DWORD WINAPI serve(void *parameter) {
                            FlushFileBuffers would wait indefinitely on a stalled client. */
                         unsigned char ack;
                         transfer(owner->pipe, owner->stop, &ack, 1, false);
-                        if (stop_request && owner->http) SetEvent(owner->stop);
+                        if (stop_request && owner->http && !owner->handler) SetEvent(owner->stop);
+                        if (manager_stop) SetEvent(owner->stop);
                     }
                     free(response);
                 }
+                free(request);
             }
         }
         DisconnectNamedPipe(owner->pipe);
     }
     return 0;
 }
-sb_owner *sb_owner_start(sb_host *host, sb_error *error) {
+static sb_owner *start(const char *data_dir, sb_host *host, sb_owner_handler handler, void *context, bool first, sb_error *error) {
     wchar_t name[128];
-    if (!pipe_name(host->config.data_dir, name, error)) return NULL;
+    if (!pipe_name(data_dir, name, error)) return NULL;
     sb_owner *owner = calloc(1, sizeof(*owner));
     if (!owner) { sb_fail(error, "Cannot allocate owner channel."); return NULL; }
-    owner->pipe = INVALID_HANDLE_VALUE; owner->policy = host->policy; owner->user = current_user(); owner->http = host->http_mode;
+    owner->pipe = INVALID_HANDLE_VALUE; owner->policy = host ? host->policy : NULL; owner->user = current_user(); owner->http = host && host->http_mode;
+    owner->handler = handler; owner->context = context;
     LPWSTR sid = NULL; PSECURITY_DESCRIPTOR descriptor = NULL;
     wchar_t sddl[256];
     bool secured = owner->user && ConvertSidToStringSidW(((TOKEN_USER *)owner->user)->User.Sid, &sid);
@@ -144,8 +151,8 @@ sb_owner *sb_owner_start(sb_host *host, sb_error *error) {
     if (sid) LocalFree(sid);
     if (secured) {
         SECURITY_ATTRIBUTES attributes = {sizeof(attributes), descriptor, FALSE};
-        owner->pipe = CreateNamedPipeW(name, PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
-            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, 1, 4096, 4096, 0, &attributes);
+        owner->pipe = CreateNamedPipeW(name, PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | (first ? FILE_FLAG_FIRST_PIPE_INSTANCE : 0),
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, handler ? 4 : 1, 4096, 4096, 0, &attributes);
     }
     if (descriptor) LocalFree(descriptor);
     owner->stop = CreateEventW(NULL, TRUE, FALSE, NULL);
@@ -153,15 +160,33 @@ sb_owner *sb_owner_start(sb_host *host, sb_error *error) {
     if (!owner->thread) { sb_owner_stop(owner); sb_fail(error, "Cannot start the protected local owner channel."); return NULL; }
     return owner;
 }
+sb_owner *sb_owner_start(sb_host *host, sb_error *error) {
+    return start(host->config.data_dir, host, NULL, NULL, true, error);
+}
+sb_owner *sb_owner_start_handler(const char *data_dir, sb_owner_handler handler, void *context, sb_error *error) {
+    sb_owner *owner = start(data_dir, NULL, handler, context, true, error);
+    if (!owner) return NULL;
+    for (size_t i = 0; i < 3; ++i) {
+        owner->children[i] = start(data_dir, NULL, handler, context, false, error);
+        if (!owner->children[i]) { sb_owner_stop(owner); return NULL; }
+    }
+    return owner;
+}
 void sb_owner_stop(sb_owner *owner) {
     if (!owner) return;
     if (owner->stop) SetEvent(owner->stop);
+    for (size_t i = 0; i < 3; ++i) sb_owner_stop(owner->children[i]);
     if (owner->thread) { WaitForSingleObject(owner->thread, INFINITE); CloseHandle(owner->thread); }
     if (owner->pipe != INVALID_HANDLE_VALUE) CloseHandle(owner->pipe);
     if (owner->stop) CloseHandle(owner->stop);
     free(owner->user); free(owner);
 }
-bool sb_owner_stopping(sb_owner *owner) { return owner && WaitForSingleObject(owner->stop, 0) == WAIT_OBJECT_0; }
+bool sb_owner_stopping(sb_owner *owner) {
+    if (!owner) return false;
+    if (WaitForSingleObject(owner->stop, 0) == WAIT_OBJECT_0) return true;
+    for (size_t i = 0; i < 3; ++i) if (sb_owner_stopping(owner->children[i])) return true;
+    return false;
+}
 int sb_owner_command(const char *data_dir, const char *command, const char *id, sb_error *error) {
     wchar_t name[128];
     if (!pipe_name(data_dir, name, error)) return 2;
@@ -195,4 +220,23 @@ int sb_owner_command(const char *data_dir, const char *command, const char *id, 
     free(response);
     if (!ok) sb_fail(error, "Owner channel request failed or timed out.");
     return result;
+}
+
+char *sb_owner_exchange(const char *data_dir, const char *request, size_t length, sb_error *error) {
+    wchar_t name[128];
+    if (!length || length > SB_REQUEST_LIMIT || !pipe_name(data_dir, name, error)) return NULL;
+    if (!WaitNamedPipeW(name, 3000)) { sb_fail(error, "Manager owner channel unavailable or busy."); return NULL; }
+    HANDLE pipe = CreateFileW(name, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
+        FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, NULL);
+    if (pipe == INVALID_HANDLE_VALUE) { sb_fail(error, "Cannot connect to manager owner channel."); return NULL; }
+    uint32_t size = (uint32_t)length, received = 0;
+    bool ok = transfer_timed(pipe, NULL, &size, sizeof(size), true, 30000) && transfer_timed(pipe, NULL, (void *)request, size, true, 30000) &&
+        transfer_timed(pipe, NULL, &received, sizeof(received), false, 30000) && received && received <= SB_RESPONSE_LIMIT;
+    char *response = ok ? calloc((size_t)received + 1, 1) : NULL;
+    ok = response && transfer_timed(pipe, NULL, response, received, false, 30000);
+    unsigned char ack = 1;
+    if (ok) transfer_timed(pipe, NULL, &ack, 1, true, 30000);
+    CloseHandle(pipe);
+    if (!ok) { free(response); sb_fail(error, "Manager request failed; do not replay side effects without reviewing state."); return NULL; }
+    return response;
 }

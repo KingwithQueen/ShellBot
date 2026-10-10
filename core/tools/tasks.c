@@ -20,9 +20,9 @@ yyjson_mut_val *sb_tasks_call(sb_host *host,const char *actor,const char *name,y
     if(!strcmp(name,"task_start")) {
         workspace_id=sb_string(yyjson_obj_get(args,"workspace_id"));
         const char *path=sb_string(yyjson_obj_get(args,"path")),*exe=sb_string(yyjson_obj_get(args,"executable")),*key=sb_string(yyjson_obj_get(args,"request_key"));
-        yyjson_val *argv=yyjson_obj_get(args,"argv"),*timeout_value=yyjson_obj_get(args,"timeout_ms"); uint64_t timeout=300000;
+        yyjson_val *argv=yyjson_obj_get(args,"argv"),*timeout_value=yyjson_obj_get(args,"timeout_ms"); uint64_t timeout=host->config.limits.task_timeout_ms < 300000 ? host->config.limits.task_timeout_ms : 300000;
         if(!workspace_id || !exe || !task_key_valid(key) || !yyjson_is_arr(argv) || yyjson_arr_size(argv)>64 || (yyjson_obj_get(args,"path") && !path) ||
-            (timeout_value && (!sb_integer(timeout_value,&timeout) || timeout<100 || timeout>3600000))) { sb_fail(&error,"Invalid task program, argv, request key, working directory or timeout."); goto done; }
+            (timeout_value && (!sb_integer(timeout_value,&timeout) || timeout<100 || timeout>host->config.limits.task_timeout_ms))) { sb_fail(&error,"Invalid task program, argv, request key, working directory or timeout."); goto done; }
         sb_workspace *workspace=sb_workspace_find(&host->config,workspace_id);
         if(!workspace) { sb_fail(&error,"Unknown workspace_id."); goto done; }
         directory=sb_platform_open(workspace->root,path?path:".",true,&error);

@@ -3,6 +3,7 @@
 #include "sb.h"
 #include "sb_projects.h"
 #include "../platform/execution.h"
+#include "../platform/manager.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,7 +17,15 @@ static void usage(void) {
           "                  [--data-dir ABSOLUTE_DIR] [--port 1024..65535]\n"
           "                  [--public-url DOMAIN_OR_HTTP_ORIGIN]\n"
           "       WinShellBot --generate-token | --version | --help\n"
-          "       WinShellBot --validate-projects FILE (configuration only; no project runtime yet)\n"
+          "       WinShellBot --validate-projects FILE\n"
+          "       WinShellBot --project-create | --project-configure ID --project-config FILE\n"
+          "                  [--projects REGISTRY] --output NEW (never overwrites existing files)\n"
+          "       WinShellBot --manager --projects REGISTRY --manager-data-dir ABSOLUTE_DIR\n"
+          "       WinShellBot --project-start | --project-stop ID --manager-data-dir ABSOLUTE_DIR\n"
+          "       WinShellBot --project-status [ID] --manager-data-dir ABSOLUTE_DIR\n"
+          "       WinShellBot --project-request | --project-owner ID --request FILE\n"
+          "                  --manager-data-dir ABSOLUTE_DIR (local owner channel only)\n"
+          "       WinShellBot --manager-stop --manager-data-dir ABSOLUTE_DIR\n"
           "       WinShellBot --migrate-config OLD --output NEW --project-id ID\n"
           "                  --project-data-dir NEW_ABSOLUTE_DIR (backs up OLD; does not migrate Data)\n"
           "       WinShellBot --execution-status [--config FILE] [--data-dir ABSOLUTE_DIR]\n"
@@ -67,7 +76,7 @@ static int project_config_command(int argc, char **argv) {
     if (!backup) { sb_fail(&error, "Cannot allocate configuration backup path."); goto done; }
     snprintf(backup, capacity, "%s.legacy-backup.json", output);
     if (!sb_platform_export_config(output, backup, json, strlen(json), bytes, length, &error)) goto done;
-    puts("{\"migrated\":true,\"legacy_backup_saved\":true,\"runtime_available\":false,\"data_migrated\":false}");
+    puts("{\"migrated\":true,\"legacy_backup_saved\":true,\"runtime_available\":true,\"runtime_started\":false,\"data_migrated\":false}");
     status = 0;
     goto done;
 invalid:
@@ -80,6 +89,7 @@ done:
 
 static int run(int argc, char **argv) {
     sb_error error = {0};
+    if (argc >= 2 && sb_manager_option(argv[1])) return sb_manager_cli(argc, argv);
     if (argc == 2 && !strcmp(argv[1], "--help")) { usage(); return 0; }
     if (argc == 2 && !strcmp(argv[1], "--version")) { puts("ShellBot " SB_VERSION " (C17)"); return 0; }
     if (argc >= 2 && (!strcmp(argv[1], "--validate-projects") || !strcmp(argv[1], "--migrate-config")))
@@ -185,6 +195,7 @@ bad_args:
 }
 
 int wmain(int argc, wchar_t **wide_argv) {
+    if (argc >= 2 && !wcscmp(wide_argv[1], L"--project-worker")) return sb_project_worker(argc, wide_argv);
     if (argc >= 2 && !wcscmp(wide_argv[1], L"--execution-agent")) return sb_win_execution_agent(argc, wide_argv);
     char **argv = calloc((size_t)argc, sizeof(*argv));
     if (!argv) return 2;

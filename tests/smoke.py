@@ -24,7 +24,7 @@ CHECKS = 0
 CLOSE_PROBE = True
 CLOSE_FAILURES = 0
 SKIPPED = []
-EXPECTED_VERSION = "0.1.0-dev.8"
+EXPECTED_VERSION = "0.1.0-dev.9"
 
 
 def check(condition, message):
