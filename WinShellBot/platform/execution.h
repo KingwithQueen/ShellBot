@@ -14,4 +14,5 @@ sb_execution *sb_win_administrator_host(const sb_config *config, const sb_projec
 bool sb_win_execution_cancel_all(sb_execution *execution);
 bool sb_win_execution_watch_worker(sb_execution *execution, HANDLE worker);
 bool sb_win_shared_worker(DWORD pid, HANDLE *process);
+void sb_win_execution_store(sb_execution *execution, sb_store *store, sb_audit *audit);
 #endif

@@ -23,9 +23,45 @@ typedef struct task {
     DWORD pid, exit_code; uint64_t started, timeout;
     const char *reason;
     task_input inputs[INPUT_RECORDS]; size_t input_count;
+    sb_win_tasks *owner;
+    char *command;
+    bool durable_reserved, durable_warning;
 } task;
-struct sb_win_tasks { SRWLOCK lock; task *items[TASK_RECORDS]; HANDLE stop, monitor, worker; sb_execution_profile profile; bool elevated; sb_resource_limits limits; sb_win_sandbox *sandbox; };
+struct sb_win_tasks { SRWLOCK lock; task *items[TASK_RECORDS]; HANDLE stop, monitor, worker; sb_execution_profile profile; bool elevated; sb_resource_limits limits; sb_win_sandbox *sandbox; sb_store *store; sb_audit *audit; };
 typedef struct { task *item; unsigned stream; } reader_context;
+static yyjson_mut_val *snapshot(sb_win_tasks *tasks, task *item, yyjson_mut_doc *doc);
+static bool task_event(task *item, const char *event, const char *status, bool output) {
+    sb_win_tasks *tasks=item->owner;
+    if (!tasks || !tasks->store) return true;
+    yyjson_mut_doc *doc=yyjson_mut_doc_new(NULL); yyjson_mut_val *body=doc ? snapshot(tasks,item,doc) : NULL;
+    yyjson_doc *command=item->command ? yyjson_read(item->command,strlen(item->command),0) : NULL;
+    if (body && command) {
+        const char *keys[]={"executable","cwd","argv"};
+        for (size_t i=0;i<3;++i) yyjson_mut_obj_add_val(doc,body,keys[i],yyjson_val_mut_copy(doc,yyjson_obj_get(yyjson_doc_get_root(command),keys[i])));
+    }
+    if (body) {
+        yyjson_mut_val *inputs=yyjson_mut_arr(doc);
+        for (size_t i=0;i<item->input_count;++i) {
+            task_input *input=&item->inputs[i]; yyjson_mut_val *entry=yyjson_mut_obj(doc);
+            yyjson_mut_obj_add_str(doc,entry,"input_key",input->key); yyjson_mut_obj_add_str(doc,entry,"sha256",input->hash);
+            yyjson_mut_obj_add_bool(doc,entry,"eof",input->eof); yyjson_mut_obj_add_uint(doc,entry,"bytes",input->length);
+            yyjson_mut_obj_add_str(doc,entry,"status",input->sent ? input->delivered ? "delivered" : "failed" : "queued"); yyjson_mut_arr_add_val(inputs,entry);
+        }
+        yyjson_mut_obj_add_val(doc,body,"input_receipts",inputs);
+        if (output) for (unsigned i=0;i<2;++i) {
+            size_t retained=item->lengths[i]<OUTPUT_CAP ? item->lengths[i] : OUTPUT_CAP;
+            char *encoded=sb_base64(item->bytes[i],retained);
+            if (encoded) yyjson_mut_obj_add_strcpy(doc,body,i ? "stderr_base64" : "stdout_base64",encoded);
+            yyjson_mut_obj_add_uint(doc,body,i ? "stderr_retained_bytes" : "stdout_retained_bytes",retained);
+            yyjson_mut_obj_add_bool(doc,body,i ? "stderr_history_truncated" : "stdout_history_truncated",retained!=item->lengths[i]);
+            free(encoded);
+        }
+    }
+    bool ok=body && sb_store_append(tasks->store,"task",item->id,item->actor,status,event,body) &&
+        sb_audit_task(tasks->audit,event,item->actor,item->key,item->id,tasks->profile,item->hash,"lifecycle",item->pid);
+    if (!ok) item->durable_warning=true;
+    yyjson_doc_free(command); yyjson_mut_doc_free(doc); return ok;
+}
 
 static char *serialize(yyjson_mut_doc *doc, yyjson_mut_val *root) {
     yyjson_mut_doc_set_root(doc, root); char *json = yyjson_mut_write(doc, 0, NULL); yyjson_mut_doc_free(doc); return json;
@@ -101,7 +137,7 @@ static DWORD WINAPI read_output(void *parameter) {
         AcquireSRWLockExclusive(&item->lock);
         size_t remaining = item->output_cap - item->lengths[stream], copy = got < remaining ? got : remaining;
         memcpy(item->bytes[stream] + item->lengths[stream], chunk, copy); item->lengths[stream] += copy;
-        if (copy < got && !item->reason) { item->reason = "output_limit"; TerminateJobObject(item->job, 124); }
+        if (copy < got && !item->reason) { item->reason = "output_limit"; task_event(item,"task_output_limit","running",false); TerminateJobObject(item->job, 124); }
         ReleaseSRWLockExclusive(&item->lock);
     }
     AcquireSRWLockExclusive(&item->lock); item->output_done[stream] = true; ReleaseSRWLockExclusive(&item->lock); return 0;
@@ -116,12 +152,16 @@ static DWORD WINAPI write_input(void *parameter) {
         ReleaseSRWLockExclusive(&item->lock);
         if (stop) break;
         if (!input) continue;
+        AcquireSRWLockExclusive(&item->lock);
+        bool recorded=task_event(item,"task_input_started","running",false);
+        ReleaseSRWLockExclusive(&item->lock);
         DWORD written = 0;
-        bool delivered = !input->length || (WriteFile(item->input, input->data, input->length, &written, NULL) && written == input->length);
+        bool delivered = recorded && (!input->length || (WriteFile(item->input, input->data, input->length, &written, NULL) && written == input->length));
         AcquireSRWLockExclusive(&item->lock);
         input->sent = true; input->delivered = delivered;
         free(input->data); input->data = NULL; ++next;
         if (!delivered) item->input_failed = true;
+        task_event(item,delivered ? "task_input_delivered" : "task_input_failed","running",false);
         bool eof = input->eof || !delivered;
         ReleaseSRWLockExclusive(&item->lock);
         if (eof) break;
@@ -140,17 +180,18 @@ static DWORD WINAPI monitor_tasks(void *parameter) {
             AcquireSRWLockExclusive(&item->lock);
             if (!item->finished) {
                 if (tasks->worker && WaitForSingleObject(tasks->worker,0) != WAIT_TIMEOUT && !item->reason) {
-                    item->reason="cancelled"; TerminateJobObject(item->job,125); SetEvent(item->input_event);
+                    item->reason="cancelled"; task_event(item,"task_worker_exited","running",false); TerminateJobObject(item->job,125); SetEvent(item->input_event);
                 }
                 JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting = {0};
                 bool queried = QueryInformationJobObject(item->job, JobObjectBasicAccountingInformation, &accounting, sizeof(accounting), NULL) != FALSE;
-                if (!queried && !item->reason) { item->reason = "failed"; TerminateJobObject(item->job, 125); }
+                if (!queried && !item->reason) { item->reason = "failed"; task_event(item,"task_query_failed","running",false); TerminateJobObject(item->job, 125); }
                 if (queried && accounting.ActiveProcesses && !item->reason && sb_platform_millis() - item->started >= item->timeout) {
-                    item->reason = "timed_out"; TerminateJobObject(item->job, 124);
+                    item->reason = "timed_out"; task_event(item,"task_timed_out","running",false); TerminateJobObject(item->job, 124);
                 }
                 if (queried && !accounting.ActiveProcesses && item->output_done[0] && item->output_done[1]) {
                     if (!GetExitCodeProcess(item->process, &item->exit_code)) { item->exit_code = 125; if (!item->reason) item->reason = "failed"; }
                     item->finished = true; SetEvent(item->input_event);
+                    task_event(item,"task_completed",item->reason ? item->reason : "completed",true);
                 }
             }
             ReleaseSRWLockExclusive(&item->lock);
@@ -162,13 +203,20 @@ static DWORD WINAPI monitor_tasks(void *parameter) {
 static void task_free(task *item) {
     if (!item) return;
     if (item->job) TerminateJobObject(item->job, 125);
-    AcquireSRWLockExclusive(&item->lock); item->finished = true; if (item->input_event) SetEvent(item->input_event); ReleaseSRWLockExclusive(&item->lock);
+    AcquireSRWLockExclusive(&item->lock); bool unfinished=!item->finished;
+    item->finished = true; if (unfinished && !item->reason) item->reason="cancelled";
+    if (item->input_event) SetEvent(item->input_event); ReleaseSRWLockExclusive(&item->lock);
     HANDLE threads[] = {item->readers[0],item->readers[1],item->writer};
     for (size_t i = 0; i < 3; ++i) if (threads[i]) { CancelSynchronousIo(threads[i]); WaitForSingleObject(threads[i], INFINITE); CloseHandle(threads[i]); }
+    if (unfinished && item->durable_reserved) {
+        if (item->process && WaitForSingleObject(item->process,3000)==WAIT_OBJECT_0) GetExitCodeProcess(item->process,&item->exit_code);
+        else item->reason="interrupted";
+        task_event(item,"task_instance_closed",item->reason,true);
+    }
     HANDLE handles[] = {item->job,item->process,item->input,item->output[0],item->output[1],item->input_event};
     for (size_t i = 0; i < 6; ++i) if (handles[i]) CloseHandle(handles[i]);
     for (size_t i = 0; i < INPUT_RECORDS; ++i) free(item->inputs[i].data);
-    free(item->bytes[0]); free(item->bytes[1]); free(item);
+    free(item->bytes[0]); free(item->bytes[1]); free(item->command); free(item);
 }
 sb_win_tasks *sb_win_tasks_new(sb_execution_profile profile) {
     const sb_resource_limits limits = {8,32,262144,3600000,64,512};
@@ -202,6 +250,9 @@ bool sb_win_tasks_watch_worker(sb_win_tasks *tasks, HANDLE worker) {
     tasks->worker=copy; ReleaseSRWLockExclusive(&tasks->lock); return true;
 }
 void sb_win_tasks_restrict(sb_win_tasks *tasks, sb_win_sandbox *sandbox) { tasks->sandbox=sandbox;tasks->profile=SB_EXEC_CONTROLLED; }
+void sb_win_tasks_store(sb_win_tasks *tasks, sb_store *store, sb_audit *audit) {
+    AcquireSRWLockExclusive(&tasks->lock); tasks->store=store; tasks->audit=audit; ReleaseSRWLockExclusive(&tasks->lock);
+}
 bool sb_win_tasks_cancel_all(sb_win_tasks *tasks) {
     if (!tasks) return true;
     bool ok = true;
@@ -210,7 +261,7 @@ bool sb_win_tasks_cancel_all(sb_win_tasks *tasks) {
         task *item = tasks->items[i]; if (!item) continue;
         AcquireSRWLockExclusive(&item->lock);
         if (!item->finished) {
-            if (TerminateJobObject(item->job, 125)) { item->reason = "cancelled"; SetEvent(item->input_event); }
+            if (TerminateJobObject(item->job, 125)) { item->reason = "cancelled"; task_event(item,"task_authorization_cancelled","running",false); SetEvent(item->input_event); }
             else ok = false;
         }
         ReleaseSRWLockExclusive(&item->lock);
@@ -235,9 +286,11 @@ static yyjson_mut_val *snapshot(sb_win_tasks *tasks, task *item, yyjson_mut_doc 
     yyjson_mut_obj_add_bool(doc, result, "stdin_failed", item->input_failed);
     yyjson_mut_obj_add_uint(doc, result, "timeout_ms", item->timeout);
     yyjson_mut_obj_add_bool(doc, result, "process_tree_job", true);
+    if (tasks->store) { yyjson_mut_obj_add_bool(doc,result,"durable",true); yyjson_mut_obj_add_bool(doc,result,"durable_warning",item->durable_warning); }
     return result;
 }
 static char *start(sb_win_tasks *tasks, yyjson_val *args) {
+    if (tasks->store && (!sb_store_healthy(tasks->store) || !sb_audit_healthy(tasks->audit))) return fail("Persistent state or audit unavailable; task was not started.");
     const char *key = sb_string(yyjson_obj_get(args, "request_key")), *actor = sb_string(yyjson_obj_get(args, "actor"));
     const char *hash = sb_string(yyjson_obj_get(args, "request_sha256"));
     const char *executable = sb_string(yyjson_obj_get(args, "executable")), *cwd = sb_string(yyjson_obj_get(args, "cwd"));
@@ -267,7 +320,8 @@ static char *start(sb_win_tasks *tasks, yyjson_val *args) {
     if (!valid) { free(exe); free(directory); free(line); free(env); return fail("Executable must be an absolute local .exe path; arguments must be bounded Unicode strings."); }
     task *item = calloc(1,sizeof(*item));
     if (!item) { free(exe); free(directory); free(line); free(env); return fail("Cannot allocate task."); }
-    InitializeSRWLock(&item->lock); strcpy(item->key,key); strcpy(item->hash,hash); strcpy(item->actor,actor); item->timeout=timeout;
+    InitializeSRWLock(&item->lock); strcpy(item->key,key); strcpy(item->hash,hash); strcpy(item->actor,actor); item->timeout=timeout; item->owner=tasks;
+    item->command=tasks->store ? yyjson_val_write(args,0,NULL) : NULL;
     unsigned char random[16]; sb_error error={0}; bool ok = sb_platform_random(random,sizeof(random),&error);
     for(size_t i=0;ok && i<16;++i) snprintf(item->id+i*2,3,"%02x",random[i]);
     item->output_cap=tasks->limits.output_bytes;
@@ -301,9 +355,19 @@ static char *start(sb_win_tasks *tasks, yyjson_val *args) {
     }
     if(ok) { item->writer=CreateThread(NULL,0,write_input,item,0,NULL); ok=item->writer!=NULL; }
     item->started=sb_platform_millis();
+    if (ok && tasks->store) {
+        ok=item->command && task_event(item,"task_start_intent","starting",false);
+        if (ok) { item->durable_reserved=true; tasks->items[slot]=item; }
+    }
     if(ok) ok=ResumeThread(process.hThread)!=(DWORD)-1;
+    if(ok && tasks->store) { AcquireSRWLockExclusive(&item->lock); ok=task_event(item,"task_started","running",false); ReleaseSRWLockExclusive(&item->lock); }
     if(process.hThread) CloseHandle(process.hThread);
-    if(!ok) { if(item->process) TerminateProcess(item->process,125); task_free(item);char message[192];snprintf(message,sizeof(message),"Cannot create and contain task (phase %u, Windows error %lu). No uncontained process is resumed.",phase,native_error);return fail(message); }
+    if(!ok) {
+        if(item->job) TerminateJobObject(item->job,125);
+        if(item->process) TerminateProcess(item->process,125);
+        if (item->durable_reserved) { AcquireSRWLockExclusive(&item->lock); item->reason="failed"; ReleaseSRWLockExclusive(&item->lock); SetEvent(item->input_event); return fail("Task startup was interrupted after its durable intent; request_key remains reserved. Review this task before submitting another key."); }
+        task_free(item);char message[192];snprintf(message,sizeof(message),"Cannot create and contain task (phase %u, Windows error %lu). No uncontained process is resumed.",phase,native_error);return fail(message);
+    }
     tasks->items[slot]=item;
     yyjson_mut_doc *doc=yyjson_mut_doc_new(NULL); if(!doc) return NULL;
     AcquireSRWLockExclusive(&item->lock); yyjson_mut_val *result=snapshot(tasks,item,doc); yyjson_mut_obj_add_bool(doc,result,"created_new",true); ReleaseSRWLockExclusive(&item->lock); return serialize(doc,result);
@@ -319,7 +383,7 @@ char *sb_win_tasks_call(sb_win_tasks *tasks,const char *name,yyjson_val *args) {
     yyjson_mut_doc *doc=yyjson_mut_doc_new(NULL); yyjson_mut_val *result=doc?snapshot(tasks,item,doc):NULL; const char *error=NULL;
     if(!doc) { ReleaseSRWLockExclusive(&item->lock); ReleaseSRWLockExclusive(&tasks->lock); return NULL; }
     if(!strcmp(name,"task_cancel")) {
-        if(!item->finished && !item->reason) { if(TerminateJobObject(item->job,125)) { item->reason="cancelled";SetEvent(item->input_event); } else error="Cannot terminate the task job."; }
+        if(!item->finished && !item->reason) { if(TerminateJobObject(item->job,125)) { item->reason="cancelled";task_event(item,"task_cancel_requested","running",false);SetEvent(item->input_event); } else error="Cannot terminate the task job."; }
         result=snapshot(tasks,item,doc);
     } else if(!strcmp(name,"task_output")) {
         const char *stream=sb_string(yyjson_obj_get(args,"stream")); unsigned selected=stream && !strcmp(stream,"stderr")?1:0; uint64_t offset=0,maximum=0;
@@ -336,7 +400,8 @@ char *sb_win_tasks_call(sb_win_tasks *tasks,const char *name,yyjson_val *args) {
     } else if(!strcmp(name,"task_input")) {
         const char *key=sb_string(yyjson_obj_get(args,"input_key")),*text=sb_string(yyjson_obj_get(args,"text")); yyjson_val *eof_value=yyjson_obj_get(args,"eof");
         bool eof=yyjson_get_bool(eof_value); size_t length=text?strlen(text):0; char hash[65]; sb_error hash_error={0}; task_input *existing=NULL;
-        if(!key_valid(key) || !text || length>4096 || !yyjson_is_bool(eof_value) || (!length && !eof) || !sb_platform_sha256(text,length,hash,&hash_error)) error="Invalid input key, UTF-8 text or EOF flag.";
+        if (tasks->store && (!sb_store_healthy(tasks->store) || !sb_audit_healthy(tasks->audit))) error="Persistent state or audit unavailable; stdin was not queued.";
+        else if(!key_valid(key) || !text || length>4096 || !yyjson_is_bool(eof_value) || (!length && !eof) || !sb_platform_sha256(text,length,hash,&hash_error)) error="Invalid input key, UTF-8 text or EOF flag.";
         else {
             for(size_t i=0;i<item->input_count;++i) if(!strcmp(item->inputs[i].key,key)) existing=&item->inputs[i];
             if(existing && (strcmp(existing->hash,hash) || existing->eof!=eof)) error="input_key already binds different input.";
@@ -344,7 +409,13 @@ char *sb_win_tasks_call(sb_win_tasks *tasks,const char *name,yyjson_val *args) {
             else if(!existing && item->input_count>=INPUT_RECORDS) error="Task input receipt budget reached.";
             else if(!existing) {
                 char *copy=sb_strdup(text); if(!copy) error="Cannot queue stdin data.";
-                else { existing=&item->inputs[item->input_count++];strcpy(existing->key,key);strcpy(existing->hash,hash);existing->data=copy;existing->length=(DWORD)length;existing->eof=eof;SetEvent(item->input_event); }
+                else {
+                    existing=&item->inputs[item->input_count++];strcpy(existing->key,key);strcpy(existing->hash,hash);existing->data=copy;existing->length=(DWORD)length;existing->eof=eof;
+                    if (!task_event(item,"task_input_queued","running",false)) {
+                        existing->sent=true; existing->delivered=false; item->reason="failed"; TerminateJobObject(item->job,125); error="Cannot persist stdin intent; input was not sent.";
+                    }
+                    SetEvent(item->input_event);
+                }
             }
             if(!error && existing) { yyjson_mut_obj_add_strcpy(doc,result,"input_key",key); yyjson_mut_obj_add_str(doc,result,"input_status",existing->sent?(existing->delivered?"delivered":"failed"):"queued"); }
         }

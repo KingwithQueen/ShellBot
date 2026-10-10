@@ -1,6 +1,7 @@
 #include "sb.h"
 #include "sb_projects.h"
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 
 bool sb_protocol_version(const char *version) {
@@ -78,6 +79,69 @@ static bool unambiguous(yyjson_val *value, unsigned depth) {
         yyjson_arr_foreach(value, idx, max, child) if (!unambiguous(child, depth + 1)) return false;
     }
     return true;
+}
+
+/* Both the manager and the worker derive the same operation. A client response
+   never grants permission: approval_id is still checked against the owner pool. */
+char *sb_mcp_operation(yyjson_val *params, sb_error *error) {
+    const char *name=sb_string(yyjson_obj_get(params,"name"));
+    yyjson_val *args=yyjson_obj_get(params,"arguments"), *state=yyjson_obj_get(params,"requestState"), *responses=yyjson_obj_get(params,"inputResponses");
+    const char *id=sb_string(state), *action=NULL;
+    if (!name || !unambiguous(params,0) || (args && !yyjson_is_obj(args))) goto invalid;
+    if (state && (!id || strlen(id)!=32 || strspn(id,"0123456789abcdef")!=32)) goto invalid;
+    if (responses) {
+        if (!id || !yyjson_is_obj(responses) || yyjson_obj_size(responses)!=1) goto invalid;
+        yyjson_val *answer=yyjson_obj_get(responses,id);
+        static const char *const keys[]={"action"};
+        action=sb_string(yyjson_obj_get(answer,"action"));
+        if (!sb_config_keys(answer,keys,1) || !action || (strcmp(action,"accept") && strcmp(action,"decline") && strcmp(action,"cancel"))) goto invalid;
+    }
+    const char *existing=sb_string(yyjson_obj_get(args,"approval_id"));
+    if (id && yyjson_obj_get(args,"approval_id") && (!existing || strcmp(existing,id))) goto invalid;
+    yyjson_mut_doc *doc=yyjson_mut_doc_new(NULL);
+    if (!doc) return NULL;
+    yyjson_mut_val *root=yyjson_mut_obj(doc), *arguments=args ? yyjson_val_mut_copy(doc,args) : yyjson_mut_obj(doc);
+    bool cancelled=action && strcmp(action,"accept");
+    if (cancelled) {
+        arguments=yyjson_mut_obj(doc);
+        yyjson_val *identity=yyjson_obj_get(args,"identity");
+        if (identity) yyjson_mut_obj_add_val(doc,arguments,"identity",yyjson_val_mut_copy(doc,identity));
+    }
+    if (id) { yyjson_mut_obj_remove_str(arguments,"approval_id"); yyjson_mut_obj_add_strcpy(doc,arguments,"approval_id",id); }
+    yyjson_mut_doc_set_root(doc,root); yyjson_mut_obj_add_strcpy(doc,root,"name",cancelled ? "approval_cancel" : name);
+    yyjson_mut_obj_add_val(doc,root,"arguments",arguments);
+    char *wire=yyjson_mut_write(doc,0,NULL); yyjson_mut_doc_free(doc); return wire;
+invalid:
+    sb_fail(error,"Invalid tool-call parameters or approval continuation."); return NULL;
+}
+
+static yyjson_mut_val *approval_prompt(sb_host *host, yyjson_mut_doc *doc, yyjson_mut_val *result, yyjson_val *params, bool modern) {
+    yyjson_mut_val *details=yyjson_mut_obj_get(result,"structuredContent");
+    const char *status=yyjson_mut_get_str(yyjson_mut_obj_get(details,"status"));
+    const char *id=yyjson_mut_get_str(yyjson_mut_obj_get(details,"approval_id"));
+    if (!host->project || !*host->owner_url || !status || strcmp(status,"pending") || !id) return result;
+    const char *identity=sb_string(yyjson_obj_get(yyjson_obj_get(params,"arguments"),"identity"));
+    char url[640]; snprintf(url,sizeof(url),"%s#project=%s&backend=%s&approval=%s",host->owner_url,host->project->id,
+        identity && !strcmp(identity,"administrator") ? "administrator" : "ordinary",id);
+    yyjson_mut_obj_add_strcpy(doc,details,"approval_url",url);
+    yyjson_mut_obj_remove_str(details,"action");
+    yyjson_mut_obj_add_str(doc,details,"action","Ask the project owner to inspect approval_url and approve this exact request, then retry unchanged arguments with approval_id or requestState. Opening the link or accepting the prompt does not approve execution.");
+    yyjson_val *caps=yyjson_obj_get(yyjson_obj_get(params,"_meta"),"io.modelcontextprotocol/clientCapabilities");
+    if (!modern || yyjson_obj_get(params,"requestState") || !yyjson_is_obj(yyjson_obj_get(yyjson_obj_get(caps,"elicitation"),"url"))) {
+        /* Older clients may display only text content, ignoring structuredContent. */
+        yyjson_mut_val *entry=yyjson_mut_arr_get(yyjson_mut_obj_get(result,"content"),0);
+        char *text=yyjson_mut_val_write(details,0,NULL);
+        if (entry && text) { yyjson_mut_obj_remove_str(entry,"text"); yyjson_mut_obj_add_strcpy(doc,entry,"text",text); }
+        free(text); return result;
+    }
+    yyjson_mut_val *required=yyjson_mut_obj(doc), *requests=yyjson_mut_obj(doc), *request=yyjson_mut_obj(doc), *prompt=yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_str(doc,required,"resultType","input_required");
+    yyjson_mut_obj_add_strcpy(doc,required,"requestState",id);
+    yyjson_mut_obj_add_str(doc,request,"method","elicitation/create");
+    yyjson_mut_obj_add_str(doc,prompt,"mode","url"); yyjson_mut_obj_add_strcpy(doc,prompt,"url",url);
+    yyjson_mut_obj_add_str(doc,prompt,"message","Ask the project owner to review this exact request in ShellBot. Opening the page or accepting this prompt does not approve execution. Owner credentials stay on that page.");
+    yyjson_mut_obj_add_val(doc,request,"params",prompt); yyjson_mut_obj_add_val(doc,requests,id,request);
+    yyjson_mut_obj_add_val(doc,required,"inputRequests",requests); return required;
 }
 
 char *sb_dispatch(sb_host *host, sb_protocol *protocol, const char *request,
@@ -163,12 +227,17 @@ char *sb_dispatch(sb_host *host, sb_protocol *protocol, const char *request,
         if (yyjson_obj_get(params, "cursor")) rpc_error(output, response, -32602, "No tool-list cursor is supported.");
         else yyjson_mut_obj_add_val(output, response, "result", sb_project_tools_list(host, output));
     } else if (!strcmp(method, "tools/call")) {
-        const char *name = sb_string(yyjson_obj_get(params, "name"));
-        yyjson_val *arguments = yyjson_obj_get(params, "arguments");
-        if (!name || (arguments && !yyjson_is_obj(arguments))) rpc_error(output, response, -32602, "Invalid tool-call parameters.");
-        else if (!sb_tool_exists(name)) rpc_error(output, response, -32602, "Unknown tool.");
-        else yyjson_mut_obj_add_val(output, response, "result", sb_tool_call(host, context && context->actor ? context->actor :
-            (protocol ? "stdio" : "http-development"), name, arguments, output));
+        sb_error error={0}; char *wire=sb_mcp_operation(params,&error);
+        yyjson_doc *operation=wire ? yyjson_read(wire,strlen(wire),0) : NULL;
+        yyjson_val *call=yyjson_doc_get_root(operation); const char *name=sb_string(yyjson_obj_get(call,"name"));
+        if (!name) rpc_error(output,response,-32602,*error.text ? error.text : "Invalid tool-call parameters.");
+        else if (!sb_tool_exists(name)) rpc_error(output,response,-32602,"Unknown tool.");
+        else {
+            yyjson_mut_val *result=sb_tool_call(host,context && context->actor ? context->actor :
+                (protocol ? "stdio" : "http-development"),name,yyjson_obj_get(call,"arguments"),output);
+            yyjson_mut_obj_add_val(output,response,"result",approval_prompt(host,output,result,params,modern));
+        }
+        yyjson_doc_free(operation); free(wire);
     } else {
         rpc_error(output, response, -32601, "Method not found.");
         if (modern && !protocol) *http_status = 404;
@@ -176,7 +245,7 @@ char *sb_dispatch(sb_host *host, sb_protocol *protocol, const char *request,
     yyjson_mut_val *result = yyjson_mut_obj_get(response, "result");
     if (modern && result) {
         if (protocol) protocol->modern = true;
-        yyjson_mut_obj_add_str(output, result, "resultType", "complete");
+        if (!yyjson_mut_obj_get(result,"resultType")) yyjson_mut_obj_add_str(output, result, "resultType", "complete");
         yyjson_mut_val *result_meta = yyjson_mut_obj(output);
         yyjson_mut_obj_add_val(output, result_meta, "io.modelcontextprotocol/serverInfo", server_info(output));
         yyjson_mut_obj_add_val(output, result, "_meta", result_meta);

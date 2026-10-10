@@ -478,6 +478,60 @@ void sb_platform_journal_close(sb_journal *journal) {
     if (journal) { CloseHandle(journal->handle); free(journal); }
 }
 
+static bool private_state_acl(HANDLE file) {
+    HANDLE token=NULL; DWORD size=0; void *user=NULL; PSECURITY_DESCRIPTOR descriptor=NULL;
+    BYTE system_sid[SECURITY_MAX_SID_SIZE]; DWORD system_size=sizeof(system_sid);
+    bool ok=OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&token) && CreateWellKnownSid(WinLocalSystemSid,NULL,system_sid,&system_size);
+    if (ok) { GetTokenInformation(token,TokenUser,NULL,0,&size); user=size ? malloc(size) : NULL;
+        ok=user && GetTokenInformation(token,TokenUser,user,size,&size); }
+    if (token) CloseHandle(token);
+    size=0; GetKernelObjectSecurity(file,DACL_SECURITY_INFORMATION,NULL,0,&size); descriptor=size ? malloc(size) : NULL;
+    SECURITY_DESCRIPTOR_CONTROL control=0; DWORD revision=0; PACL acl=NULL; BOOL present=FALSE,defaulted=FALSE;
+    BY_HANDLE_FILE_INFORMATION info={0};
+    ok=ok && descriptor && GetFileInformationByHandle(file,&info) && info.nNumberOfLinks==1 &&
+        !(info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT)) &&
+        GetKernelObjectSecurity(file,DACL_SECURITY_INFORMATION,descriptor,size,&size) &&
+        GetSecurityDescriptorControl(descriptor,&control,&revision) && (control & SE_DACL_PROTECTED) &&
+        GetSecurityDescriptorDacl(descriptor,&present,&acl,&defaulted) && present && acl && acl->AceCount;
+    for (DWORD i=0;ok && i<acl->AceCount;++i) {
+        ACCESS_ALLOWED_ACE *ace=NULL; ok=GetAce(acl,i,(void **)&ace) && ace->Header.AceType==ACCESS_ALLOWED_ACE_TYPE &&
+            !(ace->Header.AceFlags & INHERITED_ACE) &&
+            (EqualSid((PSID)&ace->SidStart,((TOKEN_USER *)user)->User.Sid) || EqualSid((PSID)&ace->SidStart,system_sid));
+    }
+    free(descriptor); free(user); return ok;
+}
+bool sb_platform_state_visit(sb_lease *lease, sb_state_visitor visitor, void *context, sb_error *error) {
+    sb_file *directory=lease ? sb_platform_open(lease->root,".",true,error) : NULL;
+    if (!directory) return false;
+    bool ok=true,more=true; size_t offset=0,files=0,total=0;
+    while (ok && more) {
+        sb_entry *entries=NULL; size_t count=0;
+        ok=offset<4096 && sb_platform_list(directory,offset,200,&entries,&count,&more,error);
+        for (size_t i=0;ok && i<count;++i) {
+            sb_entry *entry=&entries[i]; if (strncmp(entry->name,"state-",6)) continue;
+            const char *name=entry->name;
+            if (strlen(name)!=44 || strspn(name+6,"0123456789abcdef")!=32 || strcmp(name+38,".jsonl") ||
+                entry->directory || entry->reparse || ++files>=64 || entry->size>32u*1024u*1024u-total) { ok=false; break; }
+            sb_file *file=sb_platform_open(lease->root,name,false,error);
+            size_t length=file ? (size_t)sb_platform_size(file) : 0;
+            char *bytes=file && length==entry->size && private_state_acl(file->handle) ? malloc(length+1) : NULL;
+            size_t used=0;
+            while (bytes && used<length) {
+                size_t got=0;
+                if (!sb_platform_read(file,used,(unsigned char *)bytes+used,length-used,&got,error) || !got) break;
+                used+=got;
+            }
+            ok=bytes && used==length;
+            if (ok) { bytes[length]=0; ok=visitor(context,name,bytes,length,error); total+=length; }
+            free(bytes); sb_platform_close(file);
+        }
+        offset+=count; sb_platform_entries_free(entries,count);
+    }
+    sb_platform_close(directory);
+    if (!ok && !*error->text) sb_fail(error,"State retention requires protected regular files within 32 MiB, 63 previous instances and 4096 directory entries.");
+    return ok;
+}
+
 bool sb_platform_random(unsigned char *buffer, size_t size, sb_error *error) {
     if (size > UINT32_MAX || BCryptGenRandom(NULL, buffer, (ULONG)size, BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) {
         sb_fail(error, "System random generation failed."); return false;

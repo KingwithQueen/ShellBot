@@ -6,7 +6,7 @@
 #define SB_PROJECT_FORMAT 1
 #define SB_MAX_PROJECTS 16
 #define SB_MAX_PROJECT_DIRECTORIES (SB_MAX_ROOTS * 2)
-#define SB_PROJECT_TOOL_COUNT 13
+#define SB_PROJECT_TOOL_COUNT 15
 
 typedef enum { SB_PROJECT_ALWAYS, SB_PROJECT_WORKSPACE_AUTO, SB_PROJECT_NEVER } sb_project_approval;
 typedef enum { SB_FILES_CONFIGURED, SB_FILES_CURRENT_USER } sb_file_scope;
@@ -51,6 +51,7 @@ struct sb_project {
 typedef struct {
     unsigned format_version, port;
     char public_origin[320], default_project_id[64];
+    char owner_token_env[64]; /* Independent remote owner credential reference. */
     sb_project projects[SB_MAX_PROJECTS];
     size_t project_count;
 } sb_project_registry;
@@ -62,6 +63,7 @@ typedef struct {
     bool current_user_target; /* Trusted resolver classified an unlisted, account-accessible file. */
     sb_execution_identity identity;
     bool owned_task; /* Backend verified both project and authenticated actor, not a JSON boolean. */
+    bool owned_request;
     bool restricted_backend_verified; /* Actual local sandbox verification, never accepted from JSON. */
     bool administrator_backend_verified; /* Verified manager-owned agent, not a client assertion. */
 } sb_project_operation;

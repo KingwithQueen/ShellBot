@@ -4,11 +4,11 @@ ShellBot 是使用 C17 开发的电脑 MCP 主机。模型服务负责推理，S
 
 Windows 工程 WinShellBot 优先面向 Windows 10/11 x64。通用 C 核心与 Windows 接口分离，便于以后移植 Linux 和 macOS；Windows 7 以后单独编译和验证。
 
-后续开发按已确认的多项目和独立权限方案推进，见 [开发计划](docs/DEVELOPMENT_PLAN.md)及 [项目权限与执行身份](docs/EXECUTION_PERMISSIONS.md)。dev.12 接通 M5 共享管理员代理，在 M4 全工具审批和 Windows LPAC 基础上提供逐项目管理员文件与命令操作，见 [共享管理员代理](docs/SHARED_ADMINISTRATOR.md)。下一项为 M6 远程所有者审批与持久恢复。
+后续开发按已确认的多项目和独立权限方案推进，见 [开发计划](docs/DEVELOPMENT_PLAN.md)及 [项目权限与执行身份](docs/EXECUTION_PERMISSIONS.md)。dev.13 接通 M6 独立所有者审批、客户端 URL 提示、持久请求/任务及生命周期审计，见 [远程审批与恢复](docs/REMOTE_APPROVALS.md)。下一项为 M7 管理界面与候选验收。
 
 ## 当前实现
 
-当前版本为 `0.1.0-dev.12`，是开发测试版本。程序只监听本机端口，域名与 cloudflared 隧道由已有环境完成，不要求域名检查；OAuth 与隧道管理暂缓。已实现：
+当前版本为 `0.1.0-dev.13`，是开发测试版本。程序只监听本机端口，域名与 cloudflared 隧道由已有环境完成，不要求域名检查；OAuth 与隧道管理暂缓。已实现：
 
 | 能力 | 当前行为 |
 | --- | --- |
@@ -27,6 +27,7 @@ Windows 工程 WinShellBot 优先面向 Windows 10/11 x64。通用 C 核心与 W
 | M3 项目 MCP 网关 | 一个回环端口、/projects/ID/mcp、逐项目 bearer、显式默认项目 /mcp、地址生成、有界并发和进程通信超时 |
 | M4 项目审批与受限任务 | 六个文件工具、命令启动和输入统一审批；原队列查看/批准/拒绝/撤销；有界分页和结果重试；LPAC 实际身份与权限验证后开放声明程序 |
 | M5 共享管理员代理 | 所有者异步启动 UAC；逐项目可信注册、许可与撤销；显式 identity:administrator 文件与任务；独立审批和归属清理 |
+| M6 远程审批与恢复 | 独立所有者凭据与有限页面/API；客户端 URL 提示；本人审批查询/取消；有界私有请求/任务历史；重启中断及完整生命周期审计 |
 | 运行保护 | 数据目录实例锁、请求和结果大小上限；HTTP 令牌、Host/Origin 检查 |
 | 已有代理接入 | 默认接受本机代理的合法 Host/Origin 且要求 bearer；外部地址配置作为可选限制保留 |
 | 后台命令任务 | task_start、task_status、task_output、task_input、task_cancel；显式启用 user/administrator 后提供进程、输出、输入、超时和取消 |
@@ -34,11 +35,11 @@ Windows 工程 WinShellBot 优先面向 Windows 10/11 x64。通用 C 核心与 W
 
 文件工具检查实际打开的文件或目录句柄对应的最终路径，拒绝越界联接、符号链接、父目录跳转和 NTFS 数据流路径。目录工具路径须为相对路径；新项目只有显式授予 current_user 文件范围后，才可省略 workspace_id 使用绝对本地盘符路径，配置目录只读属性仍生效。文件名搜索跳过重解析目录。没有配置目录时不自动授权当前目录或整台电脑。
 
-本版支持 MCP `2025-03-26`、`2025-06-18`、`2025-11-25` 的初始化与工具子集，并支持 `2026-07-28` 的逐请求元数据、`server/discover`、工具调用和请求头镜像校验。新版成功结果包含 `resultType: complete` 和服务信息，发现与工具列表包含缓存范围。HTTP 不建立协议会话；GET `/mcp` 返回 405，不宣称 SSE、标准 MCP tasks 扩展或 elicitation；后台任务使用普通工具调用。本机待审批请求以工具错误及结构化状态返回，不伪装成客户端授权。依据：[MCP 工具规范](https://modelcontextprotocol.io/specification/2026-07-28/server/tools)、[HTTP 传输规范](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http)。
+本版支持 MCP `2025-03-26`、`2025-06-18`、`2025-11-25` 的初始化与工具子集，并支持 `2026-07-28` 的逐请求元数据、发现、工具调用和请求头校验。声明 URL elicitation 能力的新版客户端可收到 input_required；客户端接受提示仍须实际所有者批准，其他客户端使用 pending/approval_url。HTTP 不建立协议会话，GET `/mcp` 返回 405，未开放 SSE 或标准 MCP tasks 扩展。见 [M6 协议与边界](docs/REMOTE_APPROVALS.md)。
 
 旧单实例 HTTP 使用一个 bearer 身份；项目网关中每个项目使用独立 bearer，路由和凭据共同固定项目。默认不需要填写域名，仍验证 Host/Origin 格式和令牌；可选 public_url 启用域名限制并生成公共地址。实际客户端工具使用与本机自检分别记录。
 
-覆盖与局部修改采用锁定原文件并预先保存私有备份，返回 atomic_save:false，支持冲突拒绝和结果重试，不承诺崩溃原子性，见 [文本修改说明](docs/FILE_EDIT.md)。命令行为见 [命令任务说明](docs/COMMAND_TASKS.md)。M4 受限后端只开放声明的程序与只读运行文件，禁用网络、Win32k 桌面调用和子进程；不保证通用解释器、GUI 或所有构建工具可运行。远程审批、审批/任务重启恢复、完整调用审计、桌面控制、PDF/Office/OCR 和管理界面仍待实现。
+覆盖与局部修改采用锁定原文件并预先保存私有备份，返回 atomic_save:false，支持冲突拒绝和结果重试，不承诺崩溃原子性，见 [文本修改说明](docs/FILE_EDIT.md)。命令行为见 [命令任务说明](docs/COMMAND_TASKS.md)。M4 受限后端只开放声明的程序与只读运行文件，禁用网络、Win32k 桌面调用和子进程；不保证通用解释器、GUI 或所有构建工具可运行。M6 加载私有历史并标记重启中断，不恢复执行许可或自动重跑。桌面控制、PDF/Office/OCR 和项目管理界面仍待实现。
 
 未版本化的单实例运行配置仍使用 dev.7 的 controlled、user、administrator；原 controlled 命令保持不可用，原 user/administrator 预授权行为保留。项目配置将审批、文件范围、身份与管理员许可分开，通过 --manager 启动，加 --http 开启项目网关；--config 保持旧入口。LPAC 和共享管理员仅用于正常新格式项目，管理员许可不兼容受限/目录隔离项目；旧管理员迁移不会自动接入共享代理。见 [项目配置说明](docs/PROJECT_CONFIGURATION.md)及 [项目权限与执行身份](docs/EXECUTION_PERMISSIONS.md)。
 
@@ -57,7 +58,7 @@ python .\tests\smoke.py --exe .\out\x64\Release\WinShellBot.exe
 # 分别验证核心功能，明确排除仍在调查的关闭连接诊断：
 .\scripts\test.ps1 -Configuration Release -SkipCloseProbe
 # 核心报告必须匹配当前 Release 程序才能生成测试包：
-# 当前打包器另要求旧 dev.7 原生专项凭据；dev.12 M5 本轮不生成新包。
+# 当前打包器另要求旧 dev.7 原生专项凭据；dev.13 M6 本轮不生成新包。
 .\scripts\package-test.ps1
 ```
 
@@ -105,7 +106,7 @@ $env:SHELLBOT_TOKEN = & .\out\x64\Release\WinShellBot.exe --generate-token
 
 审批通过同账户的受限本地命名管道管理，MCP 不提供批准工具。使用 `--list-approvals`、`--inspect ID`、`--approve ID`、`--deny ID`、`--revoke ID`，并指定与主机相同的 `--data-dir`；`--stop` 停止 HTTP 主机。`fs_write` 提交 `workspace_id/path/text` 后返回待审批 ID；查看、批准后，以相同参数加上 `approval_id` 重试。参数摘要包含规范目标、父目录的卷及 128 位文件标识、内容 SHA-256 和字节数；批准只被原子消费一次。
 
-默认审批期限为 300 秒，可配置 `approval_ttl_seconds: 1..600`，最多 64 条内存记录，重启全部失效。创建操作通过已验证的父目录句柄新建临时文件、写入并刷新，再禁止覆盖地提交；异常中断可能留下临时文件，不按名称自动清理。同账户的本地程序属于管理信任范围；受控命令开放前必须进一步隔离执行身份和管理通道；user/administrator 属于预先授予的账户级信任模式。
+旧单实例入口默认审批期限 300 秒，可配置 `approval_ttl_seconds: 1..600`，最多 64 条内存记录，重启许可失效；正常项目另保留 M6 私有历史和任务键。创建操作通过已验证父目录句柄写入并刷新临时文件，再禁止覆盖地提交；异常中断的临时文件不自动按名清理。同账户程序属于管理信任范围，user/administrator 为预先授予的账户级信任模式。
 
 审批与创建事件保存为数据目录下的 `audit-实例编号.jsonl`，当前账户和 SYSTEM 可以访问。正文及令牌不写入日志，每条事件刷新落盘。配置 `audit_max_bytes` 默认每实例 8 MiB，故障或达到预算后阻止新批准及写入；如果文件已提交而结果记录失败，保留完成状态并返回 audit_warning，重试不再次执行。旧日志保留，旧审批仍不恢复，没有崩溃任务恢复，详见[审计行为与限制](docs/AUDIT.md)。
 

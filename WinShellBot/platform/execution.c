@@ -459,6 +459,9 @@ sb_execution *sb_win_administrator_host(const sb_config *config, const sb_projec
 }
 bool sb_win_execution_cancel_all(sb_execution *execution) { return !execution || sb_win_tasks_cancel_all(execution->tasks); }
 bool sb_win_execution_watch_worker(sb_execution *execution, HANDLE worker) { return execution && sb_win_tasks_watch_worker(execution->tasks,worker); }
+void sb_win_execution_store(sb_execution *execution, sb_store *store, sb_audit *audit) {
+    if (execution && execution->tasks) sb_win_tasks_store(execution->tasks,store,audit);
+}
 bool sb_win_shared_worker(DWORD pid, HANDLE *process) {
     *process = NULL; HANDLE token = NULL, self_token = NULL; identity peer = {0}, self = {0};
     HANDLE candidate = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);

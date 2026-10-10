@@ -3,7 +3,7 @@
 
 static const char *const tool_names[SB_PROJECT_TOOL_COUNT] = {
     "host_info", "host_capabilities", "fs_list", "fs_read", "fs_search", "image_view",
-    "fs_write", "fs_patch", "task_start", "task_status", "task_output", "task_input", "task_cancel"
+    "fs_write", "fs_patch", "task_start", "task_status", "task_output", "task_input", "task_cancel", "approval_status", "approval_cancel"
 };
 
 const char *sb_project_tool_name(size_t index) {
@@ -31,6 +31,7 @@ sb_policy_result sb_project_evaluate(const sb_request_context *context, const sb
         return result(SB_DECISION_DENY, "project_mismatch");
     int tool = sb_project_tool_index(operation->tool);
     if (tool < 0) return result(SB_DECISION_DENY, "unknown_tool");
+    if (tool==13 || tool==14) return result(operation->owned_request ? SB_DECISION_ALLOW : SB_DECISION_DENY,operation->owned_request ? "owned_request" : "request_not_owned");
     bool task_result = tool == 9 || tool == 10 || tool == 12;
     if ((task_result || tool == 11) && !operation->owned_task)
         return result(SB_DECISION_DENY, "task_not_owned");

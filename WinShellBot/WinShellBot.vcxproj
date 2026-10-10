@@ -184,6 +184,7 @@
     <ClCompile Include="..\core\tools\tasks.c" />
     <ClCompile Include="..\core\policy\approval.c" />
     <ClCompile Include="..\core\policy\audit.c" />
+    <ClCompile Include="..\core\policy\state.c" />
     <ClCompile Include="..\core\config\config.c" />
     <ClCompile Include="..\core\config\projects.c" />
     <ClCompile Include="..\core\policy\project_policy.c" />
@@ -206,6 +207,7 @@
     <ClInclude Include="platform\execution.h" />
     <ClInclude Include="platform\manager.h" />
     <ClInclude Include="platform\task_process.h" />
+    <ClInclude Include="app\owner_ui.h" />
     <ClInclude Include="..\third_party\yyjson\yyjson.h" />
     <ClInclude Include="..\third_party\civetweb\include\civetweb.h" />
     <None Include="app\shellbot.manifest" />

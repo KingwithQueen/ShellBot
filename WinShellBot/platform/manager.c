@@ -57,6 +57,8 @@ typedef struct {
     administrator_startup *administrator_starting;
     sb_error administrator_startup_error;
     uint64_t administrator_launch_attempts;
+    char owner_token[257];
+    size_t owner_token_length;
 } manager;
 
 static wchar_t *wide(const char *s) {
@@ -208,6 +210,7 @@ static bool administrator_begin_locked(manager *m, sb_error *error) {
         yyjson_mut_val *root=yyjson_mut_obj(init), *envs=yyjson_mut_arr(init); yyjson_mut_doc_set_root(init,root);
         yyjson_mut_obj_add_str(init,root,"command","initialize");
         for (size_t i=0;i<m->registry.project_count;++i) yyjson_mut_arr_add_str(init,envs,m->registry.projects[i].token_env);
+        if (*m->registry.owner_token_env) yyjson_mut_arr_add_str(init,envs,m->registry.owner_token_env);
         yyjson_mut_obj_add_val(init,root,"token_envs",envs);
         startup->initialize_request=yyjson_mut_write(init,0,NULL);
         if (startup->initialize_request) startup->thread=CreateThread(NULL,0,administrator_start_thread,startup,0,NULL);
@@ -234,6 +237,11 @@ static void administrator_detach(manager *m, worker *w) {
 }
 static void reap(manager *m, worker *w, const char *state) {
     administrator_detach(m,w);
+    if (!strcmp(state,"stopped") && w->pipe && w->process && WaitForSingleObject(w->process,0)==WAIT_TIMEOUT) {
+        /* Give our healthy worker a bounded chance to flush terminal records. */
+        if (send_frame(w->pipe,"{\"kind\":\"shutdown\",\"request\":{},\"administrator_backend\":false,\"owner_url\":\"\"}",true,sb_platform_millis()+1000))
+            WaitForSingleObject(w->process,3000);
+    }
     /* Every handle here came from our own CreateProcess/Job allocation. */
     if (w->job) TerminateJobObject(w->job, 125);
     if (w->process) {
@@ -259,6 +267,9 @@ static wchar_t *environment(const sb_project_registry *registry) {
     if (!block) return NULL;
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
         bool excluded = false;
+        wchar_t *owner=wide(registry->owner_token_env);
+        if (owner && !_wcsicmp(owner,names[i])) excluded=true;
+        free(owner);
         for (size_t j = 0; j < registry->project_count; ++j) {
             wchar_t *key = wide(registry->projects[j].token_env);
             if (!key) { free(block); return NULL; }
@@ -339,8 +350,10 @@ static bool start_worker(manager *m, worker *w, sb_error *error) {
         sb_integer(yyjson_obj_get(root, "pid"), &pid) && pid == w->pid && instance && strlen(instance) == 32 &&
         strspn(instance, "0123456789abcdef") == 32;
     if (ok) strcpy(w->instance, instance);
+    const char *startup_failure=sb_string(yyjson_obj_get(root,"error"));
+    if (!ok && startup_failure) sb_fail(error,startup_failure);
     yyjson_doc_free(reply); free(greeting);
-    if (!ok) { reap(m, w, "failed"); sb_fail(error, "Worker startup failed; no elevation or automatic restart attempted."); return false; }
+    if (!ok) { reap(m, w, "failed"); if (!*error->text) sb_fail(error, "Worker startup failed; no elevation or automatic restart attempted."); return false; }
     w->state = "running"; w->exit_code = STILL_ACTIVE;
     sb_audit_project(m->audit, "project_started", w->project->id, w->project->policy_revision, w->pid);
     return true;
@@ -382,7 +395,7 @@ static bool administrator_register_locked(manager *m, worker *w, sb_error *error
     if (w->administrator_generation == m->administrator_generation) return true;
     if (!w->process || !administrator_eligible(w)) { sb_fail(error,"Project is not eligible for the shared administrator agent."); return false; }
     size_t size=strlen(w->project->data_dir)+64; char *data=malloc(size);
-    if (data) snprintf(data,size,"%s\\administrator-%s",w->project->data_dir,w->instance);
+    if (data) snprintf(data,size,"%s\\administrator-state",w->project->data_dir);
     sb_lease *lease=data ? sb_platform_lease(data,error) : NULL;
     if (!lease) { free(data); return false; }
     sb_platform_root_close(w->administrator_data_root);
@@ -403,7 +416,7 @@ static char *administrator_call(manager *m, worker *w, const char *command, cons
     sb_platform_mutex_lock(m->administrator_lock); sb_error error={0}; char *reply=NULL;
     administrator_refresh_locked(m);
     const char *name=sb_string(yyjson_obj_get(operation,"name"));
-    bool result_tool=name && (!strcmp(name,"task_status") || !strcmp(name,"task_output") || !strcmp(name,"task_cancel"));
+    bool result_tool=name && (!strcmp(name,"task_status") || !strcmp(name,"task_output") || !strcmp(name,"task_cancel") || !strcmp(name,"approval_status") || !strcmp(name,"approval_cancel"));
     if (!strcmp(command,"call") && !w->administrator_allowed && !result_tool) reply=error_json("administrator_not_allowed");
     else if (administrator_register_locked(m,w,&error)) reply=administrator_operation_locked(m,w,command,actor,operation);
     else reply=error_json(*error.text ? error.text : "Administrator registration unavailable.");
@@ -416,6 +429,12 @@ static char *worker_exchange(manager *m, worker *w, const char *wire, yyjson_val
         sb_platform_mutex_lock(m->administrator_lock);
         administrator_refresh_locked(m);
         yyjson_mut_obj_add_bool(trusted,yyjson_mut_doc_get_root(trusted),"administrator_backend",w->administrator_allowed && sb_win_shared_alive(m->administrator));
+        char url[384]={0};
+        if (m->gateway && m->owner_token_length) {
+            if (*m->registry.public_origin) snprintf(url,sizeof(url),"%s/owner",m->registry.public_origin);
+            else snprintf(url,sizeof(url),"http://127.0.0.1:%u/owner",m->registry.port);
+        }
+        yyjson_mut_obj_add_strcpy(trusted,yyjson_mut_doc_get_root(trusted),"owner_url",url);
         sb_platform_mutex_unlock(m->administrator_lock);
     }
     char *envelope=trusted ? yyjson_mut_write(trusted,0,NULL) : NULL;
@@ -428,8 +447,11 @@ static char *worker_exchange(manager *m, worker *w, const char *wire, yyjson_val
     if (request) {
         const char *method=sb_string(yyjson_obj_get(original,"method")); yyjson_val *params=yyjson_obj_get(original,"params");
         static const char *const keys[]={"administrator_request"}, *const request_keys[]={"name","arguments"};
-        bool valid=method && !strcmp(method,"tools/call") && sb_config_keys(yyjson_doc_get_root(reply),keys,1) && sb_config_keys(request,request_keys,2) &&
-            yyjson_equals(yyjson_obj_get(request,"name"),yyjson_obj_get(params,"name")) && yyjson_equals(yyjson_obj_get(request,"arguments"),yyjson_obj_get(params,"arguments"));
+        sb_error canonical_error={0}; char *canonical=method && !strcmp(method,"tools/call") ? sb_mcp_operation(params,&canonical_error) : NULL;
+        yyjson_doc *expected=canonical ? yyjson_read(canonical,strlen(canonical),0) : NULL;
+        bool valid=expected && sb_config_keys(yyjson_doc_get_root(reply),keys,1) && sb_config_keys(request,request_keys,2) &&
+            yyjson_equals(request,yyjson_doc_get_root(expected));
+        yyjson_doc_free(expected); free(canonical);
         /* A compromised worker cannot change the operation or choose an actor. */
         char *response=valid ? administrator_call(m,w,"call",actor,request) : error_json("Worker administrator operation did not match the authenticated request.");
         free(frame); frame=NULL;
@@ -452,7 +474,19 @@ static bool gateway_credentials(manager *m, sb_error *error) {
             sb_fail(error, "Enabled projects must have distinct bearer token values; gateway startup blocked."); return false;
         }
     }
+    if (*m->registry.owner_token_env) {
+        const char *token=getenv(m->registry.owner_token_env); size_t length=token ? strlen(token) : 0;
+        if (length<32 || length>256) goto invalid_owner;
+        for (size_t j=0;j<length;++j) if ((unsigned char)token[j]<=32 || (unsigned char)token[j]>=127) goto invalid_owner;
+        for (size_t j=0;j<m->registry.project_count;++j) {
+            const char *project_token=getenv(m->registry.projects[j].token_env);
+            if (project_token && !strcmp(token,project_token)) goto invalid_owner;
+        }
+        memcpy(m->owner_token,token,length+1); m->owner_token_length=length;
+    }
     return true;
+invalid_owner:
+    sb_fail(error,"owner_token_env requires an independent 32..256 byte visible-ASCII owner bearer; gateway startup blocked."); return false;
 invalid:
     sb_fail(error, "Every enabled project requires a 32..256 byte visible-ASCII bearer in its token_env; gateway startup blocked."); return false;
 }
@@ -481,6 +515,78 @@ static void *gateway_open(void *context, const char *path, const char *authoriza
     *health = !strcmp(suffix, "healthz"); *http_status = 200; return w;
 }
 static void gateway_close(void *context, void *binding) { (void)context; LeaveCriticalSection(&((worker *)binding)->lock); }
+static bool owner_enabled(void *context) { return ((manager *)context)->owner_token_length!=0; }
+static bool owner_authorized(void *context, const char *authorization) {
+    manager *m=context;
+    if (!m->owner_token_length || !authorization || _strnicmp(authorization,"Bearer ",7) || strlen(authorization+7)!=m->owner_token_length) return false;
+    volatile unsigned difference=0;
+    for (size_t i=0;i<m->owner_token_length;++i) difference|=(unsigned)((unsigned char)authorization[i+7]^(unsigned char)m->owner_token[i]);
+    return difference==0;
+}
+/* A limited owner API. It cannot dispatch MCP, start a backend, modify policy,
+   or accept caller-selected actors. Decisions carry the inspected binding. */
+static char *owner_call(void *context, const char *request, size_t length, int *http_status) {
+    manager *m=context; *http_status=400;
+    yyjson_doc *input=length<=65536 ? yyjson_read(request,length,0) : NULL;
+    yyjson_val *root=yyjson_doc_get_root(input);
+    static const char *const keys[]={"command","project_id","backend","id","expected_sha256","expected_host_instance_id","expected_policy_revision","offset","limit"};
+    const char *command=sb_string(yyjson_obj_get(root,"command")), *project=sb_string(yyjson_obj_get(root,"project_id")), *backend=sb_string(yyjson_obj_get(root,"backend"));
+    char *reply=NULL;
+    if (!sb_config_keys(root,keys,9) || !command) goto invalid;
+    if (WaitForSingleObject(m->stop,0)==WAIT_OBJECT_0) { *http_status=503; reply=error_json("Manager is stopping."); goto done; }
+    if (!strcmp(command,"projects")) {
+        if (yyjson_obj_size(root)!=1) goto invalid;
+        yyjson_mut_doc *doc=yyjson_mut_doc_new(NULL); yyjson_mut_val *body=yyjson_mut_obj(doc), *items=yyjson_mut_arr(doc);
+        yyjson_mut_doc_set_root(doc,body);
+        for (size_t i=0;i<m->registry.project_count;++i) {
+            worker *w=&m->workers[i]; if (!w->project->enabled || w->project->legacy_compatibility) continue;
+            yyjson_mut_val *item=yyjson_mut_obj(doc); yyjson_mut_obj_add_str(doc,item,"project_id",w->project->id);
+            if (TryEnterCriticalSection(&w->lock)) {
+                refresh(m,w); yyjson_mut_obj_add_str(doc,item,"state",w->state);
+                yyjson_mut_obj_add_bool(doc,item,"administrator_allowed",w->administrator_allowed); LeaveCriticalSection(&w->lock);
+            } else yyjson_mut_obj_add_str(doc,item,"state","busy");
+            yyjson_mut_arr_add_val(items,item);
+        }
+        yyjson_mut_obj_add_val(doc,body,"projects",items); reply=yyjson_mut_write(doc,0,NULL); yyjson_mut_doc_free(doc); *http_status=200; goto done;
+    }
+    bool decision=!strcmp(command,"approve") || !strcmp(command,"deny") || !strcmp(command,"revoke");
+    bool inspect=!strcmp(command,"inspect");
+    if (!decision && !inspect && strcmp(command,"list") && strcmp(command,"history")) goto invalid;
+    if (!sb_identifier(project) || !backend || (strcmp(backend,"ordinary") && strcmp(backend,"administrator"))) goto invalid;
+    if ((decision || inspect) && !sb_string(yyjson_obj_get(root,"id"))) goto invalid;
+    if (decision && (!sb_string(yyjson_obj_get(root,"expected_sha256")) || !sb_string(yyjson_obj_get(root,"expected_host_instance_id")) ||
+        !yyjson_is_uint(yyjson_obj_get(root,"expected_policy_revision")))) goto invalid;
+    if (!decision && (yyjson_obj_get(root,"expected_sha256") || yyjson_obj_get(root,"expected_host_instance_id") || yyjson_obj_get(root,"expected_policy_revision"))) goto invalid;
+    if (strcmp(command,"history") && (yyjson_obj_get(root,"offset") || yyjson_obj_get(root,"limit"))) goto invalid;
+    if (!decision && !inspect && strcmp(command,"history") && yyjson_obj_get(root,"id")) goto invalid;
+    worker *w=NULL;
+    for (size_t i=0;i<m->registry.project_count;++i) if (!strcmp(project,m->workers[i].project->id)) w=&m->workers[i];
+    if (!w || !w->project->enabled || w->project->legacy_compatibility) { *http_status=404; reply=error_json("Approval project unavailable."); goto done; }
+    if (!TryEnterCriticalSection(&w->lock)) { *http_status=429; reply=error_json("Project is busy. No decision was queued."); goto done; }
+    refresh(m,w);
+    if (!w->process) { *http_status=503; reply=error_json("Project is stopped. Explicit local owner startup is required."); }
+    else {
+        yyjson_mut_doc *doc=yyjson_doc_mut_copy(input,NULL); yyjson_mut_val *operation=yyjson_mut_doc_get_root(doc);
+        yyjson_mut_obj_remove_str(operation,"project_id"); yyjson_mut_obj_remove_str(operation,"backend");
+        char *wire=doc ? yyjson_mut_write(doc,0,NULL) : NULL;
+        yyjson_doc *parsed=wire ? yyjson_read(wire,strlen(wire),0) : NULL;
+        if (!strcmp(backend,"administrator")) reply=parsed ? administrator_call(m,w,"remote-owner","manager-owner",yyjson_doc_get_root(parsed)) : NULL;
+        else if (doc) {
+            yyjson_mut_val *envelope=yyjson_mut_obj(doc); yyjson_mut_obj_add_str(doc,envelope,"kind","remote-owner"); yyjson_mut_obj_add_val(doc,envelope,"request",operation);
+            char *frame=yyjson_mut_val_write(envelope,0,NULL);
+            reply=frame ? worker_exchange(m,w,frame,NULL,"manager-owner",sb_platform_millis()+WORKER_IO_MS,SB_RESPONSE_LIMIT-1024) : NULL; free(frame);
+            if (!reply) { reap(m,w,"failed"); sb_audit_project(m->audit,"project_failed",w->project->id,w->project->policy_revision,w->pid); }
+        }
+        free(wire); yyjson_doc_free(parsed); yyjson_mut_doc_free(doc); *http_status=reply ? 200 : 503;
+    }
+    LeaveCriticalSection(&w->lock);
+    if (!reply) reply=error_json("Owner channel unavailable. Review state before retrying; no automatic replay.");
+    goto done;
+invalid:
+    reply=error_json("Invalid limited owner request or missing inspected decision binding.");
+done:
+    yyjson_doc_free(input); return reply;
+}
 static char *gateway_call(void *context, void *binding, const char *request, size_t length,
                           const sb_request_context *transport, size_t *response_length, int *http_status) {
     manager *m = context; worker *w = binding;
@@ -769,7 +875,7 @@ static int run_manager(const char *source, const char *data, bool http) {
         if (!gateway_credentials(m, &error)) goto done;
         sb_config_defaults(&m->gateway_config); m->gateway_config.port = m->registry.port;
         if (*m->registry.public_origin && !sb_config_public_url(&m->gateway_config, m->registry.public_origin, &error)) goto done;
-        const sb_http_routes routes = {gateway_open, gateway_call, gateway_close};
+        const sb_http_routes routes = {gateway_open, gateway_call, gateway_close, owner_enabled, owner_authorized, owner_call};
         m->gateway = sb_http_start(&m->gateway_config, &routes, m, &error); if (!m->gateway) goto done;
     }
     m->owner = sb_owner_start_handler(data, manager_request, m, &error); if (!m->owner) goto done;
@@ -812,7 +918,7 @@ done:
                A late agent cannot bind to a dead manager or receive projects. */
         }
         sb_execution_free(m->administrator); sb_platform_mutex_free(m->administrator_lock);
-        sb_projects_free(&m->registry); free(m);
+        sb_projects_free(&m->registry); SecureZeroMemory(m->owner_token,sizeof(m->owner_token)); free(m);
     }
     if(source_pin!=INVALID_HANDLE_VALUE)CloseHandle(source_pin);
     if (code) fprintf(stderr, "ShellBot: %s\n", *error.text ? error.text : "Manager startup failed.");
@@ -872,8 +978,14 @@ int sb_project_worker(int argc, wchar_t **argv) {
     host.execution = sb_execution_new(&host.config, &error); if (!host.execution) goto done;
     sb_execution_prepare_project(host.execution,&host);
     host.audit = sb_audit_new(host.lease, host.config.audit_max_bytes, &error); if (!host.audit) goto done;
+    if (!project->legacy_compatibility) {
+        host.store=sb_store_new(host.lease,project->id,project->policy_revision,sb_execution_instance(host.execution),"ordinary",&error);
+        if (!host.store) goto done;
+        sb_win_execution_store(host.execution,host.store,host.audit);
+    }
     host.policy = sb_policy_new(host.config.approval_ttl_seconds, host.audit, &error); if (!host.policy) goto done;
     sb_policy_limit(host.policy, host.config.limits.approval_records);
+    sb_policy_store(host.policy,host.store);
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL); if (!doc) goto done;
     yyjson_mut_val *ready = yyjson_mut_obj(doc); yyjson_mut_doc_set_root(doc, ready);
     yyjson_mut_obj_add_bool(doc, ready, "ready", true); yyjson_mut_obj_add_str(doc, ready, "project_id", project->id);
@@ -886,21 +998,26 @@ int sb_project_worker(int argc, wchar_t **argv) {
         char *envelope = receive_frame(pipe, false, 0, WORKER_REQUEST_LIMIT); if (!envelope) break;
         yyjson_doc *input = yyjson_read(envelope, strlen(envelope), 0);
         yyjson_val *root = yyjson_doc_get_root(input), *request = yyjson_obj_get(root, "request");
-        static const char *const keys[] = {"kind", "request", "administrator_backend"};
-        static const char *const http_keys[] = {"kind", "request", "version", "method", "name", "administrator_backend"};
+        static const char *const keys[] = {"kind", "request", "administrator_backend", "owner_url"};
+        static const char *const http_keys[] = {"kind", "request", "version", "method", "name", "administrator_backend", "owner_url"};
         const char *kind = sb_string(yyjson_obj_get(root, "kind"));
         char *wire = yyjson_val_write(request, 0, NULL), *response = NULL;
         bool is_http = kind && !strcmp(kind, "http");
         bool valid = wire && kind && yyjson_is_bool(yyjson_obj_get(root,"administrator_backend")) &&
-            (is_http ? sb_config_keys(root, http_keys, 6) : yyjson_is_obj(request) && sb_config_keys(root, keys, 3));
+            (is_http ? sb_config_keys(root, http_keys, 7) : yyjson_is_obj(request) && sb_config_keys(root, keys, 4));
+        const char *owner_url=sb_string(yyjson_obj_get(root,"owner_url"));
+        if (!owner_url || strlen(owner_url)>=sizeof(host.owner_url)) valid=false;
+        if (valid) strcpy(host.owner_url,owner_url);
         host.administrator_backend=valid && yyjson_get_bool(yyjson_obj_get(root,"administrator_backend"));
         const char *headers[3] = {0}; const char *names[] = {"version", "method", "name"};
         for (size_t i = 0; valid && is_http && i < 3; ++i) {
             yyjson_val *header = yyjson_obj_get(root, names[i]); headers[i] = sb_string(header);
             if (header && (!headers[i] || strlen(headers[i]) > 8192)) valid = false;
         }
+        if (valid && !strcmp(kind,"shutdown")) { free(wire); yyjson_doc_free(input); free(envelope); break; }
         if (!valid) response = error_json("Invalid worker envelope.");
         else if (!strcmp(kind, "owner")) response = sb_policy_owner_request(host.policy, wire, strlen(wire));
+        else if (!strcmp(kind,"remote-owner")) response=sb_policy_owner_request_actor(host.policy,wire,strlen(wire),"remote-owner");
         else if (!strcmp(kind, "mcp") || is_http) {
             sb_request_context ctx = {.actor = is_http ? "project-mcp" : "manager-owner", .version = headers[0], .method = headers[1], .name = headers[2],
                 .project = project, .policy_revision = project->policy_revision};
@@ -924,7 +1041,8 @@ int sb_project_worker(int argc, wchar_t **argv) {
         sent = send_frame(pipe, response, false, 0); free(response); if (!sent) break;
     }
 done:
-    free(bytes); free(data_identity); sb_policy_free(host.policy); sb_audit_free(host.audit); sb_execution_free(host.execution);
+    if (code && *error.text) { char *failure=error_json(error.text); if (failure) send_frame(pipe,failure,false,0); free(failure); }
+    free(bytes); free(data_identity); sb_policy_free(host.policy); sb_execution_free(host.execution); sb_store_free(host.store); sb_audit_free(host.audit);
     sb_config_free(&host.config); sb_platform_lease_close(host.lease); sb_projects_free(&registry); CloseHandle(pipe);
     return code;
 }

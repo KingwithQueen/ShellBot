@@ -345,7 +345,7 @@ void sb_projects_free(sb_project_registry *registry) {
 
 bool sb_projects_parse(sb_project_registry *registry, const char *bytes, size_t length, sb_error *error) {
     static const char *const allowed[] = {"format_version", "projects", "gateway"};
-    static const char *const gateway_keys[] = {"port", "public_url", "default_project_id"};
+    static const char *const gateway_keys[] = {"port", "public_url", "default_project_id", "owner_token_env"};
     if (!registry || registry->project_count) { sb_fail(error, "Registry must be initialized and empty."); return false; }
     yyjson_doc *doc = bytes && length <= SB_TEXT_LIMIT ? yyjson_read(bytes, length, 0) : NULL;
     sb_project_registry *candidate = calloc(1, sizeof(*candidate));
@@ -371,6 +371,11 @@ bool sb_projects_parse(sb_project_registry *registry, const char *bytes, size_t 
     if (gateway) {
         if (!KEYS(gateway, gateway_keys) || !number_field(gateway, "port", 8765, 1024, 65535, &number)) goto done;
         candidate->port = (unsigned)number;
+        yyjson_val *owner=yyjson_obj_get(gateway,"owner_token_env");
+        if (owner) {
+            if (!copy_id(candidate->owner_token_env,owner)) goto done;
+            for (size_t i=0;i<candidate->project_count;++i) if (environment_same(candidate->owner_token_env,candidate->projects[i].token_env)) goto done;
+        }
         yyjson_val *url = yyjson_obj_get(gateway, "public_url");
         if (url) {
             sb_config config; sb_config_defaults(&config);
@@ -407,6 +412,7 @@ char *sb_projects_summary(const sb_project_registry *registry) {
     yyjson_mut_obj_add_bool(doc, root, "runtime_available", true);
     yyjson_mut_obj_add_bool(doc, root, "runtime_started", false);
     yyjson_mut_obj_add_bool(doc, root, "http_gateway_available", true);
+    yyjson_mut_obj_add_bool(doc, root, "remote_owner_configured", *registry->owner_token_env!=0);
     yyjson_mut_obj_add_val(doc, root, "projects", projects);
     for (size_t i = 0; i < registry->project_count; ++i) {
         const sb_project *project = &registry->projects[i];

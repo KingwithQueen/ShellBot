@@ -1,5 +1,7 @@
 # M3 项目 MCP 网关
 
+dev.13 M6 在同一网关增加可选 owner_token_env 和 /owner、/owner.js、/owner.css、/owner/api；独立所有者路由不用项目令牌，不提供通用管理或 MCP 入口。正常项目可返回 2026 URL input_required 或兼容 pending 链接。见 [M6](REMOTE_APPROVALS.md)，下文 M3 基础行为保留。
+
 更新日期：2026 年 10 月 10 日。版本：`0.1.0-dev.11`。普通管理器可在一个回环端口提供多个独立项目地址；本机项目生命周期及权限边界见 [项目管理器](PROJECT_MANAGER.md)。
 
 ## 启动与连接地址

@@ -1,5 +1,7 @@
 # 命令与后台任务
 
+dev.13 正常项目增加私有任务历史及完整生命周期审计。重启不恢复活动任务或 stdin；已启动任务的 request_key 在保留历史期间不得跨 backend 实例重复使用。先核对实际结果，再显式提交新键。所有者 history 可查有限输出和投递回执，当前 task_status/output 仍绑定活动实例。详见 [M6](REMOTE_APPROVALS.md)。
+
 dev.11 的正常新格式项目按 always/workspace_auto/never 管理 task_start 和 task_input，pending 须经本机 project-owner 批准，实际结果轮询与取消按归属继续可用。受限任务使用实际 LPAC，只接受所有者声明的程序，子进程、网络和 Win32k 均禁止；缺少或未通过启动检查时拒绝执行。新项目命令启动在批准后钉住程序并计算 executable_sha256，参与 request_key 摘要，审批还绑定物理程序版本与 cwd 元数据。不会读取未知环境变量或继承项目 bearer。详见 [项目审批与受限执行](PROJECT_APPROVALS.md)。
 
 后续各节描述保留的 dev.7 单实例 user/administrator 行为；其中 controlled 不可用、每任务 64 个进程、原摘要不固定程序内容等限制只适用于旧入口。新 LPAC 每任务限 1 个进程；新项目管理员代理仍待 M5。脚本及动态依赖不会因为 argv 摘要自动全部固定，必须遵守声明运行资源与后端真实权限。

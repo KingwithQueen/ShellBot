@@ -5,14 +5,14 @@
 #include <string.h>
 
 #define RECORD_LIMIT 64
-typedef enum { PENDING, APPROVED, RUNNING, COMPLETED, DENIED, EXPIRED, FAILED } state;
+typedef enum { PENDING, APPROVED, RUNNING, COMPLETED, DENIED, EXPIRED, FAILED, CANCELLED, INTERRUPTED } state;
 typedef struct {
     char id[33], digest[65], hash[65], actor[64], workspace[64];
     char *target, *identity, *text, *original;
     char tool[16], operation[16], original_hash[65], file_identity[96], backup_id[33];
     size_t bytes;
     uint64_t deadline;
-    state status;
+    state status, previous_status;
     bool audit_warning;
     char error[256];
     char project[64], instance[33], version[65];
@@ -20,17 +20,30 @@ typedef struct {
     uint64_t revision, next_offset, last_offset, budget, used, charge;
     bool logical, pageable;
 } record;
-struct sb_policy { sb_mutex *mutex; sb_audit *audit; unsigned ttl, record_limit; record records[RECORD_LIMIT]; };
+struct sb_policy { sb_mutex *mutex; sb_audit *audit; sb_store *store; unsigned ttl, record_limit; record records[RECORD_LIMIT]; };
 
 static const char *state_name(state status) {
-    static const char *const names[] = {"pending", "approved", "running", "completed", "denied", "expired", "failed"};
+    static const char *const names[] = {"pending", "approved", "running", "completed", "denied", "expired", "failed", "cancelled", "interrupted"};
     return names[status];
 }
 static void clear(record *r) { free(r->target); free(r->identity); free(r->text); free(r->original); free(r->cached); memset(r, 0, sizeof(*r)); }
+static yyjson_mut_val *describe(yyjson_mut_doc *doc, record *r, bool full);
 static bool audit_record(sb_policy *policy, record *r, const char *event, const char *actor) {
-    bool ok = sb_audit_append(policy->audit, event, actor, r->id, r->workspace, r->target, r->hash, r->bytes,
+    const char *status=state_name(r->status);
+    if (!strcmp(event,"approval_approved")) status="approved";
+    else if (!strcmp(event,"operation_started") || !strcmp(event,"write_started") || !strcmp(event,"modify_started")) status="running";
+    yyjson_mut_doc *doc=policy->store ? yyjson_mut_doc_new(NULL) : NULL;
+    yyjson_mut_val *body=doc ? describe(doc,r,true) : NULL;
+    if (body && r->cached) {
+        yyjson_doc *receipt=yyjson_read(r->cached,strlen(r->cached),0);
+        if (receipt) yyjson_mut_obj_add_val(doc,body,"receipt",yyjson_val_mut_copy(doc,yyjson_doc_get_root(receipt)));
+        yyjson_doc_free(receipt);
+    }
+    bool ok=(!policy->store || (body && sb_store_append(policy->store,"approval",r->id,r->actor,status,event,body))) &&
+        sb_audit_append(policy->audit, event, actor, r->id, r->workspace, r->target, r->hash, r->bytes,
         *r->tool ? r->tool : NULL, *r->operation ? r->operation : NULL,
         *r->original_hash ? r->original_hash : NULL, *r->backup_id ? r->backup_id : NULL);
+    yyjson_mut_doc_free(doc);
     if (!ok) r->audit_warning = true;
     return ok;
 }
@@ -56,6 +69,7 @@ static yyjson_mut_val *describe(yyjson_mut_doc *doc, record *r, bool full) {
     yyjson_mut_val *data = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_strcpy(doc, data, "approval_id", r->id);
     yyjson_mut_obj_add_str(doc, data, "status", state_name(r->status));
+    if (r->status==INTERRUPTED) yyjson_mut_obj_add_str(doc,data,"previous_status",state_name(r->previous_status));
     yyjson_mut_obj_add_strcpy(doc, data, "actor", r->actor);
     yyjson_mut_obj_add_strcpy(doc, data, "workspace_id", r->workspace);
     yyjson_mut_obj_add_strcpy(doc, data, "target", r->target);
@@ -99,9 +113,16 @@ sb_policy *sb_policy_new(unsigned ttl, sb_audit *audit, sb_error *error) {
 void sb_policy_limit(sb_policy *policy, unsigned records) {
     if (policy && records && records <= RECORD_LIMIT) policy->record_limit = records;
 }
+void sb_policy_store(sb_policy *policy, sb_store *store) { if (policy) policy->store=store; }
 void sb_policy_free(sb_policy *policy) {
     if (policy) {
-        for (size_t i = 0; i < policy->record_limit; ++i) clear(&policy->records[i]);
+        for (size_t i = 0; i < policy->record_limit; ++i) {
+            record *r=&policy->records[i];
+            if (policy->store && *r->id && (r->status==PENDING || r->status==APPROVED || r->status==RUNNING)) {
+                r->previous_status=r->status; r->status=INTERRUPTED; audit_record(policy,r,"approval_interrupted","host");
+            }
+            clear(r);
+        }
         sb_platform_mutex_free(policy->mutex); free(policy);
     }
 }
@@ -128,7 +149,7 @@ bool sb_policy_operation_begin(sb_host *host, const char *actor, const char *too
     } else {
         for (size_t i = 0; i < policy->record_limit; ++i) {
             record *candidate = &policy->records[i];
-            if (candidate->logical && candidate->status!=DENIED && candidate->status!=EXPIRED && !strcmp(candidate->actor, actor) && !strcmp(candidate->tool, tool) &&
+            if (candidate->logical && candidate->status!=DENIED && candidate->status!=EXPIRED && candidate->status!=CANCELLED && candidate->status!=INTERRUPTED && !strcmp(candidate->actor, actor) && !strcmp(candidate->tool, tool) &&
                 !strcmp(candidate->digest, digest) && !strcmp(candidate->target, target) &&
                 (!strcmp(candidate->version, version) || ((candidate->status==COMPLETED || candidate->status==FAILED) &&
                     (!strcmp(tool,"fs_write") || !strcmp(tool,"fs_patch") || !strcmp(tool,"task_start"))))) {
@@ -198,7 +219,8 @@ blocked:
     sb_platform_mutex_unlock(policy->mutex); return false;
 }
 
-void sb_policy_operation_finish(sb_policy *policy, const char *ticket, yyjson_mut_val *result) {
+bool sb_policy_operation_finish(sb_policy *policy, const char *ticket, yyjson_mut_val *result) {
+    bool recorded=false;
     sb_platform_mutex_lock(policy->mutex);
     record *r = find(policy, ticket);
     if (r && r->logical && r->status == RUNNING) {
@@ -212,9 +234,10 @@ void sb_policy_operation_finish(sb_policy *policy, const char *ticket, yyjson_mu
         size_t size = 0; char *cached = result ? yyjson_mut_val_write(result,0,&size) : NULL;
         free(r->cached); r->cached = size <= 524288 ? cached : NULL;
         if (!r->cached) free(cached);
-        audit_record(policy,r,failed ? "operation_failed" : "operation_completed",r->actor);
+        recorded=audit_record(policy,r,failed ? "operation_failed" : "operation_completed",r->actor);
     }
     sb_platform_mutex_unlock(policy->mutex);
+    return recorded;
 }
 
 yyjson_mut_val *sb_policy_write_authorized(sb_host *host, const char *actor, sb_workspace *workspace,
@@ -508,17 +531,21 @@ finish:
     return data;
 }
 
-char *sb_policy_owner_request(sb_policy *policy, const char *request, size_t length) {
+char *sb_policy_owner_request_actor(sb_policy *policy, const char *request, size_t length, const char *owner_actor) {
     yyjson_doc *input = length <= 4096 ? yyjson_read(request, length, 0) : NULL;
     yyjson_val *root = yyjson_doc_get_root(input);
     const char *command = sb_string(yyjson_obj_get(root, "command"));
     const char *id = sb_string(yyjson_obj_get(root, "id"));
-    bool valid = yyjson_is_obj(root) && command && yyjson_obj_size(root) == (id ? 2u : 1u);
+    static const char *const keys[]={"command","id","expected_sha256","expected_host_instance_id","expected_policy_revision","offset","limit"};
+    bool valid=command && sb_config_keys(root,keys,7);
+    uint64_t offset=0,limit=64,revision=0;
+    yyjson_val *offset_value=yyjson_obj_get(root,"offset"), *limit_value=yyjson_obj_get(root,"limit");
+    if ((offset_value && (!sb_integer(offset_value,&offset) || offset>256)) || (limit_value && (!sb_integer(limit_value,&limit) || !limit || limit>64))) valid=false;
     size_t idx, max; yyjson_val *key, *value;
     yyjson_obj_foreach(root, idx, max, key, value) {
         (void)value;
         const char *name = sb_string(key);
-        if (!name || (strcmp(name, "command") && strcmp(name, "id"))) valid = false;
+        if (!name) valid = false;
         yyjson_obj_iter it = yyjson_obj_iter_with(root);
         for (size_t j = 0; j < idx; ++j) if (!strcmp(yyjson_get_str(key), yyjson_get_str(yyjson_obj_iter_next(&it)))) valid = false;
     }
@@ -527,6 +554,12 @@ char *sb_policy_owner_request(sb_policy *policy, const char *request, size_t len
     yyjson_mut_val *result;
     sb_platform_mutex_lock(policy->mutex);
     if (!valid) result = error_data(doc, "Invalid owner request.");
+    else if (!strcmp(command,"history")) {
+        char *history=sb_store_history(policy->store,NULL,id,id!=NULL,(unsigned)offset,(unsigned)limit);
+        yyjson_doc *saved=history ? yyjson_read(history,strlen(history),0) : NULL;
+        result=saved ? yyjson_val_mut_copy(doc,yyjson_doc_get_root(saved)) : error_data(doc,"Persistent history unavailable.");
+        yyjson_doc_free(saved); free(history);
+    }
     else if (!strcmp(command, "list") && !id) {
         result = yyjson_mut_obj(doc); yyjson_mut_val *items = yyjson_mut_arr(doc);
         for (size_t i = 0; i < policy->record_limit; ++i) if (*policy->records[i].id) {
@@ -539,16 +572,23 @@ char *sb_policy_owner_request(sb_policy *policy, const char *request, size_t len
         else {
             expire(policy, r);
             bool ok = true;
+            const char *expected=sb_string(yyjson_obj_get(root,"expected_sha256")), *instance=sb_string(yyjson_obj_get(root,"expected_host_instance_id"));
+            yyjson_val *version=yyjson_obj_get(root,"expected_policy_revision");
+            if ((yyjson_obj_get(root,"expected_sha256") && (!expected || strcmp(expected,r->hash))) ||
+                (yyjson_obj_get(root,"expected_host_instance_id") && (!instance || strcmp(instance,r->instance))) ||
+                (version && (!sb_integer(version,&revision) || revision!=r->revision))) {
+                result=error_data(doc,"Owner decision does not match the inspected operation, instance or policy."); goto serialize;
+            }
             if (!strcmp(command, "inspect")) { /* Full content is returned only on the owner channel. */ }
             else if (!strcmp(command, "approve") && r->status == PENDING) {
-                if (audit_record(policy, r, "approval_approved", "local-owner")) r->status = APPROVED;
+                if (audit_record(policy, r, "approval_approved", owner_actor)) r->status = APPROVED;
                 else { result = error_data(doc, "Audit recording unavailable; approval was not granted."); goto serialize; }
             }
             else if ((!strcmp(command, "deny") || !strcmp(command, "revoke")) &&
                      (r->status == PENDING || r->status == APPROVED ||
                       (!strcmp(command,"revoke") && r->status==COMPLETED && logical_read(r)))) {
                 r->status = DENIED;
-                audit_record(policy, r, !strcmp(command, "deny") ? "approval_denied" : "approval_revoked", "local-owner");
+                audit_record(policy, r, !strcmp(command, "deny") ? "approval_denied" : "approval_revoked", owner_actor);
             }
             else ok = false;
             result = ok ? describe(doc, r, !strcmp(command, "inspect")) : error_data(doc, "Operation is not allowed in the current approval state.");
@@ -560,4 +600,23 @@ serialize:
     sb_platform_mutex_unlock(policy->mutex);
     yyjson_doc_free(input); yyjson_mut_doc_free(doc);
     return serialized;
+}
+char *sb_policy_owner_request(sb_policy *policy, const char *request, size_t length) {
+    return sb_policy_owner_request_actor(policy,request,length,"local-owner");
+}
+char *sb_policy_caller_request(sb_policy *policy, const char *actor, const char *command, const char *id) {
+    yyjson_mut_doc *doc=yyjson_mut_doc_new(NULL); if (!doc) return NULL;
+    sb_platform_mutex_lock(policy->mutex); record *r=id ? find(policy,id) : NULL; yyjson_mut_val *body=NULL;
+    if (!r || strcmp(r->actor,actor)) body=error_data(doc,"Unknown approval id for this caller and running instance.");
+    else {
+        expire(policy,r);
+        if (!strcmp(command,"cancel")) {
+            if (r->status==PENDING || r->status==APPROVED || (r->status==COMPLETED && logical_read(r))) {
+                r->status=CANCELLED; audit_record(policy,r,"approval_cancelled",actor);
+            } else if (r->status!=CANCELLED) body=error_data(doc,"Approval can no longer be cancelled; side effects are not rolled back.");
+        }
+        if (!body) body=describe(doc,r,false);
+    }
+    yyjson_mut_doc_set_root(doc,body); char *json=yyjson_mut_write(doc,0,NULL);
+    sb_platform_mutex_unlock(policy->mutex); yyjson_mut_doc_free(doc); return json;
 }

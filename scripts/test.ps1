@@ -26,6 +26,9 @@ if ($Platform -eq 'x64') {
     $administratorReport = Join-Path $repoRoot "build\validation\$Platform-$Configuration-m5-ordinary.json"
     & $interpreter.Source (Join-Path $repoRoot 'tests\shared_admin_checks.py') --exe $executable --report $administratorReport
     if ($LASTEXITCODE -ne 0) { throw "Shared administrator ordinary validation failed ($LASTEXITCODE). Report: $administratorReport" }
+    $remoteApprovalReport = Join-Path $repoRoot "build\validation\$Platform-$Configuration-m6.json"
+    & $interpreter.Source (Join-Path $repoRoot 'tests\remote_approval_checks.py') --exe $executable --report $remoteApprovalReport
+    if ($LASTEXITCODE -ne 0) { throw "Remote owner and durable recovery validation failed ($LASTEXITCODE). Report: $remoteApprovalReport" }
 }
 $suffix = if ($SkipCloseProbe) { '-core' } else { '-full' }
 $report = Join-Path $repoRoot "build\validation\$Platform-$Configuration$suffix.json"

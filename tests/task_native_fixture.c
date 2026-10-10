@@ -42,12 +42,13 @@ static int identity(void) {
     DWORD ac=0,lpac=0;
     GetTokenInformation(token,TokenIsAppContainer,&ac,sizeof(ac),&returned);
     BOOL lpac_supported=GetTokenInformation(token,TokenIsLessPrivilegedAppContainer,&lpac,sizeof(lpac),&returned);
-    printf("{\"appcontainer\":%s,\"lpac_query_supported\":%s,\"lpac_query_result\":%s,\"elevated\":%s,\"pid\":%lu,\"token_inherited\":%s,\"project_tokens_inherited\":%s,\"canary_inherited\":%s,\"cwd\":",
+    printf("{\"appcontainer\":%s,\"lpac_query_supported\":%s,\"lpac_query_result\":%s,\"elevated\":%s,\"pid\":%lu,\"token_inherited\":%s,\"project_tokens_inherited\":%s,\"canary_inherited\":%s,\"owner_token_inherited\":%s,\"cwd\":",
            ac?"true":"false",lpac_supported?"true":"false",lpac?"true":"false",
            elevation.TokenIsElevated ? "true" : "false", GetCurrentProcessId(),
            GetEnvironmentVariableW(L"SHELLBOT_TOKEN", NULL, 0) ? "true" : "false",
            (GetEnvironmentVariableW(L"SHELLBOT_A_TOKEN", NULL, 0) || GetEnvironmentVariableW(L"SHELLBOT_B_TOKEN", NULL, 0)) ? "true" : "false",
-           GetEnvironmentVariableW(L"SHELLBOT_M2_CANARY", NULL, 0) ? "true" : "false");
+           GetEnvironmentVariableW(L"SHELLBOT_M2_CANARY", NULL, 0) ? "true" : "false",
+           GetEnvironmentVariableW(L"SHELLBOT_OWNER_TOKEN", NULL, 0) ? "true" : "false");
     json_string(utf8);
     puts("}");
     result = ferror(stdout) ? 3 : 0;

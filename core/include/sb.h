@@ -6,7 +6,7 @@
 #include <stdint.h>
 #include "yyjson.h"
 
-#define SB_VERSION "0.1.0-dev.12"
+#define SB_VERSION "0.1.0-dev.13"
 #define SB_MAX_ROOTS 16
 #define SB_MAX_WORKSPACES (SB_MAX_ROOTS * 2)
 #define SB_PATH_CAP 32768
@@ -26,6 +26,7 @@ typedef struct sb_owner sb_owner;
 typedef struct sb_create sb_create;
 typedef struct sb_audit sb_audit;
 typedef struct sb_journal sb_journal;
+typedef struct sb_store sb_store;
 typedef struct sb_modify sb_modify;
 typedef struct sb_execution sb_execution;
 typedef struct sb_project sb_project;
@@ -66,6 +67,7 @@ typedef struct {
     sb_policy *policy;
     sb_owner *owner;
     sb_audit *audit;
+    sb_store *store;
     bool http_mode;
     uint64_t started_ms;
     sb_execution *execution;
@@ -73,6 +75,7 @@ typedef struct {
     bool administrator_host; /* Only the verified elevated project host sets this. */
     char *(*administrator_call)(void *context, const char *name, yyjson_val *arguments);
     void *administrator_context;
+    char owner_url[384]; /* Trusted owner entry URL; never a bearer credential. */
     const char *approved_target_version, *approved_program_version; /* Private per-call worker guards; never parsed from JSON. */
 } sb_host;
 typedef struct {
@@ -179,10 +182,27 @@ void sb_platform_modify_close(sb_modify *plan);
 sb_journal *sb_platform_journal_open(sb_lease *lease, const char *name, sb_error *error);
 bool sb_platform_journal_append(sb_journal *journal, const char *line, size_t length, sb_error *error);
 void sb_platform_journal_close(sb_journal *journal);
+/* Private, anchored state files. Visitor sees only bounded protected journals. */
+typedef bool (*sb_state_visitor)(void *context, const char *name, const char *bytes, size_t length, sb_error *error);
+bool sb_platform_state_visit(sb_lease *lease, sb_state_visitor visitor, void *context, sb_error *error);
+sb_store *sb_store_new(sb_lease *lease, const char *project, uint64_t revision,
+                       const char *instance, const char *backend, sb_error *error);
+bool sb_store_append(sb_store *store, const char *kind, const char *id, const char *actor,
+                     const char *status, const char *event, yyjson_mut_val *body);
+bool sb_store_healthy(sb_store *store);
+bool sb_store_task_repeated(sb_store *store, const char *actor, const char *key);
+char *sb_store_history(sb_store *store, const char *actor, const char *id, bool full, unsigned offset, unsigned limit);
+void sb_store_free(sb_store *store);
+void sb_policy_store(sb_policy *policy, sb_store *store);
+char *sb_policy_owner_request_actor(sb_policy *policy, const char *request, size_t length, const char *owner_actor);
+char *sb_policy_caller_request(sb_policy *policy, const char *actor, const char *command, const char *id);
+/* Canonical tool operation, including verified-format multi-round-trip fields. */
+char *sb_mcp_operation(yyjson_val *params, sb_error *error);
 
 /* Only fixed metadata is accepted here. Never pass tool text or credentials. */
 sb_audit *sb_audit_new(sb_lease *lease, uint64_t maximum, sb_error *error);
 bool sb_audit_healthy(sb_audit *audit);
+bool sb_audit_operation(sb_audit *audit, const char *event, const char *actor, const char *project, const char *backend, const char *tool, const char *digest);
 bool sb_audit_append(sb_audit *audit, const char *event, const char *actor, const char *id,
                      const char *workspace, const char *target, const char *hash, size_t bytes,
                      const char *tool, const char *operation, const char *original_hash, const char *backup_id);
@@ -197,7 +217,7 @@ bool sb_policy_operation_begin(sb_host *host, const char *actor, const char *too
     const char *parameters, const char *target, const char *version, const char *approval_id,
     bool approval_required, uint64_t offset, uint64_t budget, yyjson_mut_doc *doc,
     yyjson_mut_val **reply, char ticket[33]);
-void sb_policy_operation_finish(sb_policy *policy, const char *ticket, yyjson_mut_val *result);
+bool sb_policy_operation_finish(sb_policy *policy, const char *ticket, yyjson_mut_val *result);
 yyjson_mut_val *sb_policy_write_authorized(sb_host *host, const char *actor, sb_workspace *workspace,
     const char *path, const char *text, yyjson_mut_doc *doc, bool *failed);
 yyjson_mut_val *sb_policy_modify_authorized(sb_host *host, const char *actor, sb_workspace *workspace,
@@ -244,6 +264,9 @@ typedef struct {
     char *(*call)(void *context, void *binding, const char *request, size_t length,
                   const sb_request_context *transport, size_t *response_length, int *status);
     void (*close)(void *context, void *binding);
+    bool (*owner_enabled)(void *context);
+    bool (*owner_authorized)(void *context, const char *authorization);
+    char *(*owner_call)(void *context, const char *request, size_t length, int *status);
 } sb_http_routes;
 sb_http_server *sb_http_start(const sb_config *config, const sb_http_routes *routes, void *context, sb_error *error);
 bool sb_http_stopping(void);

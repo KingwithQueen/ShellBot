@@ -28,6 +28,7 @@
     <ClCompile Include="..\core\tools\tasks.c"><Filter>源文件</Filter></ClCompile>
     <ClCompile Include="..\core\policy\approval.c"><Filter>源文件</Filter></ClCompile>
     <ClCompile Include="..\core\policy\audit.c"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="..\core\policy\state.c"><Filter>源文件</Filter></ClCompile>
     <ClCompile Include="..\core\config\config.c"><Filter>源文件</Filter></ClCompile>
     <ClCompile Include="..\core\config\projects.c"><Filter>源文件</Filter></ClCompile>
     <ClCompile Include="..\core\policy\project_policy.c"><Filter>源文件</Filter></ClCompile>
@@ -40,6 +41,7 @@
     <ClInclude Include="..\core\include\sb.h"><Filter>头文件</Filter></ClInclude>
     <ClInclude Include="..\core\include\sb_projects.h"><Filter>头文件</Filter></ClInclude>
     <ClInclude Include="platform\execution.h"><Filter>头文件</Filter></ClInclude>
+    <ClInclude Include="app\owner_ui.h"><Filter>头文件</Filter></ClInclude>
     <ClInclude Include="platform\shared_admin.h"><Filter>头文件</Filter></ClInclude>
     <ClInclude Include="platform\sandbox.h"><Filter>头文件</Filter></ClInclude>
     <ClInclude Include="platform\manager.h"><Filter>头文件</Filter></ClInclude>

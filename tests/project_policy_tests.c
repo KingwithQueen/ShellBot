@@ -93,7 +93,7 @@ int main(int argc, char **argv) {
         CHECK(sb_project_evaluate(&context, &operation).decision == (mode == SB_PROJECT_NEVER ? SB_DECISION_ALLOW : SB_DECISION_PENDING), "stdin and EOF require separate approval");
         operation.owned_task = false;
         CHECK(sb_project_evaluate(&context, &operation).decision == SB_DECISION_DENY, "stdin refuses unowned task");
-        for (size_t i = 9; i < SB_PROJECT_TOOL_COUNT; ++i) {
+        for (size_t i = 9; i < 13; ++i) {
             if (i == 11) continue;
             operation.tool = sb_project_tool_name(i);
             CHECK(sb_project_evaluate(&context, &operation).decision == SB_DECISION_DENY, "poll and cancel refuse unowned tasks");
@@ -105,6 +105,13 @@ int main(int argc, char **argv) {
             operation.owned_task = false;
         }
         project->directories[1].read_only = true;
+        for (size_t i=13;i<SB_PROJECT_TOOL_COUNT;++i) {
+            operation.tool=sb_project_tool_name(i); operation.owned_request=false;
+            CHECK(sb_project_evaluate(&context,&operation).decision==SB_DECISION_DENY,"request status/cancel require caller ownership");
+            operation.owned_request=true; project->enabled=false; project->policy.tools=0;
+            CHECK(sb_project_evaluate(&context,&operation).decision==SB_DECISION_ALLOW,"revocation preserves owned request status/cancel");
+            operation.owned_request=false; project->enabled=true; project->policy.tools=(UINT32_C(1)<<SB_PROJECT_TOOL_COUNT)-1;
+        }
     }
     project->policy.approval_mode = SB_PROJECT_NEVER;
     operation.tool = "fs_write"; operation.directory = &project->directories[0];

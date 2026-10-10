@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "owner_ui.h"
 
 struct sb_http_server {
     const sb_config *config;
@@ -25,7 +26,7 @@ static BOOL WINAPI stop_handler(DWORD event) {
     return FALSE;
 }
 
-static int reply(struct mg_connection *connection, int status, const char *body, size_t size, const char *extra) {
+static int reply_typed(struct mg_connection *connection, int status, const char *body, size_t size, const char *extra, const char *type) {
     /* Complete a bounded incoming body before closing an error response on
        Windows. Unread socket data may otherwise discard the outgoing reply. */
     const struct mg_request_info *info = mg_get_request_info(connection);
@@ -44,8 +45,8 @@ static int reply(struct mg_connection *connection, int status, const char *body,
         status == 411 ? "Length Required" : status == 413 ? "Content Too Large" : status == 415 ? "Unsupported Media Type" :
         status == 429 ? "Too Many Requests" : status == 503 ? "Service Unavailable" : "Internal Server Error";
     char header[1024];
-    int header_size = snprintf(header, sizeof(header), "HTTP/1.1 %d %s\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: %zu\r\n"
-        "Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n%s\r\n", status, reason, size, extra ? extra : "");
+    int header_size = snprintf(header, sizeof(header), "HTTP/1.1 %d %s\r\nContent-Type: %s; charset=utf-8\r\nContent-Length: %zu\r\n"
+        "Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n%s\r\n", status, reason, type, size, extra ? extra : "");
     if (header_size < 0 || (size_t)header_size >= sizeof(header) || size > SB_RESPONSE_LIMIT) return 500;
     char *frame = malloc((size_t)header_size + size);
     if (!frame) return 500;
@@ -54,6 +55,9 @@ static int reply(struct mg_connection *connection, int status, const char *body,
     mg_write(connection, frame, (size_t)header_size + size);
     free(frame);
     return status;
+}
+static int reply(struct mg_connection *connection, int status, const char *body, size_t size, const char *extra) {
+    return reply_typed(connection,status,body,size,extra,"application/json");
 }
 
 static int reject(struct mg_connection *connection, int status, const char *message, const char *extra) {
@@ -100,6 +104,39 @@ static bool valid_proxy_authority(const char *host) {
 static bool valid_proxy_origin(const char *origin) {
     sb_config parsed = {0}; sb_error error = {0};
     return origin && sb_config_public_url(&parsed, origin, &error) && external_origin(&parsed, origin);
+}
+
+static int handle_owner(struct mg_connection *connection, http_state *state) {
+    const struct mg_request_info *info=mg_get_request_info(connection);
+    if (!state->routes.owner_enabled || !state->routes.owner_enabled(state->user)) return reject(connection,404,"{\"error\":\"Owner route disabled.\"}",NULL);
+    const char *origin=mg_get_header(connection,"Origin"), *host=mg_get_header(connection,"Host");
+    char http[280],https[280]; snprintf(http,sizeof(http),"http://%s",host); snprintf(https,sizeof(https),"https://%s",host);
+    if (origin && (_stricmp(origin,http) && _stricmp(origin,https)) && !external_origin(state->config,origin))
+        return reject(connection,403,"{\"error\":\"Owner requests require the same origin.\"}",NULL);
+    const char *security="Referrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'\r\nX-Frame-Options: DENY\r\n";
+    if (strcmp(info->local_uri,"/owner/api")) {
+        if (strcmp(info->request_method,"GET")) return reject(connection,405,"{\"error\":\"GET required.\"}","Allow: GET\r\n");
+        bool script=!strcmp(info->local_uri,"/owner.js");
+        bool style=!strcmp(info->local_uri,"/owner.css");
+        return reply_typed(connection,200,style ? sb_owner_css : script ? sb_owner_js : sb_owner_html,style ? sizeof(sb_owner_css)-1 : script ? sizeof(sb_owner_js)-1 : sizeof(sb_owner_html)-1,security,
+            style ? "text/css" : script ? "application/javascript" : "text/html");
+    }
+    /* Authenticate before reading the body or looking up a project. */
+    if (!state->routes.owner_authorized || !state->routes.owner_authorized(state->user,mg_get_header(connection,"Authorization")))
+        return reject(connection,401,"{\"error\":\"Independent owner bearer required.\"}","WWW-Authenticate: Bearer realm=\"ShellBot owner\"\r\n");
+    if (strcmp(info->request_method,"POST")) return reject(connection,405,"{\"error\":\"POST required.\"}","Allow: POST\r\n");
+    const char *type=mg_get_header(connection,"Content-Type");
+    if (!type || _strnicmp(type,"application/json",16) || (type[16] && type[16]!=';')) return reject(connection,415,"{\"error\":\"application/json required.\"}",NULL);
+    const char *accept=mg_get_header(connection,"Accept");
+    if (!accept || !strstr(accept,"application/json")) return reject(connection,406,"{\"error\":\"Accept application/json required.\"}",NULL);
+    if (mg_get_header(connection,"Transfer-Encoding") || info->content_length<0) return reject(connection,411,"{\"error\":\"Content-Length required.\"}",NULL);
+    if (info->content_length>65536) return reject(connection,413,"{\"error\":\"Owner request exceeds 64 KiB.\"}",NULL);
+    size_t size=(size_t)info->content_length,read=0; char *body=malloc(size+1);
+    if (!body) return reject(connection,500,"{\"error\":\"Allocation failed.\"}",NULL);
+    while (read<size) { int got=mg_read(connection,body+read,size-read); if (got<=0) break; read+=(size_t)got; }
+    if (read!=size) { free(body); return reject(connection,400,"{\"error\":\"Incomplete request.\"}",NULL); }
+    body[size]=0; int status=500; char *response=state->routes.owner_call(state->user,body,size,&status); free(body);
+    int result=reply(connection,status,response,response ? strlen(response) : 0,security); free(response); return result;
 }
 
 static int handle_bound(struct mg_connection *connection, http_state *state, void *binding, bool health) {
@@ -177,6 +214,7 @@ static int handle(struct mg_connection *connection) {
             strcmp(info->request_uri, info->local_uri_raw) || strcmp(info->local_uri_raw, info->local_uri) ||
             info->query_string || strchr(info->request_uri, '%') || strchr(info->request_uri, '\\'))
             return reject(connection, 400, "{\"error\":\"A canonical project route without query parameters is required.\"}", NULL);
+        if (!strcmp(info->local_uri,"/owner") || !strcmp(info->local_uri,"/owner.js") || !strcmp(info->local_uri,"/owner.css") || !strcmp(info->local_uri,"/owner/api")) return handle_owner(connection,state);
         int status = 500;
         binding = state->routes.open(state->user, info->local_uri, mg_get_header(connection, "Authorization"), &health, &status);
         if (!binding) {

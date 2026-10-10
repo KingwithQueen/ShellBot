@@ -27,6 +27,7 @@ static char *failure(const char *message) {
 }
 static void clear(admin_project *project) {
     sb_policy_free(project->host.policy); sb_execution_free(project->host.execution); sb_audit_free(project->host.audit);
+    sb_store_free(project->host.store);
     sb_config_free(&project->host.config); sb_platform_lease_close(project->host.lease);
     sb_projects_free(&project->registry); if (project->worker) CloseHandle(project->worker);
     memset(project, 0, sizeof(*project));
@@ -67,7 +68,7 @@ static char *register_project(sb_shared_admin *state, yyjson_val *root) {
     const sb_project *p = candidate.host.project;
     size_t size = strlen(p->data_dir) + 64;
     candidate.host.config.data_dir = malloc(size);
-    if (candidate.host.config.data_dir) snprintf(candidate.host.config.data_dir,size,"%s\\administrator-%s",p->data_dir,instance);
+    if (candidate.host.config.data_dir) snprintf(candidate.host.config.data_dir,size,"%s\\administrator-state",p->data_dir);
     candidate.host.config.limits = p->limits; candidate.host.config.approval_ttl_seconds = p->approval_ttl_seconds;
     candidate.host.config.audit_max_bytes = p->audit_max_bytes; candidate.host.config.execution_enabled = p->policy.execution_enabled;
     candidate.host.config.execution_profile = SB_EXEC_ADMINISTRATOR; strcpy(candidate.host.config.token_env,p->token_env);
@@ -81,12 +82,16 @@ static char *register_project(sb_shared_admin *state, yyjson_val *root) {
         for (size_t j = 0; j < i; ++j) if (sb_platform_roots_overlap(w->root,candidate.host.config.workspaces[j].root)) goto failed;
     }
     candidate.host.audit = sb_audit_new(candidate.host.lease,p->audit_max_bytes,&error); if (!candidate.host.audit) goto failed;
+    candidate.host.store=sb_store_new(candidate.host.lease,p->id,p->policy_revision,instance,"administrator",&error);
+    if (!candidate.host.store) goto failed;
     candidate.host.policy = sb_policy_new(p->approval_ttl_seconds,candidate.host.audit,&error); if (!candidate.host.policy) goto failed;
     sb_policy_limit(candidate.host.policy,p->limits.approval_records);
+    sb_policy_store(candidate.host.policy,candidate.host.store);
     /* Move before initializing execution: it keeps a pointer to the bound project. */
     *slot = candidate; slot->host.project = &slot->registry.projects[0];
     slot->host.execution = sb_win_administrator_host(&slot->host.config,slot->host.project,instance,&error);
     if (!slot->host.execution || !sb_win_execution_watch_worker(slot->host.execution,slot->worker)) { clear(slot); return failure(*error.text ? error.text : "Cannot bind administrator jobs to the worker lifetime."); }
+    sb_win_execution_store(slot->host.execution,slot->host.store,slot->host.audit);
     if (!sb_audit_project(slot->host.audit,"administrator_project_registered",p->id,p->policy_revision,pid)) { clear(slot); return failure("Administrator registration audit unavailable."); }
     return sb_strdup("{\"registered\":true}");
 failed:
@@ -97,7 +102,7 @@ char *sb_shared_admin_request(sb_shared_admin *state, yyjson_val *root) {
     const char *command = sb_string(yyjson_obj_get(root,"command"));
     if (command && !strcmp(command,"initialize")) {
         static const char *const init_keys[]={"command","token_envs"}; yyjson_val *envs=yyjson_obj_get(root,"token_envs");
-        if (state->initialized || !sb_config_keys(root,init_keys,2) || !yyjson_is_arr(envs) || yyjson_arr_size(envs)>SB_MAX_PROJECTS)
+        if (state->initialized || !sb_config_keys(root,init_keys,2) || !yyjson_is_arr(envs) || yyjson_arr_size(envs)>SB_MAX_PROJECTS+1)
             return failure("Shared administrator initialization rejected.");
         size_t i,n; yyjson_val *value;
         yyjson_arr_foreach(envs,i,n,value) {
@@ -139,14 +144,15 @@ char *sb_shared_admin_request(sb_shared_admin *state, yyjson_val *root) {
         sb_policy_free(project->host.policy); project->host.policy=sb_policy_new(project->host.config.approval_ttl_seconds,project->host.audit,&error);
         if (!project->host.policy) return failure("Administrator approvals unavailable; permission remains revoked.");
         sb_policy_limit(project->host.policy,project->host.config.limits.approval_records);
+        sb_policy_store(project->host.policy,project->host.store);
         if (!sb_audit_project(project->host.audit,allowed?"administrator_permission_granted":"administrator_permission_revoked",id,revision,GetProcessId(project->worker)))
             return failure("Administrator authorization audit unavailable; permission remains revoked.");
         project->authorization_version=next; project->allowed=allowed; project->registry.projects[0].policy.administrator_allowed=allowed;
         return sb_strdup("{\"authorization_updated\":true,\"old_approvals_invalidated\":true,\"active_tasks_cancelled\":true}");
     }
-    if (!strcmp(command,"owner")) {
+    if (!strcmp(command,"owner") || !strcmp(command,"remote-owner")) {
         if (strcmp(actor,"manager-owner")) return failure("Administrator approval management requires the owner channel.");
-        char *wire=yyjson_val_write(operation,0,NULL); char *reply=wire ? sb_policy_owner_request(project->host.policy,wire,strlen(wire)) : NULL;
+        char *wire=yyjson_val_write(operation,0,NULL); char *reply=wire ? sb_policy_owner_request_actor(project->host.policy,wire,strlen(wire),!strcmp(command,"remote-owner") ? "remote-owner" : "local-owner") : NULL;
         free(wire); return reply;
     }
     if (strcmp(command,"call")) return failure("Unknown shared administrator command.");
@@ -155,7 +161,7 @@ char *sb_shared_admin_request(sb_shared_admin *state, yyjson_val *root) {
     const char *identity=sb_string(yyjson_obj_get(args,"identity"));
     if (!sb_config_keys(operation,call_keys,2) || !name || !yyjson_is_obj(args) || !identity || strcmp(identity,"administrator"))
         return failure("Explicit administrator identity is required.");
-    bool result_tool=!strcmp(name,"task_status") || !strcmp(name,"task_output") || !strcmp(name,"task_cancel");
+    bool result_tool=!strcmp(name,"task_status") || !strcmp(name,"task_output") || !strcmp(name,"task_cancel") || !strcmp(name,"approval_status") || !strcmp(name,"approval_cancel");
     if (!project->allowed && !result_tool) return failure("administrator_not_allowed");
     yyjson_mut_doc *doc=yyjson_mut_doc_new(NULL); if (!doc) return NULL;
     yyjson_mut_val *reply=sb_tool_call(&project->host,actor,name,args,doc); yyjson_mut_doc_set_root(doc,reply);

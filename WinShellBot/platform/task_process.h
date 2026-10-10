@@ -10,6 +10,7 @@ sb_win_tasks *sb_win_tasks_new_limited(sb_execution_profile profile, const sb_re
 bool sb_win_tasks_owned(sb_win_tasks *tasks, const char *actor, const char *id);
 void sb_win_tasks_free(sb_win_tasks *tasks);
 bool sb_win_tasks_cancel_all(sb_win_tasks *tasks);
+void sb_win_tasks_store(sb_win_tasks *tasks, sb_store *store, sb_audit *audit);
 bool sb_win_tasks_watch_worker(sb_win_tasks *tasks, HANDLE worker);
 char *sb_win_tasks_call(sb_win_tasks *tasks, const char *name, yyjson_val *arguments);
 #endif

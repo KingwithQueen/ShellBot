@@ -1,8 +1,8 @@
 # M1 项目配置与统一权限策略
 
-更新日期：2026 年 10 月 10 日。代码版本：`0.1.0-dev.12`。配置格式：`format_version: 1`。
+更新日期：2026 年 10 月 10 日。代码版本：`0.1.0-dev.13`。配置格式：`format_version: 1`。
 
-M1 完成配置、统一判断和旧配置显式迁移；M2/M3 接入项目运行与地址。M4 接通全文件/命令审批、当前账户文件适配和实际 LPAC 受限执行，见 [项目审批与受限执行](PROJECT_APPROVALS.md)。M5 接通[共享管理员代理](SHARED_ADMINISTRATOR.md)，远程审批和持久恢复留待 M6；`--config` 遇到版本化配置会在创建 Data 或初始化执行身份之前拒绝。
+M1 完成配置与统一判断，M2/M3 接入运行和地址，M4 接通全工具审批及 LPAC，M5 接通[共享管理员代理](SHARED_ADMINISTRATOR.md)。M6 增加可选 gateway.owner_token_env 独立所有者凭据引用，见[远程审批与恢复](REMOTE_APPROVALS.md)。格式保持 1；`--config` 在创建 Data 或初始化执行身份前拒绝版本化配置。
 
 ## 配置和校验入口
 
