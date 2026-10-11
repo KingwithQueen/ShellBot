@@ -6,7 +6,7 @@
 #include <stdint.h>
 #include "yyjson.h"
 
-#define SB_VERSION "0.1.0-dev.13"
+#define SB_VERSION "0.1.0-dev.14"
 #define SB_MAX_ROOTS 16
 #define SB_MAX_WORKSPACES (SB_MAX_ROOTS * 2)
 #define SB_PATH_CAP 32768

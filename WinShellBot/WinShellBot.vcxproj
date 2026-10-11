@@ -162,7 +162,7 @@
       <RuntimeLibrary Condition="'$(Configuration)'=='Release'">MultiThreaded</RuntimeLibrary>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>Ws2_32.lib;Bcrypt.lib;Shell32.lib;Ole32.lib;Uuid.lib;Advapi32.lib;Userenv.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>Ws2_32.lib;Bcrypt.lib;Shell32.lib;Ole32.lib;Uuid.lib;Advapi32.lib;Userenv.lib;Comctl32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Manifest>
       <AdditionalManifestFiles>$(MSBuildProjectDirectory)\app\shellbot.manifest;%(AdditionalManifestFiles)</AdditionalManifestFiles>
@@ -175,6 +175,8 @@
     <ClCompile Include="platform\windows.c" />
     <ClCompile Include="platform\owner.c" />
     <ClCompile Include="platform\manager.c" />
+    <ClCompile Include="platform\manager_ui.c" />
+    <ClInclude Include="platform\manager_ui.h" />
     <ClCompile Include="platform\execution.c" />
     <ClCompile Include="platform\shared_admin.c" />
     <ClInclude Include="platform\shared_admin.h" />

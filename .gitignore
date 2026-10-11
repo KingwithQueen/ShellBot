@@ -81,10 +81,16 @@ dkms.conf
 /out/
 /artifacts/
 /dist/
-/tests/test-results/
-/tests/endpoint-test-results/
 /WinShellBot/build/
 /WinShellBot/out/
+
+# Local-only test sources, fixtures, runners and diagnostic/test packagers.
+# Previously tracked files must also be removed from the index (keep local copies).
+/tests/
+/scripts/test.ps1
+/scripts/package-test.ps1
+/scripts/package-http-diagnostics.ps1
+/scripts/package-endpoint-test.ps1
 
 # Local runtime data and credentials
 /Data/
@@ -107,5 +113,6 @@ dkms.conf
 __pycache__/
 *.pyc
 
-# Keep source scripts, example configuration, test fixtures and resources tracked.
+# Keep product build/packaging scripts, example configuration and resources tracked.
+# ShellBot-SandboxProbe is a product dependency; do not exclude its source/project.
 # Do not add broad *.cmd, *.json, *.db or image exclusions here.

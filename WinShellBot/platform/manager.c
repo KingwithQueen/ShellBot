@@ -4,6 +4,7 @@
 #include "sb_projects.h"
 #include "execution.h"
 #include "manager.h"
+#include "manager_ui.h"
 #include "sandbox.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,6 +28,7 @@ typedef struct {
     char token[257];
     size_t token_length;
     bool administrator_allowed;
+    bool paused;
     uint64_t authorization_version, administrator_generation;
     sb_root *administrator_data_root;
     char administrator_data_identity[50];
@@ -368,6 +370,7 @@ static yyjson_mut_val *status(manager *m, worker *w, yyjson_mut_doc *doc) {
     yyjson_mut_obj_add_uint(doc, value, "exit_code", w->exit_code);
     yyjson_mut_obj_add_strcpy(doc, value, "host_instance_id", w->instance);
     yyjson_mut_obj_add_bool(doc, value, "enabled", w->project->enabled);
+    yyjson_mut_obj_add_bool(doc, value, "paused", w->paused);
     yyjson_mut_obj_add_bool(doc, value, "automatic_restart", false);
     sb_platform_mutex_lock(m->administrator_lock);
     administrator_refresh_locked(m);
@@ -645,6 +648,29 @@ static yyjson_mut_val *project_links(manager *m, worker *w, yyjson_mut_doc *doc)
     yyjson_mut_obj_add_bool(doc, links, "default_route", !strcmp(w->project->id, m->registry.default_project_id));
     return links;
 }
+/* Local owner only. Keep configuration details out of the limited remote API. */
+static void management_details(manager *m, worker *w, yyjson_mut_doc *doc, yyjson_mut_val *value) {
+    const sb_project *p=w->project;
+    yyjson_mut_obj_add_val(doc,value,"links",project_links(m,w,doc));
+    yyjson_mut_obj_add_str(doc,value,"approval_mode",p->legacy_compatibility ? "legacy" :
+        p->policy.approval_mode==SB_PROJECT_ALWAYS ? "always" : p->policy.approval_mode==SB_PROJECT_WORKSPACE_AUTO ? "workspace_auto" : "never");
+    yyjson_mut_obj_add_str(doc,value,"file_scope",p->policy.file_scope==SB_FILES_CONFIGURED ? "configured" : "current_user");
+    yyjson_mut_obj_add_bool(doc,value,"current_user_read_only",p->policy.current_user_read_only);
+    yyjson_mut_obj_add_str(doc,value,"default_identity",p->policy.default_identity==SB_ID_RESTRICTED ? "restricted" :
+        p->policy.default_identity==SB_ID_CURRENT_USER ? "current_user" : "administrator");
+    yyjson_mut_obj_add_bool(doc,value,"execution_enabled",p->policy.execution_enabled);
+    yyjson_mut_obj_add_bool(doc,value,"legacy_compatibility",p->legacy_compatibility);
+    yyjson_mut_obj_add_bool(doc,value,"configured_administrator_allowed",p->policy.administrator_allowed);
+    yyjson_mut_obj_add_str(doc,value,"data_dir",p->data_dir);
+    yyjson_mut_val *directories=yyjson_mut_arr(doc);
+    for(size_t i=0;i<p->directory_count;++i) {
+        const sb_project_directory *d=&p->directories[i]; yyjson_mut_val *item=yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_str(doc,item,"workspace_id",d->id); yyjson_mut_obj_add_str(doc,item,"path",d->path);
+        yyjson_mut_obj_add_bool(doc,item,"workspace",d->workspace); yyjson_mut_obj_add_bool(doc,item,"read_only",d->read_only);
+        yyjson_mut_arr_add_val(directories,item);
+    }
+    yyjson_mut_obj_add_val(doc,value,"directories",directories);
+}
 static char *manager_request(void *context, const char *request, size_t length) {
     manager *m = context;
     yyjson_doc *input = yyjson_read(request, length, 0);
@@ -684,11 +710,15 @@ static char *manager_request(void *context, const char *request, size_t length) 
         yyjson_mut_obj_add_bool(doc,result,"automatic_restart",false);
         if (m->administrator) yyjson_mut_obj_add_val(doc,result,"execution_status",sb_execution_status(m->administrator,doc));
         sb_platform_mutex_unlock(m->administrator_lock);
-    } else if (!strcmp(command, "project-status") && !id && !payload) {
+    } else if ((!strcmp(command, "project-status") || !strcmp(command,"management-status")) && !id && !payload) {
         yyjson_mut_val *array = yyjson_mut_arr(doc);
         for (size_t i = 0; i < m->registry.project_count; ++i) {
             worker *w = &m->workers[i];
-            if (TryEnterCriticalSection(&w->lock)) { yyjson_mut_arr_add_val(array, status(m, w, doc)); LeaveCriticalSection(&w->lock); }
+            if (TryEnterCriticalSection(&w->lock)) {
+                yyjson_mut_val *item=status(m,w,doc);
+                if(!strcmp(command,"management-status"))management_details(m,w,doc,item);
+                yyjson_mut_arr_add_val(array,item); LeaveCriticalSection(&w->lock);
+            }
             else {
                 yyjson_mut_val *busy = yyjson_mut_obj(doc); yyjson_mut_obj_add_str(doc, busy, "project_id", w->project->id);
                 yyjson_mut_obj_add_str(doc, busy, "state", "busy"); yyjson_mut_arr_add_val(array, busy);
@@ -701,6 +731,15 @@ static char *manager_request(void *context, const char *request, size_t length) 
         yyjson_mut_obj_add_bool(doc, result, "http_gateway", m->gateway != NULL);
         yyjson_mut_obj_add_uint(doc, result, "http_workers", m->gateway ? 4 : 0);
         yyjson_mut_obj_add_uint(doc, result, "http_connection_queue", m->gateway ? 4 : 0);
+        if(!strcmp(command,"management-status")) {
+            yyjson_mut_obj_add_str(doc,result,"version",SB_VERSION);
+            yyjson_mut_obj_add_bool(doc,result,"remote_owner_enabled",m->owner_token_length!=0);
+            yyjson_mut_obj_add_bool(doc,result,"pause_persisted",false);
+            sb_platform_mutex_lock(m->administrator_lock); administrator_refresh_locked(m);
+            yyjson_mut_obj_add_bool(doc,result,"administrator_alive",sb_win_shared_alive(m->administrator));
+            yyjson_mut_obj_add_bool(doc,result,"administrator_starting",m->administrator_starting!=NULL);
+            sb_platform_mutex_unlock(m->administrator_lock);
+        }
     } else {
         worker *w = NULL;
         for (size_t i = 0; id && i < m->registry.project_count; ++i) if (!strcmp(id, m->workers[i].project->id)) w = &m->workers[i];
@@ -710,12 +749,25 @@ static char *manager_request(void *context, const char *request, size_t length) 
         else {
             sb_error error = {0}; refresh(m, w);
             if (!strcmp(command, "project-start") && !payload) {
-                if (!start_worker(m, w, &error)) failure = error.text;
+                if(w->paused)failure="Project is paused; explicit project-resume is required.";
+                else if (!start_worker(m, w, &error)) failure = error.text;
                 else yyjson_mut_obj_add_val(doc, result, "project", status(m, w, doc));
             } else if (!strcmp(command, "project-stop") && !payload) {
-                reap(m, w, "stopped");
+                reap(m, w, "stopped"); w->paused=false;
                 sb_audit_project(m->audit, "project_stopped", w->project->id, w->project->policy_revision, w->pid);
                 yyjson_mut_obj_add_val(doc, result, "project", status(m, w, doc));
+            } else if (!strcmp(command,"project-pause") && !payload) {
+                reap(m,w,"stopped"); w->paused=true;
+                if(!strcmp(w->state,"stopped"))w->state="paused";
+                sb_audit_project(m->audit,"project_paused",w->project->id,w->project->policy_revision,w->pid);
+                yyjson_mut_obj_add_val(doc,result,"project",status(m,w,doc));
+            } else if (!strcmp(command,"project-resume") && !payload) {
+                if(!w->paused)failure="Project is not paused; use explicit project-start.";
+                else if(!start_worker(m,w,&error))failure=error.text;
+                else {
+                    w->paused=false; sb_audit_project(m->audit,"project_resumed",w->project->id,w->project->policy_revision,w->pid);
+                    yyjson_mut_obj_add_val(doc,result,"project",status(m,w,doc));
+                }
             } else if (!strcmp(command, "project-status") && !payload) yyjson_mut_obj_add_val(doc, result, "project", status(m, w, doc));
             else if (!strcmp(command, "project-links") && !payload) yyjson_mut_obj_add_val(doc, result, "links", project_links(m, w, doc));
             else if (!strcmp(command,"project-administrator-boundary-probe") && !payload) {
@@ -1049,7 +1101,7 @@ done:
 
 bool sb_manager_option(const char *option) {
     static const char *const names[] = {"--manager", "--manager-stop", "--project-create", "--project-configure", "--project-start",
-        "--project-stop", "--project-status", "--project-request", "--project-owner", "--project-links", "--administrator-start", "--administrator-stop", "--administrator-status",
+        "--project-stop", "--project-pause", "--project-resume", "--project-status", "--management-status", "--manage", "--project-request", "--project-owner", "--project-links", "--administrator-start", "--administrator-stop", "--administrator-status",
         "--project-administrator-allow", "--project-administrator-revoke", "--project-administrator-owner", "--project-administrator-boundary-probe"};
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) if (!strcmp(option, names[i])) return true;
     return false;
@@ -1058,7 +1110,8 @@ int sb_manager_cli(int argc, char **argv) {
     const char *mode = argv[1], *id = NULL, *registry = NULL, *data = NULL, *definition = NULL, *output = NULL, *request_file = NULL;
     bool editing = !strcmp(mode, "--project-create") || !strcmp(mode, "--project-configure");
     bool payload = !strcmp(mode, "--project-request") || !strcmp(mode, "--project-owner") || !strcmp(mode,"--project-administrator-owner");
-    bool global=!strcmp(mode,"--administrator-start") || !strcmp(mode,"--administrator-stop") || !strcmp(mode,"--administrator-status");
+    bool global=!strcmp(mode,"--administrator-start") || !strcmp(mode,"--administrator-stop") || !strcmp(mode,"--administrator-status") ||
+        !strcmp(mode,"--management-status") || !strcmp(mode,"--manage");
     bool http = false;
     int index = 2;
     if (strcmp(mode, "--manager") && strcmp(mode, "--manager-stop") && !global) {
@@ -1087,6 +1140,9 @@ int sb_manager_cli(int argc, char **argv) {
     } else if (!strcmp(mode, "--manager")) {
         if (!registry || !data || definition || output || request_file) goto invalid;
         code = run_manager(registry, data, http);
+    } else if(!strcmp(mode,"--manage")) {
+        if(!data || !sb_project_path_valid(data) || registry || definition || output || request_file)goto invalid;
+        code=sb_manager_ui(data);
     } else {
         if (!data || !sb_project_path_valid(data) || registry || definition || output || (payload != (request_file != NULL))) goto invalid;
         yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL); if (!doc) goto done;

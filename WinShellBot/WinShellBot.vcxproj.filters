@@ -21,6 +21,8 @@
     <ClCompile Include="platform\windows.c"><Filter>源文件</Filter></ClCompile>
     <ClCompile Include="platform\owner.c"><Filter>源文件</Filter></ClCompile>
     <ClCompile Include="platform\manager.c"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="platform\manager_ui.c"><Filter>源文件</Filter></ClCompile>
+    <ClInclude Include="platform\manager_ui.h"><Filter>头文件</Filter></ClInclude>
     <ClCompile Include="platform\execution.c"><Filter>源文件</Filter></ClCompile>
     <ClCompile Include="platform\shared_admin.c"><Filter>源文件</Filter></ClCompile>
     <ClCompile Include="platform\sandbox.c"><Filter>源文件</Filter></ClCompile>

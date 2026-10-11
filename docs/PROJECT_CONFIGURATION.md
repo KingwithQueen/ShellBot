@@ -77,7 +77,7 @@ dev.7 的读取自动、写入本机审批和已启用 user/administrator 命令
 
 ## 验证和仍待完成项
 
-scripts/build.ps1 另编译开发用 ShellBot-ProjectPolicyTests.exe，不属于产品依赖；ShellBot-SandboxProbe.exe 则为受限后端的运行依赖。x64 验证依次运行 M1、M2、M3、tests/approval_checks.py 的 M4 及旧核心回归。配置专项增加运行资源类型、路径、重复、身份和数量限制；原配置/迁移检查保留。
+scripts/build.ps1 默认仅构建产品；拥有本地测试副本时，加 -WithTests 才另编译开发用 ShellBot-ProjectPolicyTests.exe 和 ShellBot-TestFixture.exe。测试源码及脚本已排除出 Git，不属于产品依赖；ShellBot-SandboxProbe.exe 则为受限后端的运行依赖，继续随产品构建。x64 本地验证依次运行 M1、M2、M3、tests/approval_checks.py 的 M4 及旧核心回归。配置专项增加运行资源类型、路径、重复、身份和数量限制；原配置/迁移检查保留。
 
 Debug/Release 的最终结果及程序摘要见 [实现记录](IMPLEMENTATION_STATUS.md) 和 build/validation/x64-Debug-m1.json、x64-Release-m1.json。专项原始目录和失败报告保留在 tests/test-results；dev.7 基线在 build/baseline-dev7-m1-20261010。
 

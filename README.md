@@ -4,11 +4,13 @@ ShellBot 是使用 C17 开发的电脑 MCP 主机。模型服务负责推理，S
 
 Windows 工程 WinShellBot 优先面向 Windows 10/11 x64。通用 C 核心与 Windows 接口分离，便于以后移植 Linux 和 macOS；Windows 7 以后单独编译和验证。
 
-后续开发按已确认的多项目和独立权限方案推进，见 [开发计划](docs/DEVELOPMENT_PLAN.md)及 [项目权限与执行身份](docs/EXECUTION_PERMISSIONS.md)。dev.13 接通 M6 独立所有者审批、客户端 URL 提示、持久请求/任务及生命周期审计，见 [远程审批与恢复](docs/REMOTE_APPROVALS.md)。下一项为 M7 管理界面与候选验收。
+后续开发按已确认的多项目和独立权限方案推进，见 [开发计划](docs/DEVELOPMENT_PLAN.md)及 [项目权限与执行身份](docs/EXECUTION_PERMISSIONS.md)。dev.13 接通 M6 审批与持久历史，dev.14 提供 [M7 原生项目管理窗口与独立候选包](docs/PROJECT_MANAGEMENT_UI.md)。独立系统、另一设备与真实 MCP 客户端仍待验收。
+
+首次使用请阅读 [使用说明](docs/USER_GUIDE.md)，包含候选包启动、客户端连接、文件与命令权限、审批、管理员和数据保留。M1–M7 的本机开发已完成，整个开发计划仍包含独立验收和后续桌面、文档等功能。
 
 ## 当前实现
 
-当前版本为 `0.1.0-dev.13`，是开发测试版本。程序只监听本机端口，域名与 cloudflared 隧道由已有环境完成，不要求域名检查；OAuth 与隧道管理暂缓。已实现：
+当前版本为 `0.1.0-dev.14`，是开发测试版本。程序只监听本机端口，域名与 cloudflared 隧道由已有环境完成，不要求域名检查；OAuth 与隧道管理暂缓。已实现：
 
 | 能力 | 当前行为 |
 | --- | --- |
@@ -39,7 +41,7 @@ Windows 工程 WinShellBot 优先面向 Windows 10/11 x64。通用 C 核心与 W
 
 旧单实例 HTTP 使用一个 bearer 身份；项目网关中每个项目使用独立 bearer，路由和凭据共同固定项目。默认不需要填写域名，仍验证 Host/Origin 格式和令牌；可选 public_url 启用域名限制并生成公共地址。实际客户端工具使用与本机自检分别记录。
 
-覆盖与局部修改采用锁定原文件并预先保存私有备份，返回 atomic_save:false，支持冲突拒绝和结果重试，不承诺崩溃原子性，见 [文本修改说明](docs/FILE_EDIT.md)。命令行为见 [命令任务说明](docs/COMMAND_TASKS.md)。M4 受限后端只开放声明的程序与只读运行文件，禁用网络、Win32k 桌面调用和子进程；不保证通用解释器、GUI 或所有构建工具可运行。M6 加载私有历史并标记重启中断，不恢复执行许可或自动重跑。桌面控制、PDF/Office/OCR 和项目管理界面仍待实现。
+覆盖与局部修改采用锁定原文件并预先保存私有备份，返回 atomic_save:false，支持冲突拒绝和结果重试，不承诺崩溃原子性，见 [文本修改说明](docs/FILE_EDIT.md)。命令行为见 [命令任务说明](docs/COMMAND_TASKS.md)。M4 受限后端只开放声明的程序与只读运行文件，禁用网络、Win32k 桌面调用和子进程；不保证通用解释器、GUI 或所有构建工具可运行。M6 加载私有历史并标记重启中断，不恢复执行许可或自动重跑。M7 本机管理窗口已实现；桌面控制、PDF/Office/OCR 仍待实现。
 
 未版本化的单实例运行配置仍使用 dev.7 的 controlled、user、administrator；原 controlled 命令保持不可用，原 user/administrator 预授权行为保留。项目配置将审批、文件范围、身份与管理员许可分开，通过 --manager 启动，加 --http 开启项目网关；--config 保持旧入口。LPAC 和共享管理员仅用于正常新格式项目，管理员许可不兼容受限/目录隔离项目；旧管理员迁移不会自动接入共享代理。见 [项目配置说明](docs/PROJECT_CONFIGURATION.md)及 [项目权限与执行身份](docs/EXECUTION_PERMISSIONS.md)。
 
@@ -52,17 +54,24 @@ Windows 工程 WinShellBot 优先面向 Windows 10/11 x64。通用 C 核心与 W
 ```powershell
 .\scripts\build.ps1 -Configuration Debug
 .\scripts\build.ps1 -Configuration Release
+```
+
+默认构建只生成产品，包含受限任务后端需要的 `ShellBot-SandboxProbe.exe`。测试源码、夹具、运行脚本及测试/诊断打包脚本保留在开发机本地，已排除出 Git；新的源码检出不包含这些文件。拥有本地测试副本时，可运行：
+
+```powershell
+.\scripts\build.ps1 -Configuration Release -WithTests
 python .\tests\smoke.py --exe .\out\x64\Release\WinShellBot.exe
 # 或者保存包含可执行文件校验值的验证报告：
 .\scripts\test.ps1 -Configuration Release
 # 分别验证核心功能，明确排除仍在调查的关闭连接诊断：
 .\scripts\test.ps1 -Configuration Release -SkipCloseProbe
 # 核心报告必须匹配当前 Release 程序才能生成测试包：
-# 当前打包器另要求旧 dev.7 原生专项凭据；dev.13 M6 本轮不生成新包。
-.\scripts\package-test.ps1
+# M7 独立候选包要求当前源码、M1–M7 与实际窗口/UAC 收据。
+.\scripts\package-candidate.ps1
+# 旧 package-test.ps1 保留 dev.7 原生专项门槛。
 ```
 
-也可以在 Visual Studio 中打开 `ShellBot.slnx` 构建。产物位于 `out/x64/Debug/WinShellBot.exe` 或 `out/x64/Release/WinShellBot.exe`。Python 仅用于开发验证，不属于发行程序的运行依赖。
+也可以在 Visual Studio 中打开 `ShellBot.slnx` 构建。产物位于 `out/x64/Debug/WinShellBot.exe` 或 `out/x64/Release/WinShellBot.exe`。Python 仅用于开发验证，不属于发行程序的运行依赖。候选打包仍需与当前源码和程序一致的验收收据；使用说明和仓库维护改变了源码清单，原 M7 冻结候选包及其收据继续保留，新源码快照需重新验收后才能打包。
 
 验证程序启动实际进程和 HTTP 监听，覆盖多目录、中文路径、Unicode 分页、图像字节、目录联接逃逸、审批、禁止覆盖、畸形请求、令牌、并发和停止。dev.7 已在 Windows 11 build 26300 验证普通及管理员任务；改用 C 测试辅助程序后，用户确认没有新杀毒告警，UAC 仅启动代理时一次。测试包包含辅助程序及源码，产品不依赖它。当前机器上的构建与调用结果见[实现与验证记录](docs/IMPLEMENTATION_STATUS.md)。开发机主动关闭 HTTP 连接时仍有连接重置，完整套件因此未通过；核心套件与该诊断分别记录，不隐藏失败。
 
@@ -70,7 +79,7 @@ python .\tests\smoke.py --exe .\out\x64\Release\WinShellBot.exe
 
 随后已读取 dev.3 的两份完整报告：Server 2025 Datacenter build 26100，程序 SHA-256 与交付包一致，两轮各通过 152 项核心和基本 HTTP 检查，新增审计 ACL、内容脱敏和重启保留均通过。close 合计 1/200 失败，唯一失败为响应头收到 0 字节时发生 10054；fresh keep-alive 为 0/200 失败。dev.3 的上述本机功能已获得独立机器证据，偶发连接重置与实际客户端调用仍待验证；公网 OAuth 已按最新决定暂缓。
 
-dev.4 的 Server 2025 完整报告已核验：160 项核心和基本 HTTP 检查通过，关闭连接与 fresh keep-alive 各 0/100 失败，程序 SHA-256 匹配交付包。新增内容搜索、外部域名配置和请求头校验已通过独立机器基础验证；这一轮通过不证明偶发重置已修复，也不包含真实隧道调用。已有域名可使用 [独立端点检查脚本](tests/Test-ShellBot-Endpoint.ps1)，说明见 [外部访问配置](docs/EXTERNAL_ACCESS.md)。
+dev.4 的 Server 2025 完整报告已核验：160 项核心和基本 HTTP 检查通过，关闭连接与 fresh keep-alive 各 0/100 失败，程序 SHA-256 匹配交付包。新增内容搜索、外部域名配置和请求头校验已通过独立机器基础验证；这一轮通过不证明偶发重置已修复，也不包含真实隧道调用。已有域名可使用本地保留的 tests/Test-ShellBot-Endpoint.ps1，说明见 [外部访问配置](docs/EXTERNAL_ACCESS.md)。
 
 2026 年 10 月 7 日，dev.5 在 Server 2025 Datacenter build 26100 上的 195 项核心与基本 HTTP 检查全部通过，程序 SHA-256 匹配交付包。覆盖、局部替换、完整摘要、私有原文备份及备份 ACL，以及无需填写域名的代理请求头检查获得独立机器证据。close 为 1/100 失败、fresh keep-alive 为 0/100，整体 needs_investigation；连接问题仍待修复，命令任务和实际客户端工具使用仍待完成。
 
@@ -126,7 +135,7 @@ fs_search 的 mode 默认 filename；设为 content 可以搜索 UTF-8/UTF-16 �
 | WinShellBot/app/ | Windows 命令行、stdio/HTTP 接入及程序生命周期 |
 | WinShellBot/platform/ | Windows 路径、文件、系统信息、随机数及实例锁 |
 | third_party/ | 固定原生组件版本、来源校验和许可 |
-| config/ / scripts/ / tests/ | 配置样例、构建脚本和实际调用验证 |
+| config/ / scripts/ | 配置样例、产品构建和候选打包脚本；测试脚本在本地保留并忽略 |
 | docs/ARCHITECTURE.md | 总体架构与最终功能方向 |
 | docs/PHASE_1_PLAN.md | 第一阶段既有里程碑和剩余验收 |
 | docs/DEVELOPMENT_PLAN.md | 当前多项目与权限迭代顺序、交付条件 |
@@ -136,4 +145,4 @@ fs_search 的 mode 默认 filename；设为 content 可以搜索 UTF-8/UTF-16 �
 
 许可采用 [MIT 模板](LICENSE.txt)，版权年份和主体需在首次正式发行前补全；第三方组件保留各自许可，见[依赖记录](third_party/README.md)。
 
-旧版本包、基线与原始报告继续保留。M3 已由用户提交推送为 `cb2d26b`；本轮 M4 是 main 上未提交、未推送的本地更改，没有新包。M3 完整回退基线为 build/baseline-dev10-m4-20261010。当前验收范围与剩余项目以 IMPLEMENTATION_STATUS.md 和 [M4 交接](docs/HANDOFF_20261010_M4.md)为准，旧版本结果只适用于对应程序摘要。
+旧版本包、基线与原始报告继续保留。M6 已由用户提交，当前 main 的 HEAD 为 `31ce856`，与 origin/main 本地引用一致，未重新查询远端。M7、使用说明和仓库维护仍为未提交、未推送的本地更改。M7 冻结候选包为 dist/ShellBot-0.1.0-dev.14-windows-x64-candidate-20261011-090856.zip，回退基线为 build/baseline-dev13-m7-20261011。当前验收范围与剩余项目以 [实现记录](docs/IMPLEMENTATION_STATUS.md)和 [M7 交接](docs/HANDOFF_20261011_M7.md)为准，旧版本结果只适用于对应程序摘要。
