@@ -6,11 +6,11 @@ Windows 工程 WinShellBot 优先面向 Windows 10/11 x64。通用 C 核心与 W
 
 后续开发按已确认的多项目和独立权限方案推进，见 [开发计划](docs/DEVELOPMENT_PLAN.md)及 [项目权限与执行身份](docs/EXECUTION_PERMISSIONS.md)。dev.13 接通 M6 审批与持久历史，dev.14 提供 [M7 原生项目管理窗口与独立候选包](docs/PROJECT_MANAGEMENT_UI.md)。独立系统、另一设备与真实 MCP 客户端仍待验收。
 
-首次使用请阅读 [使用说明](docs/USER_GUIDE.md)，包含候选包启动、客户端连接、文件与命令权限、审批、管理员和数据保留。M1–M7 的本机开发已完成，dev.15 增加桌面工具，dev.16 增加图像完整解码与缩放；独立验收和文档等功能继续按计划推进。
+首次使用请阅读 [使用说明](docs/USER_GUIDE.md)，包含候选包启动、客户端连接、文件与命令权限、审批、管理员和数据保留。M1–M7 的本机开发已完成，dev.15 增加桌面工具，dev.16 增加图像完整解码与缩放，dev.17 增加 PDF / Office 阅读与预览；独立验收继续按计划推进。
 
 ## 当前实现
 
-当前源码版本为 `0.1.0-dev.16`，新增 [M9 图像解码与缩放](docs/IMAGE_VIEW.md)，是开发版本。原 dev.14 冻结候选包不包含 M8/M9；验证边界见 [M9 交接](docs/HANDOFF_20261011_M9.md)及 [M8 交接](docs/HANDOFF_20261011_M8.md)。程序只监听本机端口，域名与 cloudflared 隧道由已有环境完成，不要求域名检查；OAuth 与隧道管理暂缓。已实现：
+当前源码版本为 `0.1.0-dev.17`，新增 [M10 PDF / Office 阅读与预览](docs/DOCUMENT_READING.md)，是开发版本。原 dev.14 冻结候选包不包含 M8–M10；验证边界见 [M10 交接](docs/HANDOFF_20261011_M10.md)。程序只监听本机端口，域名与 cloudflared 隧道由已有环境完成，不要求域名检查；OAuth 与隧道管理暂缓。已实现：
 
 | 能力 | 当前行为 |
 | --- | --- |
@@ -20,6 +20,7 @@ Windows 工程 WinShellBot 优先面向 Windows 10/11 x64。通用 C 核心与 W
 | fs_read | UTF-8、UTF-16 LE/BE 读取、BOM 识别和 Unicode 分页；完整读取返回原始字节 SHA-256 |
 | fs_search | 文件名或 UTF-8/UTF-16 内容的字面量搜索，可选递归，内容结果包含行号与有界片段 |
 | image_view | 完整解码 PNG/JPEG；可按长边保持比例缩小，较大源自动转为有界 PNG；返回实际尺寸与源/输出摘要 |
+| document_info / document_read / document_preview | PDF 页面信息、文本与页面 PNG；DOCX 正文、XLSX 工作表存储值、PPTX 幻灯片文本及明确标注的内容预览；旧 Office 格式提示转换 |
 | fs_write / fs_patch | 默认创建；覆盖和替换保留原始哈希、独占打开与私有备份；UTF-8 原文与结果均限 64 KiB；新项目按独立审批模式执行 |
 | 本机审批 | 查看完整请求、批准、拒绝、撤销、过期、绑定参数、并发重试与重启失效 |
 | 审批和写入审计 | 私有 JSONL 记录状态、执行结果和备份编号，跨重启保留，日志故障时阻止新批准和写入 |
@@ -42,7 +43,7 @@ Windows 工程 WinShellBot 优先面向 Windows 10/11 x64。通用 C 核心与 W
 
 旧单实例 HTTP 使用一个 bearer 身份；项目网关中每个项目使用独立 bearer，路由和凭据共同固定项目。默认不需要填写域名，仍验证 Host/Origin 格式和令牌；可选 public_url 启用域名限制并生成公共地址。实际客户端工具使用与本机自检分别记录。
 
-覆盖与局部修改采用锁定原文件并预先保存私有备份，返回 atomic_save:false，支持冲突拒绝和结果重试，不承诺崩溃原子性，见 [文本修改说明](docs/FILE_EDIT.md)。命令行为见 [命令任务说明](docs/COMMAND_TASKS.md)。M4 受限后端只开放声明的程序与只读运行文件，禁用网络、Win32k 桌面调用和子进程；不保证通用解释器、GUI 或所有构建工具可运行。M6 加载私有历史并标记重启中断，不恢复执行许可或自动重跑。M7 本机管理窗口与 M8 普通会话桌面工具已实现；PDF/Office/OCR 仍待实现。
+覆盖与局部修改采用锁定原文件并预先保存私有备份，返回 atomic_save:false，支持冲突拒绝和结果重试，不承诺崩溃原子性，见 [文本修改说明](docs/FILE_EDIT.md)。命令行为见 [命令任务说明](docs/COMMAND_TASKS.md)。M4 受限后端只开放声明的程序与只读运行文件，禁用网络、Win32k 桌面调用和子进程；不保证通用解释器、GUI 或所有构建工具可运行。M6 加载私有历史并标记重启中断，不恢复执行许可或自动重跑。M10 不执行宏、公式或文档外部引用，不提供 OCR；Office 预览不复现原始排版。
 
 未版本化的单实例运行配置仍使用 dev.7 的 controlled、user、administrator；原 controlled 命令保持不可用，原 user/administrator 预授权行为保留。项目配置将审批、文件范围、身份与管理员许可分开，通过 --manager 启动，加 --http 开启项目网关；--config 保持旧入口。LPAC 和共享管理员仅用于正常新格式项目，管理员许可不兼容受限/目录隔离项目；旧管理员迁移不会自动接入共享代理。见 [项目配置说明](docs/PROJECT_CONFIGURATION.md)及 [项目权限与执行身份](docs/EXECUTION_PERMISSIONS.md)。
 
@@ -57,7 +58,7 @@ Windows 工程 WinShellBot 优先面向 Windows 10/11 x64。通用 C 核心与 W
 .\scripts\build.ps1 -Configuration Release
 ```
 
-默认构建只生成产品，包含受限任务后端需要的 `ShellBot-SandboxProbe.exe`。测试源码、夹具、运行脚本及测试/诊断打包脚本保留在开发机本地，已排除出 Git；新的源码检出不包含这些文件。拥有本地测试副本时，可运行：
+默认构建只生成产品，包含受限任务后端需要的 `ShellBot-SandboxProbe.exe`，并将固定版本 `pdfium.dll` 复制到程序旁。PDF 功能需要这份同架构 DLL；Office 使用 Windows 内置 OPC / XmlLite，不需要安装 Office。依赖来源和完整许可见 [third_party](third_party/README.md)。测试源码、夹具、运行脚本及测试/诊断打包脚本保留在开发机本地，已排除出 Git；新的源码检出不包含这些文件。拥有本地测试副本时，可运行：
 
 ```powershell
 .\scripts\build.ps1 -Configuration Release -WithTests
@@ -66,6 +67,8 @@ python .\tests\smoke.py --exe .\out\x64\Release\WinShellBot.exe
 .\scripts\test.ps1 -Configuration Release
 # 分别验证核心功能，明确排除仍在调查的关闭连接诊断：
 .\scripts\test.ps1 -Configuration Release -SkipCloseProbe
+# 同时回归图像和 PDF / Office：
+.\scripts\test.ps1 -Configuration Release -SkipCloseProbe -Images -Documents
 # 核心报告必须匹配当前 Release 程序才能生成测试包：
 # M7 独立候选包要求当前源码、M1–M7 与实际窗口/UAC 收据。
 .\scripts\package-candidate.ps1
@@ -128,7 +131,7 @@ fs_search 的 mode 默认 filename；设为 content 可以搜索 UTF-8/UTF-16 �
 
 已确认采用普通权限管理器、每项目独立工作进程和 /projects/{project_id}/mcp 链接；各项目独立凭据、多个工作目录、任务与审计。审批提供 always、workspace_auto、never 三种模式，目录外访问与管理员使用许可独立设置。共享管理员代理只服务已获所有者授权的项目，一个项目获准不使其他项目拥有管理员权限；cwd 不是命令沙箱，受限执行通过验证前保持不可用。
 
-当前假定外部访问环境已经准备好，程序监听本地端口，域名由外部代理完成；public_url 是可选限制和地址报告功能。现有 bearer、目录权限与所有者审批继续使用，不要求域名检查。M8 提供普通会话桌面工具；文档后端及其他平台按后续阶段推进。
+当前假定外部访问环境已经准备好，程序监听本地端口，域名由外部代理完成；public_url 是可选限制和地址报告功能。现有 bearer、目录权限与所有者审批继续使用，不要求域名检查。M8 提供普通会话桌面工具，M10 提供文档阅读；受控产物传输和其他平台按后续阶段推进。
 
 | 位置 | 内容 |
 | --- | --- |
@@ -146,4 +149,4 @@ fs_search 的 mode 默认 filename；设为 content 可以搜索 UTF-8/UTF-16 �
 
 许可采用 [MIT 模板](LICENSE.txt)，版权年份和主体需在首次正式发行前补全；第三方组件保留各自许可，见[依赖记录](third_party/README.md)。
 
-旧版本包、基线与原始报告继续保留。M6 已由用户提交，当前 main 的 HEAD 为 `31ce856`，与 origin/main 本地引用一致，未重新查询远端。M7、使用说明和仓库维护仍为未提交、未推送的本地更改。M7 冻结候选包为 dist/ShellBot-0.1.0-dev.14-windows-x64-candidate-20261011-090856.zip，回退基线为 build/baseline-dev13-m7-20261011。当前验收范围与剩余项目以 [实现记录](docs/IMPLEMENTATION_STATUS.md)和 [M7 交接](docs/HANDOFF_20261011_M7.md)为准，旧版本结果只适用于对应程序摘要。
+旧版本包、基线与原始报告继续保留。M9 已由用户提交和同步，当前 main 的 HEAD 为 `c3191a8`，与 origin/main 本地引用一致，未重新查询远端。M10 为未提交、未推送的本地更改。回退基线为 build/baseline-dev16-m10-20261011；原 dev.14 冻结候选包保持不变。当前验收范围与剩余项目以 [实现记录](docs/IMPLEMENTATION_STATUS.md)和 [M10 交接](docs/HANDOFF_20261011_M10.md)为准，旧版本结果只适用于对应程序摘要。现有候选打包脚本仍校验 M7 收据，尚未适配 M8–M10 及 PDFium DLL/许可，不用于当前版本打包。

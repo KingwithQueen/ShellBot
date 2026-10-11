@@ -5,7 +5,8 @@ static const char *const tool_names[SB_PROJECT_TOOL_COUNT] = {
     "host_info", "host_capabilities", "fs_list", "fs_read", "fs_search", "image_view",
     "fs_write", "fs_patch", "task_start", "task_status", "task_output", "task_input", "task_cancel", "approval_status", "approval_cancel",
     "desktop_lease", "desktop_state", "desktop_capture", "window_list", "window_focus",
-    "desktop_click", "desktop_drag", "desktop_scroll", "desktop_type", "desktop_key", "clipboard_read", "clipboard_write"
+    "desktop_click", "desktop_drag", "desktop_scroll", "desktop_type", "desktop_key", "clipboard_read", "clipboard_write",
+    "document_info", "document_read", "document_preview"
 };
 
 const char *sb_project_tool_name(size_t index) {
@@ -34,7 +35,7 @@ sb_policy_result sb_project_evaluate(const sb_request_context *context, const sb
     int tool = sb_project_tool_index(operation->tool);
     if (tool < 0) return result(SB_DECISION_DENY, "unknown_tool");
     if (tool==13 || tool==14) return result(operation->owned_request ? SB_DECISION_ALLOW : SB_DECISION_DENY,operation->owned_request ? "owned_request" : "request_not_owned");
-    if (tool >= 15) {
+    if (tool >= 15 && tool < 27) {
         if (project->legacy_compatibility || operation->identity != SB_ID_CURRENT_USER)
             return result(SB_DECISION_DENY, "desktop_requires_ordinary_project");
         if (tool == 15 && operation->desktop_cleanup) return result(SB_DECISION_ALLOW, "desktop_lease_cleanup");

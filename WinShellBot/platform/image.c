@@ -52,6 +52,18 @@ static HRESULT encode(IWICImagingFactory *factory,IWICBitmap *bitmap,UINT width,
     if (converter) IWICFormatConverter_Release(converter); if (scaler) IWICBitmapScaler_Release(scaler);
     return hr;
 }
+bool sb_platform_bitmap_png(const unsigned char *bgra,unsigned width,unsigned height,sb_image *image,sb_error *error) {
+    if(!width || !height || (uint64_t)width*height>SB_IMAGE_PIXEL_LIMIT){sb_fail(error,"Preview raster exceeds its pixel budget.");return false;}
+    HRESULT apartment=CoInitializeEx(NULL,COINIT_MULTITHREADED),hr=S_OK;
+    IWICImagingFactory *factory=NULL;IWICBitmap *bitmap=NULL;
+    if(FAILED(apartment) && apartment!=RPC_E_CHANGED_MODE)hr=apartment;
+    if(SUCCEEDED(hr))hr=CoCreateInstance(&CLSID_WICImagingFactory,NULL,CLSCTX_INPROC_SERVER,&IID_IWICImagingFactory,(void**)&factory);
+    if(SUCCEEDED(hr))hr=IWICImagingFactory_CreateBitmapFromMemory(factory,width,height,&GUID_WICPixelFormat32bppBGRA,width*4,width*height*4,(BYTE*)bgra,&bitmap);
+    if(SUCCEEDED(hr))hr=encode(factory,bitmap,width,height,&image->encoded,&image->size);
+    if(bitmap)IWICBitmap_Release(bitmap);if(factory)IWICImagingFactory_Release(factory);if(SUCCEEDED(apartment))CoUninitialize();
+    if(FAILED(hr)){sb_fail(error,"Bounded PNG preview encoding failed.");return false;}
+    image->width=width;image->height=height;image->mime="image/png";return true;
+}
 bool sb_platform_image_decode(const unsigned char *bytes,size_t size,unsigned max_dimension,sb_image *image,sb_error *error) {
     HRESULT apartment=CoInitializeEx(NULL,COINIT_MULTITHREADED);
     if (FAILED(apartment) && apartment!=RPC_E_CHANGED_MODE) {

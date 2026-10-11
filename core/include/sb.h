@@ -6,7 +6,7 @@
 #include <stdint.h>
 #include "yyjson.h"
 
-#define SB_VERSION "0.1.0-dev.16"
+#define SB_VERSION "0.1.0-dev.17"
 #define SB_MAX_ROOTS 16
 #define SB_MAX_WORKSPACES (SB_MAX_ROOTS * 2)
 #define SB_PATH_CAP 32768
@@ -15,6 +15,8 @@
 #define SB_IMAGE_LIMIT (2u * 1024u * 1024u)
 #define SB_IMAGE_INPUT_LIMIT (16u * 1024u * 1024u)
 #define SB_IMAGE_PIXEL_LIMIT 16777216u
+#define SB_DOCUMENT_INPUT_LIMIT (32u * 1024u * 1024u)
+#define SB_DOCUMENT_TEXT_LIMIT (1024u * 1024u)
 #define SB_RESPONSE_LIMIT (4u * 1024u * 1024u)
 #define SB_AUDIT_LIMIT (8u * 1024u * 1024u)
 
@@ -162,6 +164,24 @@ bool sb_png_validate_raster(const unsigned char *bytes, size_t size);
 /* Decodes every source pixel before returning original bytes or an in-memory PNG derivative. */
 bool sb_platform_image_decode(const unsigned char *bytes, size_t size, unsigned max_dimension,
                               sb_image *image, sb_error *error);
+bool sb_platform_bitmap_png(const unsigned char *bgra, unsigned width, unsigned height,
+                            sb_image *image, sb_error *error);
+typedef struct {
+    const char *format, *unit_kind;
+    unsigned unit_count;
+    char unit_name[256];
+    char *text;
+    size_t text_size;
+    bool extraction_truncated;
+    sb_image image;
+    yyjson_mut_val *units;
+} sb_document;
+bool sb_document_tool(const char *name);
+yyjson_mut_val *sb_document_call(sb_file *file, const char *path, const char *name,
+                                yyjson_val *args, yyjson_mut_doc *doc, sb_image *image, sb_error *error);
+bool sb_platform_document(const unsigned char *bytes, size_t size, const char *format,
+                           const char *operation, unsigned unit, unsigned max_dimension,
+                           yyjson_mut_doc *doc, sb_document *document, sb_error *error);
 bool sb_platform_list(sb_file *directory, size_t offset, size_t limit,
                       sb_entry **entries, size_t *count, bool *more, sb_error *error);
 void sb_platform_entries_free(sb_entry *entries, size_t count);

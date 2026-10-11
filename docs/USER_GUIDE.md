@@ -1,14 +1,16 @@
 # ShellBot 使用说明
 
-适用版本：`0.1.0-dev.16` 开发源码及 `dev.14` 冻结候选包，Windows x64。更新日期：2026 年 10 月 11 日。
+适用版本：`0.1.0-dev.17` 开发源码及 `dev.14` 冻结候选包，Windows x64。更新日期：2026 年 10 月 11 日。
 
 ShellBot 在受控电脑上提供 MCP 工具，供支持相应协议的模型客户端调用。当前可使用多项目、目录与文件操作、后台命令、所有者审批、共享管理员代理和本机管理窗口。电脑上不需要安装 Python、Node.js 或 ChatGPT 桌面客户端。
 
-M1–M7 的本机开发与候选验证已完成。dev.15 新增独立授权的 [Windows 桌面工具](DESKTOP_CONTROL.md)，默认关闭；原 dev.14 候选包不包含这些工具。独立 Windows 10/Server 2025、另一设备及已有代理、实际 MCP 客户端验收仍待完成；历史 HTTP 关闭连接偶发重置仍在调查。PDF/Office/OCR、服务启动及跨平台功能属于后续计划。详见 [开发计划](DEVELOPMENT_PLAN.md)。
+M1–M7 的本机开发与候选验证已完成。dev.15 新增独立授权的 [Windows 桌面工具](DESKTOP_CONTROL.md)，默认关闭；dev.16 增加图像解码与缩放，dev.17 增加 [PDF / Office 阅读与预览](DOCUMENT_READING.md)。原 dev.14 候选包不包含 M8–M10。独立 Windows 10/Server 2025、另一设备及已有代理、实际 MCP 客户端验收仍待完成；历史 HTTP 关闭连接偶发重置仍在调查。OCR、服务启动及跨平台功能属于后续计划。详见 [开发计划](DEVELOPMENT_PLAN.md)。
 
 ## 1. 准备程序和目录
 
 本地候选包位于仓库的 `dist/ShellBot-0.1.0-dev.14-windows-x64-candidate-20261011-090856.zip`。解压到自己的程序目录，例如 `D:\ShellBot`。保留同目录的 `WinShellBot.exe` 与 `ShellBot-SandboxProbe.exe`；后者用于受限任务后端的启动检查。
+
+源码构建的 dev.17 还会生成旁置 pdfium.dll，PDF 读取/预览需要保留同架构的固定版本 DLL；不要只复制主程序。Office 功能不要求安装 Microsoft Office。当前未制作新的 dev.17 候选包。
 
 准备三个相互分开的位置：
 
@@ -104,9 +106,11 @@ args: --stdio --root D:\ShellBotWorkspace
 
 工具返回 `pending`、`approval_id` 或 `approval_url` 时，完成审批后让客户端按原参数继续或重试，必要时携带对应 `approval_id`。新版客户端若收到 URL 提示，仍需所有者在页面实际批准。改变文件目标、内容或命令参数后需重新申请；过期、重启、暂停或撤销的许可不能继续使用。
 
-当前文件工具为 `fs_list`、`fs_read`、`fs_search`、`image_view`、`fs_write`、`fs_patch`。要允许写入，必须同时将相应目录设为 `read_only:false` 并在 `policy.tools` 中启用写入工具；示例未启用。覆盖或修改会核对原文摘要并保存私有备份，不能承诺崩溃原子性，详见 [文本修改](FILE_EDIT.md)。
+当前文件工具还包括 `document_info`、`document_read`、`document_preview`。要允许写入，必须同时将相应目录设为 `read_only:false` 并在 `policy.tools` 中启用写入工具；示例未启用。覆盖或修改会核对原文摘要并保存私有备份，不能承诺崩溃原子性，详见 [文本修改](FILE_EDIT.md)。
 
 源码 dev.16 的 `image_view` 会完整解码 PNG/JPEG，并可加入 `max_dimension:1600` 保持比例缩小。源不超过 16 MiB 和 16,777,216 像素，返回图片不超过 2 MiB；较大的源自动缩小或转码，原文件不改动。实际尺寸与源/输出摘要随结果返回；衍生 PNG 不应用 EXIF 自动旋转，见 [图像阅读与缩放](IMAGE_VIEW.md)。冻结 dev.14 包保留旧的 2 MiB 文件头检查行为。
+
+dev.17 文档阅读优先 PDF / DOCX / XLSX / PPTX，旧 DOC / XLS / PPT 应先转换。先用 document_info 查看单元数，再用 document_read 读取指定 unit、沿 next_offset 分页，或用 document_preview 查看 PNG。PDF 的 unit 是真实页；DOCX 只有一个正文单元，XLSX 按工作表、PPTX 按幻灯片。PDF 扫描图片不会自动识别文字；Excel 只返回已保存值，不计算公式。Office PNG 明确标注为内容预览，不保留原始页面排版、图表或图片。源最大 32 MiB，只读和批准要求与文件工具一致；详细示例见 [文档阅读](DOCUMENT_READING.md)。
 
 要启用命令，需明确设置 `policy.execution.enabled:true`、选择身份并启用相关任务工具：
 
@@ -166,6 +170,9 @@ args: --stdio --root D:\ShellBotWorkspace
 | 文件或命令被拒绝 | 查看 host_capabilities 和诊断，检查范围、只读、工具、身份、审批及后端是否可用 |
 | 受限任务后端不可用 | 保留旁置 SandboxProbe，并检查声明的运行文件和启动验证结果 |
 | 管理员不可用 | 检查项目许可、实际代理状态和 UAC 结果；重启不会自动恢复提权 |
+| PDF 后端不可用或摘要不符 | 核对主程序旁的 pdfium.dll 与当前架构、固定版本一致；重新构建或从同一可信构建恢复依赖 |
+| Office 格式或内容被拒绝 | 将旧格式、宏格式或加密文件转换成无宏、未加密的 DOCX / XLSX / PPTX；损坏或超过预算的包不能读取 |
+| Office 预览与原文件页面不同 | 当前为结构化内容预览；原始排版渲染尚未实现 |
 | 改配置后行为未变化 | 保存配置后停止管理器，切换配置并明确重启；窗口不在线重载 |
 | 端口 8765 被占用 | 停止旧实例或在 gateway.port 中设置其他端口，同时更新客户端和已有代理转发 |
 

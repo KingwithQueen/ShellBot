@@ -27,7 +27,10 @@ static const tool_definition definitions[] = {
     {"task_input", "Queue up to 4096 UTF-8 bytes or close stdin. input_key binds text and EOF so retries never append the same bytes twice. Queue acceptance is not proof of program consumption.", "{\"type\":\"object\",\"properties\":{\"task_id\":{\"type\":\"string\"},\"input_key\":{\"type\":\"string\"},\"text\":{\"type\":\"string\"},\"eof\":{\"type\":\"boolean\",\"default\":false},\"host_instance_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32}},\"required\":[\"task_id\",\"input_key\",\"text\",\"host_instance_id\"],\"additionalProperties\":false}"},
     {"task_cancel", "Terminate the task job and its associated processes; safe to retry. Does not target unrelated processes by name or PID.", "{\"type\":\"object\",\"properties\":{\"task_id\":{\"type\":\"string\"},\"host_instance_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32}},\"required\":[\"task_id\",\"host_instance_id\"],\"additionalProperties\":false}"},
     {"approval_status", "Query only this caller's approval metadata, including interrupted historical requests. Does not expose the owner credential or request body and cannot approve.", "{\"type\":\"object\",\"properties\":{\"approval_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32}},\"required\":[\"approval_id\"],\"additionalProperties\":false}"},
-    {"approval_cancel", "Cancel only this caller's pending approval or remaining read permit; safe to retry. Does not approve or roll back effects.", "{\"type\":\"object\",\"properties\":{\"approval_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32}},\"required\":[\"approval_id\"],\"additionalProperties\":false}"}
+    {"approval_cancel", "Cancel only this caller's pending approval or remaining read permit; safe to retry. Does not approve or roll back effects.", "{\"type\":\"object\",\"properties\":{\"approval_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32}},\"required\":[\"approval_id\"],\"additionalProperties\":false}"},
+    {"document_info", "Inspect an approved PDF/DOCX/XLSX/PPTX and list up to 128 document units. PDF units are pages, DOCX has one text document, XLSX units are worksheets and PPTX units are slides. Does not edit the source or execute macros. Legacy DOC/XLS/PPT must be converted first.", "{\"type\":\"object\",\"properties\":{\"workspace_id\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"}},\"required\":[\"workspace_id\",\"path\"],\"additionalProperties\":false}"},
+    {"document_read", "Read bounded extracted UTF-8 text from one approved document unit, numbered from 1. Continue at next_offset with identical arguments and approval_id. PDF text follows object order, with no OCR. XLSX returns cell references and stored values, never recalculates formulas. Office XML text is not original page layout. Source maximum 32 MiB, extracted unit maximum 1 MiB.", "{\"type\":\"object\",\"properties\":{\"workspace_id\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"unit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":4096,\"default\":1},\"offset\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":1048576},\"max_bytes\":{\"type\":\"integer\",\"minimum\":4,\"maximum\":65536}},\"required\":[\"workspace_id\",\"path\"],\"additionalProperties\":false}"},
+    {"document_preview", "Return a bounded native PNG image of one approved PDF page or an explicitly labelled Office structured text preview. Office previews do not reproduce Word pagination, spreadsheet formatting, slide graphics or original layout. Unit numbers start at 1. Source is unchanged; no macros, external resources or formula execution.", "{\"type\":\"object\",\"properties\":{\"workspace_id\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"unit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":4096,\"default\":1},\"max_dimension\":{\"type\":\"integer\",\"minimum\":128,\"maximum\":4096,\"default\":1600}},\"required\":[\"workspace_id\",\"path\"],\"additionalProperties\":false}"}
 };
 
 static size_t tool_count(void) { return sizeof(definitions) / sizeof(definitions[0]); }
@@ -67,7 +70,7 @@ yyjson_mut_val *sb_tools_list(yyjson_mut_doc *doc) { return tools_list(doc,false
 static bool project_tool_visible(sb_host *host, const char *name) {
     if (!host->project) return true;
     int index = sb_project_tool_index(name);
-    if (index >= 15) return sb_desktop_tool_visible(host,name);
+    if (index >= SB_DESKTOP_TOOL_FIRST && index < SB_DESKTOP_TOOL_END) return sb_desktop_tool_visible(host,name);
     /* Result polling and cancellation remain visible for already owned tasks. */
     return index >= 0 && ((index == 9 || index == 10 || index == 12 || index==13 || index==14) ||
         (host->project->enabled && (host->project->policy.tools & (UINT32_C(1) << index))));
@@ -81,7 +84,7 @@ yyjson_mut_val *sb_project_tools_list(sb_host *host, yyjson_mut_doc *doc) {
         yyjson_mut_val *tool = yyjson_mut_arr_get(tools,i-1);
         const char *name = yyjson_mut_get_str(yyjson_mut_obj_get(tool, "name"));
         if (!project_tool_visible(host, name)) yyjson_mut_arr_remove(tools, i - 1);
-        else if (!host->project->legacy_compatibility && (strncmp(name,"fs_",3) == 0 || !strcmp(name,"image_view") || !strncmp(name,"task_",5) || !strncmp(name,"approval_",9))) {
+        else if (!host->project->legacy_compatibility && (strncmp(name,"fs_",3) == 0 || !strcmp(name,"image_view") || sb_document_tool(name) || !strncmp(name,"task_",5) || !strncmp(name,"approval_",9))) {
             yyjson_mut_val *schema = yyjson_mut_obj_get(tool,"inputSchema"), *properties = yyjson_mut_obj_get(schema,"properties");
             yyjson_mut_val *identity = yyjson_mut_obj(doc), *choices = yyjson_mut_arr(doc);
             yyjson_mut_obj_add_str(doc,identity,"type","string");
@@ -98,8 +101,14 @@ yyjson_mut_val *sb_project_tools_list(sb_host *host, yyjson_mut_doc *doc) {
                     if (!strcmp(yyjson_mut_get_str(yyjson_mut_arr_get(required,j-1)),"workspace_id")) yyjson_mut_arr_remove(required,j-1);
             }
             if (!strncmp(name,"approval_",9)) continue;
+            const char *policy_description="Project policy controls this operation. Administrator operations require identity:administrator and a manager-owned shared agent with owner project permission. Keep this identity on task status/output/input/cancel too. Pending replies contain approval_id; the local owner uses the matching ordinary or administrator approval channel. Keep arguments identical; file pages use next_offset and the same approval_id. With current_user file scope, omit workspace_id for an absolute local path. Read-only grants, expected hashes and private backups still apply.";
+            char document_description[2048];
+            if (sb_document_tool(name)) {
+                snprintf(document_description,sizeof(document_description),"%s %s",yyjson_mut_get_str(yyjson_mut_obj_get(tool,"description")),policy_description);
+            }
             yyjson_mut_obj_remove_str(tool,"description");
-            yyjson_mut_obj_add_str(doc,tool,"description","Project policy controls this operation. Administrator operations require identity:administrator and a manager-owned shared agent with owner project permission. Keep this identity on task status/output/input/cancel too. Pending replies contain approval_id; the local owner uses the matching ordinary or administrator approval channel. Keep arguments identical; file pages use next_offset and the same approval_id. With current_user file scope, omit workspace_id for an absolute local path. Read-only grants, expected hashes and private backups still apply.");
+            if (sb_document_tool(name)) yyjson_mut_obj_add_strcpy(doc,tool,"description",document_description);
+            else yyjson_mut_obj_add_str(doc,tool,"description",policy_description);
         }
     }
     return result;
@@ -150,9 +159,9 @@ static bool arguments_valid(const tool_definition *definition, yyjson_val *args,
         (void)value;
         const char *name = sb_string(key);
         bool project_approval = host->project && !host->project->legacy_compatibility && name && !strcmp(name,"approval_id") &&
-            (strncmp(definition->name,"fs_",3) == 0 || !strcmp(definition->name,"image_view") || !strcmp(definition->name,"task_start") || !strcmp(definition->name,"task_input"));
+            (strncmp(definition->name,"fs_",3) == 0 || !strcmp(definition->name,"image_view") || sb_document_tool(definition->name) || !strcmp(definition->name,"task_start") || !strcmp(definition->name,"task_input"));
         bool project_identity = host->project && !host->project->legacy_compatibility && name && !strcmp(name,"identity") &&
-            (strncmp(definition->name,"fs_",3) == 0 || !strcmp(definition->name,"image_view") || !strncmp(definition->name,"task_",5) || !strncmp(definition->name,"approval_",9));
+            (strncmp(definition->name,"fs_",3) == 0 || !strcmp(definition->name,"image_view") || sb_document_tool(definition->name) || !strncmp(definition->name,"task_",5) || !strncmp(definition->name,"approval_",9));
         if (!name || (!yyjson_obj_get(properties, name) && !project_approval && !project_identity)) { valid = false; break; }
         yyjson_obj_iter it = yyjson_obj_iter_with(args);
         for (size_t j = 0; j < idx; ++j) if (!strcmp(name, yyjson_get_str(yyjson_obj_iter_next(&it)))) valid = false;
@@ -215,7 +224,7 @@ static yyjson_mut_val *tool_call_inner(sb_host *host, const char *actor, const c
         yyjson_mut_val *tools = yyjson_mut_arr(doc), *roots = yyjson_mut_arr(doc), *versions = yyjson_mut_arr(doc);
         for (size_t i = 0; i < tool_count(); ++i)
             if (project_tool_visible(host, definitions[i].name)) yyjson_mut_arr_add_str(doc, tools, definitions[i].name);
-        for (size_t i=15;i<SB_PROJECT_TOOL_COUNT;++i)
+        for (size_t i=SB_DESKTOP_TOOL_FIRST;i<SB_DESKTOP_TOOL_END;++i)
             if (sb_desktop_tool_visible(host,sb_project_tool_name(i))) yyjson_mut_arr_add_str(doc,tools,sb_project_tool_name(i));
         for (size_t i = 0; i < host->config.workspace_count; ++i) {
             yyjson_mut_val *root = yyjson_mut_obj(doc);
@@ -275,6 +284,13 @@ static yyjson_mut_val *tool_call_inner(sb_host *host, const char *actor, const c
         yyjson_mut_obj_add_uint(doc, data, "audit_max_bytes", host->config.audit_max_bytes);
         yyjson_mut_obj_add_str(doc, data, "search_mode", "case-sensitive literal filenames or Unicode content");
         yyjson_mut_obj_add_bool(doc, data, "content_search", true);
+        yyjson_mut_obj_add_bool(doc,data,"document_read",true);
+        yyjson_mut_obj_add_bool(doc,data,"pdf_page_preview",true);
+        yyjson_mut_obj_add_str(doc,data,"pdf_backend","pinned PDFium 157.0.8086.0; no V8");
+        yyjson_mut_obj_add_str(doc,data,"office_formats","DOCX, XLSX, PPTX; legacy formats require conversion");
+        yyjson_mut_obj_add_str(doc,data,"office_preview","structured text, not original layout");
+        yyjson_mut_obj_add_uint(doc,data,"max_document_source_bytes",SB_DOCUMENT_INPUT_LIMIT);
+        yyjson_mut_obj_add_uint(doc,data,"max_document_unit_text_bytes",SB_DOCUMENT_TEXT_LIMIT);
         yyjson_mut_obj_add_bool(doc, data, "tunnel_management", false);
         yyjson_mut_obj_add_bool(doc, data, "domain_required", false);
         yyjson_mut_obj_add_str(doc, data, "http_binding", "127.0.0.1");
@@ -295,7 +311,7 @@ static yyjson_mut_val *tool_call_inner(sb_host *host, const char *actor, const c
     sb_workspace *workspace = override ? override : sb_workspace_find(&host->config, id);
     if (!workspace) return failure(doc, "Unknown workspace_id.");
     if (!path && yyjson_obj_get(args, "path")) return failure(doc, "path must be a string without NUL.");
-    if (!path && (!strcmp(name, "fs_read") || !strcmp(name, "image_view") || !strcmp(name, "fs_write") || !strcmp(name, "fs_patch"))) return failure(doc, "path is required.");
+    if (!path && (!strcmp(name, "fs_read") || !strcmp(name, "image_view") || sb_document_tool(name) || !strcmp(name, "fs_write") || !strcmp(name, "fs_patch"))) return failure(doc, "path is required.");
     if (!path) path = ".";
     if (path_override) path = path_override;
     sb_error error = {0};
@@ -400,6 +416,18 @@ static yyjson_mut_val *tool_call_inner(sb_host *host, const char *actor, const c
         yyjson_mut_obj_add_uint(doc, data, "next_offset", offset + consumed);
         yyjson_mut_obj_add_bool(doc, data, "truncated", offset + consumed < sb_platform_size(file));
         result = content_result(doc, data, false);
+    } else if (sb_document_tool(name)) {
+        sb_image preview={0};
+        yyjson_mut_val *document=sb_document_call(file,path,name,args,doc,&preview,&error);
+        result=document ? content_result(doc,document,false) : failure(doc,error.text);
+        if (document && preview.encoded) {
+            char *encoded=sb_base64(preview.encoded,preview.size);free(preview.encoded);
+            if(!encoded){result=failure(doc,"Out of memory.");goto done;}
+            yyjson_mut_val *image=yyjson_mut_obj(doc);
+            yyjson_mut_obj_add_str(doc,image,"type","image");yyjson_mut_obj_add_str(doc,image,"mimeType","image/png");
+            yyjson_mut_obj_add_strcpy(doc,image,"data",encoded);free(encoded);
+            yyjson_mut_arr_add_val(yyjson_mut_obj_get(result,"content"),image);
+        }
     } else {
         uint64_t size = sb_platform_size(file);
         if (!size || size > SB_IMAGE_INPUT_LIMIT) { result = failure(doc, "Image exceeds 16 MiB or is empty."); goto done; }
@@ -448,7 +476,7 @@ static char *operation_parameters(const char *name, yyjson_val *args) {
     const char *keys[32]; size_t count = 0, idx, max; yyjson_val *key,*value;
     yyjson_obj_foreach(args,idx,max,key,value) {
         (void)value; const char *text = sb_string(key);
-        if (!strcmp(text,"approval_id") || ((!strcmp(name,"fs_read") || !strcmp(name,"fs_list")) && !strcmp(text,"offset")) ||
+        if (!strcmp(text,"approval_id") || ((!strcmp(name,"fs_read") || !strcmp(name,"fs_list") || !strcmp(name,"document_read")) && !strcmp(text,"offset")) ||
             (!strcmp(name,"fs_read") && !strcmp(text,"encoding"))) continue;
         if (count == 32) return NULL; keys[count++] = text;
     }
@@ -542,7 +570,7 @@ static yyjson_mut_val *project_tool_call(sb_host *host, const char *actor, const
     const char *id = sb_string(yyjson_obj_get(args,"workspace_id")), *path = sb_string(yyjson_obj_get(args,"path"));
     if (!strcmp(name,"task_start") && sb_store_task_repeated(host->store,actor,sb_string(yyjson_obj_get(args,"request_key"))))
         return failure(doc,"This request_key belongs to a retained task from an earlier backend instance. Review owner history and actual effects before explicitly using a new key. No task was replayed.");
-    bool file_tool = !strncmp(name,"fs_",3) || !strcmp(name,"image_view");
+    bool file_tool = !strncmp(name,"fs_",3) || !strcmp(name,"image_view") || sb_document_tool(name);
     sb_workspace account = {0}, *workspace = id ? sb_workspace_find(&host->config,id) : NULL;
     const sb_project_directory *directory = sb_project_directory_find(project,id);
     char *relative = NULL; sb_error error = {0}; yyjson_mut_val *result = NULL;
@@ -597,10 +625,11 @@ static yyjson_mut_val *project_tool_call(sb_host *host, const char *actor, const
         if(!ok || !sb_platform_sha256(pair,strlen(pair),version,&error)) { result=failure(doc,error.text);goto done; }
     }
     uint64_t offset=0,budget=1;
-    if(!strcmp(name,"fs_read")) { if(!number(args,"offset",0,0,INT64_MAX,&offset)||!number(args,"max_bytes",SB_TEXT_LIMIT,4,SB_TEXT_LIMIT,&budget)){result=failure(doc,"Invalid file page.");goto done;} }
+    if(!strcmp(name,"fs_read") || !strcmp(name,"document_read")) { if(!number(args,"offset",0,0,INT64_MAX,&offset)||!number(args,"max_bytes",SB_TEXT_LIMIT,4,SB_TEXT_LIMIT,&budget)){result=failure(doc,"Invalid file page.");goto done;} }
     else if(!strcmp(name,"fs_list")) { if(!number(args,"offset",0,0,10000,&offset)||!number(args,"max_entries",100,1,200,&budget)){result=failure(doc,"Invalid directory page.");goto done;} }
     else if(!strcmp(name,"fs_search")) { if(!number(args,"max_total_bytes",16777216,4,16777216,&budget)){result=failure(doc,"Invalid search budget.");goto done;} }
     else if(!strcmp(name,"image_view"))budget=SB_IMAGE_INPUT_LIMIT;
+    else if(sb_document_tool(name))budget=SB_DOCUMENT_INPUT_LIMIT;
     else if(!strcmp(name,"fs_write") || !strcmp(name,"fs_patch"))budget=SB_TEXT_LIMIT;
     if(!file_tool && decision.decision==SB_DECISION_ALLOW && !yyjson_obj_get(args,"approval_id")) {
         host->approved_target_version=target_version;host->approved_program_version=*program_version?program_version:NULL;
@@ -635,7 +664,7 @@ done:
 }
 
 yyjson_mut_val *sb_tool_call(sb_host *host, const char *actor, const char *name, yyjson_val *args, yyjson_mut_doc *doc) {
-    bool file=host->project && !host->project->legacy_compatibility && (!strncmp(name,"fs_",3) || !strcmp(name,"image_view"));
+    bool file=host->project && !host->project->legacy_compatibility && (!strncmp(name,"fs_",3) || !strcmp(name,"image_view") || sb_document_tool(name));
     const char *identity=sb_string(yyjson_obj_get(args,"identity"));
     /* The ordinary forwarding worker cannot claim it accessed admin content. */
     if (file && identity && !strcmp(identity,"administrator") && !host->administrator_host) file=false;

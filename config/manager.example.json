@@ -12,7 +12,7 @@
         "approval_mode": "always",
         "files": { "scope": "configured" },
         "execution": { "enabled": false, "default_identity": "restricted", "administrator_allowed": false },
-        "tools": ["host_info", "host_capabilities", "fs_list", "fs_read", "fs_search", "image_view"]
+        "tools": ["host_info", "host_capabilities", "fs_list", "fs_read", "fs_search", "image_view", "document_info", "document_read", "document_preview"]
       }
     }
   ]

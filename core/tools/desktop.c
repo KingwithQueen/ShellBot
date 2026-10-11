@@ -6,7 +6,7 @@
 
 bool sb_desktop_tool(const char *name) {
     int index=sb_project_tool_index(name);
-    return index>=15;
+    return index>=SB_DESKTOP_TOOL_FIRST && index<SB_DESKTOP_TOOL_END;
 }
 bool sb_desktop_tool_visible(sb_host *host, const char *name) {
     if (!host->project || host->project->legacy_compatibility || !host->desktop) return false;
@@ -22,7 +22,7 @@ static void add_properties(yyjson_mut_doc *doc, yyjson_mut_val *properties, cons
     yyjson_doc_free(input);
 }
 void sb_desktop_tools_list(sb_host *host, yyjson_mut_doc *doc, yyjson_mut_val *tools) {
-    for (size_t i=15;i<SB_PROJECT_TOOL_COUNT;++i) {
+    for (size_t i=SB_DESKTOP_TOOL_FIRST;i<SB_DESKTOP_TOOL_END;++i) {
         const char *name=sb_project_tool_name(i);
         if (!sb_desktop_tool_visible(host,name)) continue;
         yyjson_mut_val *tool=yyjson_mut_obj(doc),*schema=yyjson_mut_obj(doc),*properties=yyjson_mut_obj(doc),*required=yyjson_mut_arr(doc);

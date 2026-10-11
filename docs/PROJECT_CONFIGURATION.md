@@ -2,7 +2,7 @@
 
 dev.15 保持 `format_version: 1`，新增可选 `policy.desktop`，分别控制观察、输入和剪贴板；默认关闭。配置完整示例及权限边界见 [Windows 桌面工具](DESKTOP_CONTROL.md)。`tools` 还须明确包含相应工具，既有文件和任务权限不自动扩大。
 
-更新日期：2026 年 10 月 10 日。代码版本：`0.1.0-dev.13`。配置格式：`format_version: 1`。
+更新日期：2026 年 10 月 11 日。代码版本：`0.1.0-dev.17`。配置格式：`format_version: 1`。
 
 M1 完成配置与统一判断，M2/M3 接入运行和地址，M4 接通全工具审批及 LPAC，M5 接通[共享管理员代理](SHARED_ADMINISTRATOR.md)。M6 增加可选 gateway.owner_token_env 独立所有者凭据引用，见[远程审批与恢复](REMOTE_APPROVALS.md)。格式保持 1；`--config` 在创建 Data 或初始化执行身份前拒绝版本化配置。
 
@@ -49,7 +49,9 @@ runtime_files 只允许 restricted，最多 16 个不重复绝对文件路径。
 
 current_user 文件范围可省略 workspace_id，传入绝对本地盘符 path；平台按物理父目录检查已配置目录的只读和审批类别，不能借绝对路径绕过只读目录。不确定物理类别时直接拒绝；UNC、设备、流和父目录跳转不属于此账户路径适配器。
 
-policy.tools 是现有十三个工具名的显式列表，空数组表示不允许新工具操作；未知及重复工具名拒绝。它独立于目录读写、execution.enabled 和管理员许可，不能单凭列出 task_start 开放命令。
+policy.tools 是工具名的显式列表，当前注册 30 个名称，包含文件、任务、审批、12 个桌面工具及 document_info、document_read、document_preview；空数组表示不允许新工具操作，未知及重复工具名拒绝。它独立于目录读写、execution.enabled、桌面及管理员许可，不能单凭列出 task_start 开放命令。
+
+dev.17 文档工具遵循文件范围、只读和审批策略，不要求启用 desktop 或命令执行。旧项目须自行在 tools 中加入需要的文档工具；manager.example.json 的新只读示例已列出三者。DOCX / XLSX / PPTX 优先，DOC / XLS / PPT 明确提示转换，完整参数和限制见 [文档阅读](DOCUMENT_READING.md)。
 
 ## 统一判断和后续接入契约
 

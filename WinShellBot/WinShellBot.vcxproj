@@ -156,13 +156,13 @@
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
-      <AdditionalIncludeDirectories>$(MSBuildProjectDirectory)\..\core\include;$(MSBuildProjectDirectory)\..\third_party\yyjson;$(MSBuildProjectDirectory)\..\third_party\civetweb\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(MSBuildProjectDirectory)\..\core\include;$(MSBuildProjectDirectory)\..\third_party\yyjson;$(MSBuildProjectDirectory)\..\third_party\civetweb\include;$(MSBuildProjectDirectory)\..\third_party\pdfium\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;WINVER=0x0A00;_WIN32_WINNT=0x0A00;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <RuntimeLibrary Condition="'$(Configuration)'=='Debug'">MultiThreadedDebug</RuntimeLibrary>
       <RuntimeLibrary Condition="'$(Configuration)'=='Release'">MultiThreaded</RuntimeLibrary>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>Ws2_32.lib;Bcrypt.lib;Shell32.lib;Ole32.lib;Uuid.lib;Advapi32.lib;Userenv.lib;Comctl32.lib;Gdi32.lib;Windowscodecs.lib;Wtsapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>Ws2_32.lib;Bcrypt.lib;Shell32.lib;Ole32.lib;Uuid.lib;Advapi32.lib;Userenv.lib;Comctl32.lib;Gdi32.lib;Windowscodecs.lib;Wtsapi32.lib;Shlwapi.lib;Xmllite.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Manifest>
       <AdditionalManifestFiles>$(MSBuildProjectDirectory)\app\shellbot.manifest;%(AdditionalManifestFiles)</AdditionalManifestFiles>
@@ -174,6 +174,10 @@
     <ClCompile Include="app\http.c" />
     <ClCompile Include="platform\windows.c" />
     <ClCompile Include="platform\image.c" />
+    <ClCompile Include="platform\document.c" />
+    <ClCompile Include="platform\pdf.c" />
+    <ClCompile Include="platform\office.c" />
+    <ClInclude Include="platform\document.h" />
     <ClCompile Include="platform\owner.c" />
     <ClCompile Include="platform\manager.c" />
     <ClCompile Include="platform\desktop.c" />
@@ -197,6 +201,7 @@
     <ClCompile Include="..\core\tools\tools.c" />
     <ClCompile Include="..\core\tools\image.c"><ObjectFileName>$(IntDir)image_tools.obj</ObjectFileName></ClCompile>
     <ClCompile Include="..\core\tools\png_validate.c" />
+    <ClCompile Include="..\core\tools\document.c"><ObjectFileName>$(IntDir)document_tools.obj</ObjectFileName></ClCompile>
     <ClCompile Include="..\core\tools\desktop.c"><ObjectFileName>$(IntDir)desktop_tools.obj</ObjectFileName></ClCompile>
     <ClCompile Include="..\core\tools\text.c" />
     <ClCompile Include="..\core\tools\search.c" />
@@ -230,6 +235,9 @@
     </ProjectReference>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Target Name="CopyPinnedPdfium" AfterTargets="Build">
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\..\third_party\pdfium\$(Platform)\pdfium.dll" DestinationFiles="$(OutDir)pdfium.dll" SkipUnchangedFiles="true" />
+  </Target>
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
 </Project>

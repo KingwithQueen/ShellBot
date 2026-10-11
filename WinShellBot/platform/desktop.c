@@ -206,7 +206,7 @@ static WORD key_code(const char *name) {
     return 0;
 }
 static bool arguments(sb_desktop *desktop,const char *name,yyjson_val *args) {
-    int tool=sb_project_tool_index(name),n; if (tool<15 || !yyjson_is_obj(args)) return false;
+    int tool=sb_project_tool_index(name),n; if (tool<SB_DESKTOP_TOOL_FIRST || tool>=SB_DESKTOP_TOOL_END || !yyjson_is_obj(args)) return false;
     const char *allowed[20]={"lease_id","request_key","approval_id"}; size_t count=3;
     if (tool==15) { allowed[count++]="action"; allowed[count++]="duration_seconds"; }
     if (tool>=19 && tool<=24) allowed[count++]="screen_id";

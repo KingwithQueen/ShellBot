@@ -9,7 +9,7 @@ typedef enum { PENDING, APPROVED, RUNNING, COMPLETED, DENIED, EXPIRED, FAILED, C
 typedef struct {
     char id[33], digest[65], hash[65], actor[64], workspace[64];
     char *target, *identity, *text, *original;
-    char tool[16], operation[16], original_hash[65], file_identity[96], backup_id[33];
+    char tool[32], operation[16], original_hash[65], file_identity[96], backup_id[33];
     size_t bytes;
     uint64_t deadline;
     state status, previous_status;
@@ -59,7 +59,7 @@ static bool audit_record(sb_policy *policy, record *r, const char *event, const 
     return ok;
 }
 static bool logical_read(const record *r) {
-    return r->logical && ((!strncmp(r->tool,"fs_",3) && strcmp(r->tool,"fs_write") && strcmp(r->tool,"fs_patch")) || !strcmp(r->tool,"image_view") ||
+    return r->logical && ((!strncmp(r->tool,"fs_",3) && strcmp(r->tool,"fs_write") && strcmp(r->tool,"fs_patch")) || !strcmp(r->tool,"image_view") || sb_document_tool(r->tool) ||
         !strcmp(r->tool,"desktop_capture") || !strcmp(r->tool,"desktop_state") || !strcmp(r->tool,"window_list") || !strcmp(r->tool,"clipboard_read"));
 }
 static void expire(sb_policy *policy, record *r) {
@@ -146,7 +146,7 @@ bool sb_policy_operation_begin(sb_host *host, const char *actor, const char *too
     sb_policy *policy = host->policy; record *r = NULL; sb_error error = {0};
     *reply = NULL; *ticket = 0;
     char digest[65];
-    if (!parameters || strlen(parameters) > SB_REQUEST_LIMIT || !actor || strlen(actor) >= 64 ||
+    if (!tool || strlen(tool)>=sizeof(((record*)0)->tool) || !parameters || strlen(parameters) > SB_REQUEST_LIMIT || !actor || strlen(actor) >= 64 ||
         !sb_platform_sha256(parameters, strlen(parameters), digest, &error)) {
         *reply = error_data(doc, "Logical operation arguments exceed the approval budget."); return false;
     }
@@ -233,8 +233,8 @@ bool sb_policy_operation_begin(sb_host *host, const char *actor, const char *too
         const char *workspace=sb_string(yyjson_obj_get(yyjson_doc_get_root(arguments),"workspace_id"));
         snprintf(r->workspace,sizeof(r->workspace),"%s",workspace?workspace:!strncmp(tool,"task_",5)?"task":"current-user");yyjson_doc_free(arguments);
         r->revision = host->project->policy_revision; r->logical = true;
-        r->pageable = !strcmp(tool,"fs_read") || !strcmp(tool,"fs_list");
-        r->budget = !strcmp(tool,"fs_read") ? 1048576 : !strcmp(tool,"fs_list") ? 1000 : budget;
+        r->pageable = !strcmp(tool,"fs_read") || !strcmp(tool,"fs_list") || !strcmp(tool,"document_read");
+        r->budget = (!strcmp(tool,"fs_read") || !strcmp(tool,"document_read")) ? 1048576 : !strcmp(tool,"fs_list") ? 1000 : budget;
         r->next_offset = offset; r->deadline = sb_platform_millis() + (uint64_t)policy->ttl * 1000;
         r->status = approval_required ? PENDING : APPROVED;
         if (!audit_record(policy,r,approval_required ? "approval_requested" : "operation_authorized",actor)) {
