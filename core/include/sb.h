@@ -6,13 +6,15 @@
 #include <stdint.h>
 #include "yyjson.h"
 
-#define SB_VERSION "0.1.0-dev.15"
+#define SB_VERSION "0.1.0-dev.16"
 #define SB_MAX_ROOTS 16
 #define SB_MAX_WORKSPACES (SB_MAX_ROOTS * 2)
 #define SB_PATH_CAP 32768
 #define SB_REQUEST_LIMIT (1024u * 1024u)
 #define SB_TEXT_LIMIT 65536u
 #define SB_IMAGE_LIMIT (2u * 1024u * 1024u)
+#define SB_IMAGE_INPUT_LIMIT (16u * 1024u * 1024u)
+#define SB_IMAGE_PIXEL_LIMIT 16777216u
 #define SB_RESPONSE_LIMIT (4u * 1024u * 1024u)
 #define SB_AUDIT_LIMIT (8u * 1024u * 1024u)
 
@@ -148,6 +150,18 @@ bool sb_platform_file_version(sb_file *file, char version[65], sb_error *error);
 bool sb_platform_file_sha256(sb_file *file, char hex[65], sb_error *error);
 bool sb_platform_read(sb_file *file, uint64_t offset, unsigned char *buffer,
                       size_t capacity, size_t *length, sb_error *error);
+typedef struct {
+    unsigned char *encoded; /* Owned derivative, or NULL to return the validated original. */
+    size_t size;
+    uint32_t source_width, source_height, width, height;
+    const char *source_mime, *mime;
+} sb_image;
+bool sb_image_prepare(const unsigned char *bytes, size_t size, unsigned max_dimension,
+                      sb_image *image, sb_error *error);
+bool sb_png_validate_raster(const unsigned char *bytes, size_t size);
+/* Decodes every source pixel before returning original bytes or an in-memory PNG derivative. */
+bool sb_platform_image_decode(const unsigned char *bytes, size_t size, unsigned max_dimension,
+                              sb_image *image, sb_error *error);
 bool sb_platform_list(sb_file *directory, size_t offset, size_t limit,
                       sb_entry **entries, size_t *count, bool *more, sb_error *error);
 void sb_platform_entries_free(sb_entry *entries, size_t count);

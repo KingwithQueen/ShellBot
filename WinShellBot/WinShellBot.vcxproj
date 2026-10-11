@@ -173,6 +173,7 @@
     <ClCompile Include="app\stdio.c" />
     <ClCompile Include="app\http.c" />
     <ClCompile Include="platform\windows.c" />
+    <ClCompile Include="platform\image.c" />
     <ClCompile Include="platform\owner.c" />
     <ClCompile Include="platform\manager.c" />
     <ClCompile Include="platform\desktop.c" />
@@ -194,6 +195,8 @@
     <ClCompile Include="..\core\policy\project_policy.c" />
     <ClCompile Include="..\core\protocol\mcp.c" />
     <ClCompile Include="..\core\tools\tools.c" />
+    <ClCompile Include="..\core\tools\image.c"><ObjectFileName>$(IntDir)image_tools.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="..\core\tools\png_validate.c" />
     <ClCompile Include="..\core\tools\desktop.c"><ObjectFileName>$(IntDir)desktop_tools.obj</ObjectFileName></ClCompile>
     <ClCompile Include="..\core\tools\text.c" />
     <ClCompile Include="..\core\tools\search.c" />

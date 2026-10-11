@@ -18,8 +18,8 @@ static const tool_definition definitions[] = {
         "{\"type\":\"object\",\"properties\":{\"workspace_id\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"offset\":{\"type\":\"integer\",\"minimum\":0},\"max_bytes\":{\"type\":\"integer\",\"minimum\":4,\"maximum\":65536},\"encoding\":{\"type\":\"string\",\"enum\":[\"auto\",\"utf-8\",\"utf-16le\",\"utf-16be\"]}},\"required\":[\"workspace_id\",\"path\"],\"additionalProperties\":false}"},
     {"fs_search", "Search case-sensitive literal file names or UTF-8/UTF-16 contents. Content mode returns one excerpt per matching line. Skips unreadable/binary files; bounds entries, depth, bytes, time and output. Truncation means more matches may exist.",
         "{\"type\":\"object\",\"properties\":{\"workspace_id\":{\"type\":\"string\"},\"path\":{\"type\":\"string\",\"default\":\".\"},\"query\":{\"type\":\"string\",\"minLength\":1},\"mode\":{\"type\":\"string\",\"enum\":[\"filename\",\"content\"],\"default\":\"filename\"},\"recursive\":{\"type\":\"boolean\",\"default\":false},\"max_results\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100},\"max_file_bytes\":{\"type\":\"integer\",\"minimum\":4,\"maximum\":1048576,\"default\":262144},\"max_total_bytes\":{\"type\":\"integer\",\"minimum\":4,\"maximum\":16777216,\"default\":4194304}},\"required\":[\"workspace_id\",\"query\"],\"additionalProperties\":false}"},
-    {"image_view", "Return a bounded PNG or JPEG file as native MCP image content. No image resizing is available in this build.",
-        "{\"type\":\"object\",\"properties\":{\"workspace_id\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"}},\"required\":[\"workspace_id\",\"path\"],\"additionalProperties\":false}"}
+    {"image_view", "Fully decode a bounded PNG/JPEG and return native MCP image content. Optional max_dimension:128..4096 shrinks proportionally without enlarging. Sources up to 16 MiB and 16777216 pixels; output at most 2 MiB. Larger sources are normalized to a bounded PNG, possibly smaller than requested. Original bytes are preserved when no processing is needed; derivatives omit source metadata and use stored raster orientation.",
+        "{\"type\":\"object\",\"properties\":{\"workspace_id\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"max_dimension\":{\"type\":\"integer\",\"minimum\":128,\"maximum\":4096}},\"required\":[\"workspace_id\",\"path\"],\"additionalProperties\":false}"}
 ,
     {"task_start", "Start a background native executable in explicitly enabled user or administrator mode. Requires a caller request_key; retries return the original task and changed requests are rejected. Workspace locates cwd; arbitrary commands retain the selected account permissions and are not confined by file roots. Supply current host_instance_id from host_capabilities; stale requests after restart are rejected.", "{\"type\":\"object\",\"properties\":{\"workspace_id\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"executable\":{\"type\":\"string\"},\"argv\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"maxItems\":64},\"request_key\":{\"type\":\"string\"},\"timeout_ms\":{\"type\":\"integer\",\"minimum\":100,\"maximum\":3600000,\"default\":300000},\"host_instance_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32}},\"required\":[\"workspace_id\",\"executable\",\"argv\",\"request_key\",\"host_instance_id\"],\"additionalProperties\":false}"},
     {"task_status", "Query this caller task in the current host instance without rerunning it.", "{\"type\":\"object\",\"properties\":{\"task_id\":{\"type\":\"string\"},\"host_instance_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32}},\"required\":[\"task_id\",\"host_instance_id\"],\"additionalProperties\":false}"},
@@ -158,6 +158,10 @@ static bool arguments_valid(const tool_definition *definition, yyjson_val *args,
         for (size_t j = 0; j < idx; ++j) if (!strcmp(name, yyjson_get_str(yyjson_obj_iter_next(&it)))) valid = false;
     }
     yyjson_doc_free(schema);
+    if (!strcmp(definition->name,"image_view")) {
+        uint64_t maximum=0;
+        if (!number(args,"max_dimension",0,128,4096,&maximum)) valid=false;
+    }
     return valid;
 }
 
@@ -168,40 +172,6 @@ static yyjson_mut_val *entry_json(yyjson_mut_doc *doc, const sb_entry *entry) {
     yyjson_mut_obj_add_uint(doc, item, "size", entry->size);
     yyjson_mut_obj_add_bool(doc, item, "reparse_point", entry->reparse);
     return item;
-}
-
-static uint32_t be32(const unsigned char *p) {
-    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
-}
-
-/* Bounded envelope checks, not a full decoder. Client decodes the image. */
-static const char *image_header(const unsigned char *data, size_t size, uint32_t *width, uint32_t *height) {
-    if (size >= 33 && !memcmp(data, "\x89PNG\r\n\x1a\n", 8) && be32(data + 8) == 13 && !memcmp(data + 12, "IHDR", 4)) {
-        *width = be32(data + 16); *height = be32(data + 20);
-        return "image/png";
-    }
-    if (size < 4 || data[0] != 0xff || data[1] != 0xd8 || data[size - 2] != 0xff || data[size - 1] != 0xd9) return NULL;
-    size_t i = 2;
-    while (i + 4 < size) {
-        if (data[i++] != 0xff) return NULL;
-        while (i < size && data[i] == 0xff) ++i;
-        if (i >= size) return NULL;
-        unsigned marker = data[i++];
-        if (marker == 0xda || marker == 0xd9) return NULL;
-        if (marker == 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
-        if (i + 2 > size) return NULL;
-        size_t length = (size_t)((data[i] << 8) | data[i + 1]);
-        if (length < 2 || length > size - i) return NULL;
-        if ((marker >= 0xc0 && marker <= 0xc3) || (marker >= 0xc5 && marker <= 0xc7) ||
-            (marker >= 0xc9 && marker <= 0xcb) || (marker >= 0xcd && marker <= 0xcf)) {
-            if (length < 8) return NULL;
-            *height = (uint32_t)((data[i + 3] << 8) | data[i + 4]);
-            *width = (uint32_t)((data[i + 5] << 8) | data[i + 6]);
-            return "image/jpeg";
-        }
-        i += length;
-    }
-    return NULL;
 }
 
 static yyjson_mut_val *tool_call_inner(sb_host *host, const char *actor, const char *name, yyjson_val *args,
@@ -262,6 +232,12 @@ static yyjson_mut_val *tool_call_inner(sb_host *host, const char *actor, const c
         yyjson_mut_obj_add_val(doc, data, "protocol_versions", versions);
         yyjson_mut_obj_add_uint(doc, data, "max_text_bytes", SB_TEXT_LIMIT);
         yyjson_mut_obj_add_uint(doc, data, "max_image_bytes", SB_IMAGE_LIMIT);
+        yyjson_mut_obj_add_uint(doc, data, "max_image_source_bytes", SB_IMAGE_INPUT_LIMIT);
+        yyjson_mut_obj_add_uint(doc, data, "max_image_source_pixels", SB_IMAGE_PIXEL_LIMIT);
+        yyjson_mut_obj_add_uint(doc, data, "max_image_source_dimension", 32768);
+        yyjson_mut_obj_add_uint(doc, data, "max_image_dimension", 4096);
+        yyjson_mut_obj_add_bool(doc, data, "image_full_decode", true);
+        yyjson_mut_obj_add_bool(doc, data, "image_resize", true);
         yyjson_mut_obj_add_bool(doc, data, "file_write", true);
         yyjson_mut_obj_add_bool(doc, data, "file_overwrite", true);
         yyjson_mut_obj_add_bool(doc, data, "file_patch", true);
@@ -426,27 +402,39 @@ static yyjson_mut_val *tool_call_inner(sb_host *host, const char *actor, const c
         result = content_result(doc, data, false);
     } else {
         uint64_t size = sb_platform_size(file);
-        if (!size || size > SB_IMAGE_LIMIT) { result = failure(doc, "Image exceeds 2 MiB or is empty. Resize it locally first."); goto done; }
+        if (!size || size > SB_IMAGE_INPUT_LIMIT) { result = failure(doc, "Image exceeds 16 MiB or is empty."); goto done; }
         unsigned char *bytes = malloc((size_t)size);
         if (!bytes) { result = failure(doc, "Out of memory."); goto done; }
         size_t got = 0;
         bool ok = sb_platform_read(file, 0, bytes, (size_t)size, &got, &error);
-        uint32_t width = 0, height = 0;
-        const char *mime = ok && got == size ? image_header(bytes, got, &width, &height) : NULL;
-        if (!mime || !width || !height || (uint64_t)width * height > 16777216) {
-            free(bytes); result = failure(doc, "Unsupported or invalid image header, or more than 16 megapixels."); goto done;
-        }
-        char *encoded = sb_base64(bytes, got);
-        free(bytes);
+        uint64_t maximum=0; sb_image processed={0}; char source_hash[65],output_hash[65];
+        ok=ok && got==size && number(args,"max_dimension",0,128,4096,&maximum) &&
+            sb_image_prepare(bytes,got,(unsigned)maximum,&processed,&error);
+        const unsigned char *output=processed.encoded ? processed.encoded : bytes;
+        if (ok) ok=sb_platform_sha256(bytes,got,source_hash,&error) && sb_platform_sha256(output,processed.size,output_hash,&error);
+        if (!ok) { free(bytes); free(processed.encoded); result=failure(doc,*error.text ? error.text : "Image read or parameters invalid."); goto done; }
+        char *encoded = sb_base64(output, processed.size);
+        bool reencoded=processed.encoded!=NULL;
+        free(bytes); free(processed.encoded);
         if (!encoded) { result = failure(doc, "Out of memory."); goto done; }
-        yyjson_mut_obj_add_str(doc, data, "mime_type", mime);
-        yyjson_mut_obj_add_uint(doc, data, "width", width);
-        yyjson_mut_obj_add_uint(doc, data, "height", height);
-        yyjson_mut_obj_add_uint(doc, data, "size", size);
+        yyjson_mut_obj_add_str(doc, data, "mime_type", processed.mime);
+        yyjson_mut_obj_add_str(doc, data, "source_mime_type", processed.source_mime);
+        yyjson_mut_obj_add_uint(doc, data, "width", processed.width);
+        yyjson_mut_obj_add_uint(doc, data, "height", processed.height);
+        yyjson_mut_obj_add_uint(doc, data, "source_width", processed.source_width);
+        yyjson_mut_obj_add_uint(doc, data, "source_height", processed.source_height);
+        yyjson_mut_obj_add_uint(doc, data, "size", processed.size);
+        yyjson_mut_obj_add_uint(doc, data, "source_size", size);
+        yyjson_mut_obj_add_bool(doc, data, "fully_decoded", true);
+        yyjson_mut_obj_add_bool(doc, data, "reencoded", reencoded);
+        yyjson_mut_obj_add_bool(doc, data, "resized", processed.width!=processed.source_width || processed.height!=processed.source_height);
+        yyjson_mut_obj_add_bool(doc, data, "exif_orientation_applied", false);
+        yyjson_mut_obj_add_strcpy(doc, data, "source_sha256", source_hash);
+        yyjson_mut_obj_add_strcpy(doc, data, "sha256", output_hash);
         result = content_result(doc, data, false);
         yyjson_mut_val *image = yyjson_mut_obj(doc);
         yyjson_mut_obj_add_str(doc, image, "type", "image");
-        yyjson_mut_obj_add_str(doc, image, "mimeType", mime);
+        yyjson_mut_obj_add_str(doc, image, "mimeType", processed.mime);
         yyjson_mut_obj_add_strcpy(doc, image, "data", encoded);
         free(encoded);
         if (result) yyjson_mut_arr_add_val(yyjson_mut_obj_get(result, "content"), image);
@@ -612,7 +600,7 @@ static yyjson_mut_val *project_tool_call(sb_host *host, const char *actor, const
     if(!strcmp(name,"fs_read")) { if(!number(args,"offset",0,0,INT64_MAX,&offset)||!number(args,"max_bytes",SB_TEXT_LIMIT,4,SB_TEXT_LIMIT,&budget)){result=failure(doc,"Invalid file page.");goto done;} }
     else if(!strcmp(name,"fs_list")) { if(!number(args,"offset",0,0,10000,&offset)||!number(args,"max_entries",100,1,200,&budget)){result=failure(doc,"Invalid directory page.");goto done;} }
     else if(!strcmp(name,"fs_search")) { if(!number(args,"max_total_bytes",16777216,4,16777216,&budget)){result=failure(doc,"Invalid search budget.");goto done;} }
-    else if(!strcmp(name,"image_view"))budget=SB_IMAGE_LIMIT;
+    else if(!strcmp(name,"image_view"))budget=SB_IMAGE_INPUT_LIMIT;
     else if(!strcmp(name,"fs_write") || !strcmp(name,"fs_patch"))budget=SB_TEXT_LIMIT;
     if(!file_tool && decision.decision==SB_DECISION_ALLOW && !yyjson_obj_get(args,"approval_id")) {
         host->approved_target_version=target_version;host->approved_program_version=*program_version?program_version:NULL;

@@ -1,6 +1,6 @@
 # ShellBot 使用说明
 
-适用版本：`0.1.0-dev.15` 开发源码及 `dev.14` 冻结候选包，Windows x64。更新日期：2026 年 10 月 11 日。
+适用版本：`0.1.0-dev.16` 开发源码及 `dev.14` 冻结候选包，Windows x64。更新日期：2026 年 10 月 11 日。
 
 ShellBot 在受控电脑上提供 MCP 工具，供支持相应协议的模型客户端调用。当前可使用多项目、目录与文件操作、后台命令、所有者审批、共享管理员代理和本机管理窗口。电脑上不需要安装 Python、Node.js 或 ChatGPT 桌面客户端。
 
@@ -105,6 +105,8 @@ args: --stdio --root D:\ShellBotWorkspace
 工具返回 `pending`、`approval_id` 或 `approval_url` 时，完成审批后让客户端按原参数继续或重试，必要时携带对应 `approval_id`。新版客户端若收到 URL 提示，仍需所有者在页面实际批准。改变文件目标、内容或命令参数后需重新申请；过期、重启、暂停或撤销的许可不能继续使用。
 
 当前文件工具为 `fs_list`、`fs_read`、`fs_search`、`image_view`、`fs_write`、`fs_patch`。要允许写入，必须同时将相应目录设为 `read_only:false` 并在 `policy.tools` 中启用写入工具；示例未启用。覆盖或修改会核对原文摘要并保存私有备份，不能承诺崩溃原子性，详见 [文本修改](FILE_EDIT.md)。
+
+源码 dev.16 的 `image_view` 会完整解码 PNG/JPEG，并可加入 `max_dimension:1600` 保持比例缩小。源不超过 16 MiB 和 16,777,216 像素，返回图片不超过 2 MiB；较大的源自动缩小或转码，原文件不改动。实际尺寸与源/输出摘要随结果返回；衍生 PNG 不应用 EXIF 自动旋转，见 [图像阅读与缩放](IMAGE_VIEW.md)。冻结 dev.14 包保留旧的 2 MiB 文件头检查行为。
 
 要启用命令，需明确设置 `policy.execution.enabled:true`、选择身份并启用相关任务工具：
 
