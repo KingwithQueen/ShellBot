@@ -33,6 +33,7 @@ static const tool_definition definitions[] = {
 static size_t tool_count(void) { return sizeof(definitions) / sizeof(definitions[0]); }
 
 bool sb_tool_exists(const char *name) {
+    if (sb_desktop_tool(name)) return true;
     for (size_t i = 0; i < tool_count(); ++i) if (!strcmp(name, definitions[i].name)) return true;
     return false;
 }
@@ -66,14 +67,16 @@ yyjson_mut_val *sb_tools_list(yyjson_mut_doc *doc) { return tools_list(doc,false
 static bool project_tool_visible(sb_host *host, const char *name) {
     if (!host->project) return true;
     int index = sb_project_tool_index(name);
+    if (index >= 15) return sb_desktop_tool_visible(host,name);
     /* Result polling and cancellation remain visible for already owned tasks. */
-    return index >= 0 && ((index == 9 || index == 10 || index == 12 || index>=13) ||
+    return index >= 0 && ((index == 9 || index == 10 || index == 12 || index==13 || index==14) ||
         (host->project->enabled && (host->project->policy.tools & (UINT32_C(1) << index))));
 }
 yyjson_mut_val *sb_project_tools_list(sb_host *host, yyjson_mut_doc *doc) {
     yyjson_mut_val *result = tools_list(doc,host->project && !host->project->legacy_compatibility);
     if (!host->project || !result) return result;
     yyjson_mut_val *tools = yyjson_mut_obj_get(result, "tools");
+    sb_desktop_tools_list(host,doc,tools);
     for (size_t i = yyjson_mut_arr_size(tools); i; --i) {
         yyjson_mut_val *tool = yyjson_mut_arr_get(tools,i-1);
         const char *name = yyjson_mut_get_str(yyjson_mut_obj_get(tool, "name"));
@@ -242,6 +245,8 @@ static yyjson_mut_val *tool_call_inner(sb_host *host, const char *actor, const c
         yyjson_mut_val *tools = yyjson_mut_arr(doc), *roots = yyjson_mut_arr(doc), *versions = yyjson_mut_arr(doc);
         for (size_t i = 0; i < tool_count(); ++i)
             if (project_tool_visible(host, definitions[i].name)) yyjson_mut_arr_add_str(doc, tools, definitions[i].name);
+        for (size_t i=15;i<SB_PROJECT_TOOL_COUNT;++i)
+            if (sb_desktop_tool_visible(host,sb_project_tool_name(i))) yyjson_mut_arr_add_str(doc,tools,sb_project_tool_name(i));
         for (size_t i = 0; i < host->config.workspace_count; ++i) {
             yyjson_mut_val *root = yyjson_mut_obj(doc);
             yyjson_mut_obj_add_strcpy(doc, root, "workspace_id", host->config.workspaces[i].id);
@@ -265,7 +270,8 @@ static yyjson_mut_val *tool_call_inner(sb_host *host, const char *actor, const c
         yyjson_mut_obj_add_uint(doc, data, "max_backups_per_instance", 64);
         yyjson_mut_obj_add_bool(doc, data, "execution", sb_execution_available(host->execution));
         yyjson_mut_obj_add_val(doc, data, "execution_status", sb_execution_status(host->execution, doc));
-        yyjson_mut_obj_add_bool(doc, data, "desktop_control", false);
+        yyjson_mut_obj_add_bool(doc, data, "desktop_control", host->project && host->project->policy.desktop.control && sb_desktop_available(host->desktop));
+        yyjson_mut_obj_add_val(doc,data,"desktop_status",sb_desktop_capabilities(host->desktop,doc));
         yyjson_mut_obj_add_bool(doc, data, "oauth", false);
         yyjson_mut_obj_add_bool(doc, data, "approval", true);
         yyjson_mut_obj_add_str(doc, data, "approval_mode", host->project && !host->project->legacy_compatibility ?
@@ -509,6 +515,7 @@ static bool command_directory_version(sb_root *root, const char *path, char vers
 }
 
 static yyjson_mut_val *project_tool_call(sb_host *host, const char *actor, const char *name, yyjson_val *args, yyjson_mut_doc *doc) {
+    if (sb_desktop_tool(name)) return sb_desktop_tools_call(host,actor,name,args,doc);
     if (!host->project || host->project->legacy_compatibility) return tool_call_inner(host,actor,name,args,doc,NULL,NULL,false);
     const tool_definition *definition = NULL;
     for (size_t i=0;i<tool_count();++i) if(!strcmp(name,definitions[i].name)) definition=&definitions[i];

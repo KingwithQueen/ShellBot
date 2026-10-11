@@ -1,0 +1,26 @@
+{
+  "format_version": 1,
+  "gateway": { "port": 8765, "owner_token_env": "SHELLBOT_OWNER_TOKEN" },
+  "projects": [
+    {
+      "id": "desktop-example",
+      "policy_revision": 1,
+      "token_env": "SHELLBOT_DESKTOP_TOKEN",
+      "data_dir": "C:/ShellBotProjects/desktop-example/state",
+      "policy": {
+        "approval_mode": "always",
+        "files": { "scope": "configured" },
+        "execution": { "enabled": false, "default_identity": "restricted", "administrator_allowed": false },
+        "desktop": {
+          "enabled": true,
+          "control": false,
+          "clipboard_read": false,
+          "clipboard_write": false,
+          "lease_seconds": 30,
+          "emergency_key": "F9"
+        },
+        "tools": ["host_info", "host_capabilities", "approval_status", "approval_cancel", "desktop_lease", "desktop_state", "desktop_capture", "window_list"]
+      }
+    }
+  ]
+}

@@ -6,7 +6,7 @@
 #include <stdint.h>
 #include "yyjson.h"
 
-#define SB_VERSION "0.1.0-dev.14"
+#define SB_VERSION "0.1.0-dev.15"
 #define SB_MAX_ROOTS 16
 #define SB_MAX_WORKSPACES (SB_MAX_ROOTS * 2)
 #define SB_PATH_CAP 32768
@@ -29,6 +29,7 @@ typedef struct sb_journal sb_journal;
 typedef struct sb_store sb_store;
 typedef struct sb_modify sb_modify;
 typedef struct sb_execution sb_execution;
+typedef struct sb_desktop sb_desktop;
 typedef struct sb_project sb_project;
 typedef enum { SB_EXEC_CONTROLLED, SB_EXEC_USER, SB_EXEC_ADMINISTRATOR } sb_execution_profile;
 typedef enum { SB_APPROVAL_ALWAYS, SB_APPROVAL_RULES } sb_execution_approval;
@@ -71,6 +72,7 @@ typedef struct {
     bool http_mode;
     uint64_t started_ms;
     sb_execution *execution;
+    sb_desktop *desktop; /* Ordinary project desktop; never the elevated backend. */
     bool administrator_backend; /* Trusted manager status, never read from tool arguments. */
     bool administrator_host; /* Only the verified elevated project host sets this. */
     char *(*administrator_call)(void *context, const char *name, yyjson_val *arguments);
@@ -247,6 +249,16 @@ yyjson_mut_val *sb_search(sb_workspace *workspace, const char *path, const char 
                          bool recursive, bool content, size_t maximum, size_t per_file,
                          size_t total_bytes, yyjson_mut_doc *document, sb_error *error);
 bool sb_tool_exists(const char *name);
+bool sb_desktop_tool(const char *name);
+bool sb_desktop_tool_visible(sb_host *host, const char *name);
+void sb_desktop_tools_list(sb_host *host, yyjson_mut_doc *doc, yyjson_mut_val *tools);
+yyjson_mut_val *sb_desktop_tools_call(sb_host *host, const char *actor, const char *name,
+                                    yyjson_val *arguments, yyjson_mut_doc *doc);
+/* Preparation validates/canonicalizes without reading screen pixels, titles or clipboard text. */
+char *sb_desktop_request(sb_desktop *desktop, const char *actor, const char *name,
+                         yyjson_val *arguments, bool prepare);
+yyjson_mut_val *sb_desktop_capabilities(sb_desktop *desktop, yyjson_mut_doc *doc);
+bool sb_desktop_available(sb_desktop *desktop);
 yyjson_mut_val *sb_tool_call(sb_host *host, const char *actor, const char *name, yyjson_val *arguments,
                             yyjson_mut_doc *document);
 bool sb_protocol_version(const char *version);

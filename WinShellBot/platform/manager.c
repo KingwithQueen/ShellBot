@@ -6,6 +6,7 @@
 #include "manager.h"
 #include "manager_ui.h"
 #include "sandbox.h"
+#include "desktop.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -52,6 +53,7 @@ typedef struct {
     sb_owner *owner;
     sb_config gateway_config;
     sb_http_server *gateway;
+    sb_win_desktop_session *desktop_session;
     HANDLE stop;
     sb_mutex *administrator_lock;
     sb_execution *administrator;
@@ -659,6 +661,10 @@ static void management_details(manager *m, worker *w, yyjson_mut_doc *doc, yyjso
     yyjson_mut_obj_add_str(doc,value,"default_identity",p->policy.default_identity==SB_ID_RESTRICTED ? "restricted" :
         p->policy.default_identity==SB_ID_CURRENT_USER ? "current_user" : "administrator");
     yyjson_mut_obj_add_bool(doc,value,"execution_enabled",p->policy.execution_enabled);
+    yyjson_mut_obj_add_bool(doc,value,"desktop_enabled",p->policy.desktop.enabled);
+    yyjson_mut_obj_add_bool(doc,value,"desktop_control",p->policy.desktop.control);
+    yyjson_mut_obj_add_bool(doc,value,"clipboard_read",p->policy.desktop.clipboard_read);
+    yyjson_mut_obj_add_bool(doc,value,"clipboard_write",p->policy.desktop.clipboard_write);
     yyjson_mut_obj_add_bool(doc,value,"legacy_compatibility",p->legacy_compatibility);
     yyjson_mut_obj_add_bool(doc,value,"configured_administrator_allowed",p->policy.administrator_allowed);
     yyjson_mut_obj_add_str(doc,value,"data_dir",p->data_dir);
@@ -685,6 +691,9 @@ static char *manager_request(void *context, const char *request, size_t length) 
         json = sb_strdup("{\"status\":\"stopping\"}"); goto done;
     }
     if (WaitForSingleObject(m->stop, 0) == WAIT_OBJECT_0) { json = error_json("Manager is stopping."); goto done; }
+    if ((!strcmp(command,"desktop-status") || !strcmp(command,"desktop-pause") || !strcmp(command,"desktop-resume")) && !id && !payload) {
+        json=sb_win_desktop_owner(command,m->audit); goto done;
+    }
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
     if (!doc) goto done;
     yyjson_mut_val *result = yyjson_mut_obj(doc); yyjson_mut_doc_set_root(doc, result);
@@ -923,6 +932,7 @@ static int run_manager(const char *source, const char *data, bool http) {
     if (m) m->administrator_lock=sb_platform_mutex_new();
     if (!m || !m->administrator_lock || !bytes || !preflight(m, data, bytes, length, &error)) goto done;
     m->stop = CreateEventW(NULL, TRUE, FALSE, NULL); if (!m->stop) goto done;
+    m->desktop_session=sb_win_desktop_session_new();
     if (http) {
         if (!gateway_credentials(m, &error)) goto done;
         sb_config_defaults(&m->gateway_config); m->gateway_config.port = m->registry.port;
@@ -960,6 +970,7 @@ done:
             sb_platform_root_close(m->workers[i].data_root); DeleteCriticalSection(&m->workers[i].lock);
         }
         if (m->stop) CloseHandle(m->stop);
+        sb_win_desktop_session_free(m->desktop_session);
         sb_audit_free(m->audit); sb_platform_root_close(m->data_root); sb_platform_lease_close(m->lease);
         sb_config_free(&m->gateway_config);
         if (m->administrator_starting) {
@@ -1038,6 +1049,7 @@ int sb_project_worker(int argc, wchar_t **argv) {
     host.policy = sb_policy_new(host.config.approval_ttl_seconds, host.audit, &error); if (!host.policy) goto done;
     sb_policy_limit(host.policy, host.config.limits.approval_records);
     sb_policy_store(host.policy,host.store);
+    host.desktop=sb_win_desktop_new(&host,&error);
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL); if (!doc) goto done;
     yyjson_mut_val *ready = yyjson_mut_obj(doc); yyjson_mut_doc_set_root(doc, ready);
     yyjson_mut_obj_add_bool(doc, ready, "ready", true); yyjson_mut_obj_add_str(doc, ready, "project_id", project->id);
@@ -1094,7 +1106,7 @@ int sb_project_worker(int argc, wchar_t **argv) {
     }
 done:
     if (code && *error.text) { char *failure=error_json(error.text); if (failure) send_frame(pipe,failure,false,0); free(failure); }
-    free(bytes); free(data_identity); sb_policy_free(host.policy); sb_execution_free(host.execution); sb_store_free(host.store); sb_audit_free(host.audit);
+    free(bytes); free(data_identity); sb_win_desktop_free(host.desktop); sb_policy_free(host.policy); sb_execution_free(host.execution); sb_store_free(host.store); sb_audit_free(host.audit);
     sb_config_free(&host.config); sb_platform_lease_close(host.lease); sb_projects_free(&registry); CloseHandle(pipe);
     return code;
 }
@@ -1102,7 +1114,8 @@ done:
 bool sb_manager_option(const char *option) {
     static const char *const names[] = {"--manager", "--manager-stop", "--project-create", "--project-configure", "--project-start",
         "--project-stop", "--project-pause", "--project-resume", "--project-status", "--management-status", "--manage", "--project-request", "--project-owner", "--project-links", "--administrator-start", "--administrator-stop", "--administrator-status",
-        "--project-administrator-allow", "--project-administrator-revoke", "--project-administrator-owner", "--project-administrator-boundary-probe"};
+        "--project-administrator-allow", "--project-administrator-revoke", "--project-administrator-owner", "--project-administrator-boundary-probe",
+        "--desktop-status", "--desktop-pause", "--desktop-resume"};
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) if (!strcmp(option, names[i])) return true;
     return false;
 }
@@ -1111,7 +1124,8 @@ int sb_manager_cli(int argc, char **argv) {
     bool editing = !strcmp(mode, "--project-create") || !strcmp(mode, "--project-configure");
     bool payload = !strcmp(mode, "--project-request") || !strcmp(mode, "--project-owner") || !strcmp(mode,"--project-administrator-owner");
     bool global=!strcmp(mode,"--administrator-start") || !strcmp(mode,"--administrator-stop") || !strcmp(mode,"--administrator-status") ||
-        !strcmp(mode,"--management-status") || !strcmp(mode,"--manage");
+        !strcmp(mode,"--management-status") || !strcmp(mode,"--manage") ||
+        !strcmp(mode,"--desktop-status") || !strcmp(mode,"--desktop-pause") || !strcmp(mode,"--desktop-resume");
     bool http = false;
     int index = 2;
     if (strcmp(mode, "--manager") && strcmp(mode, "--manager-stop") && !global) {

@@ -1,5 +1,7 @@
 # M1 项目配置与统一权限策略
 
+dev.15 保持 `format_version: 1`，新增可选 `policy.desktop`，分别控制观察、输入和剪贴板；默认关闭。配置完整示例及权限边界见 [Windows 桌面工具](DESKTOP_CONTROL.md)。`tools` 还须明确包含相应工具，既有文件和任务权限不自动扩大。
+
 更新日期：2026 年 10 月 10 日。代码版本：`0.1.0-dev.13`。配置格式：`format_version: 1`。
 
 M1 完成配置与统一判断，M2/M3 接入运行和地址，M4 接通全工具审批及 LPAC，M5 接通[共享管理员代理](SHARED_ADMINISTRATOR.md)。M6 增加可选 gateway.owner_token_env 独立所有者凭据引用，见[远程审批与恢复](REMOTE_APPROVALS.md)。格式保持 1；`--config` 在创建 Data 或初始化执行身份前拒绝版本化配置。

@@ -6,12 +6,17 @@
 #define SB_PROJECT_FORMAT 1
 #define SB_MAX_PROJECTS 16
 #define SB_MAX_PROJECT_DIRECTORIES (SB_MAX_ROOTS * 2)
-#define SB_PROJECT_TOOL_COUNT 15
+#define SB_PROJECT_TOOL_COUNT 27
 
 typedef enum { SB_PROJECT_ALWAYS, SB_PROJECT_WORKSPACE_AUTO, SB_PROJECT_NEVER } sb_project_approval;
 typedef enum { SB_FILES_CONFIGURED, SB_FILES_CURRENT_USER } sb_file_scope;
 typedef enum { SB_ID_RESTRICTED, SB_ID_CURRENT_USER, SB_ID_ADMINISTRATOR } sb_execution_identity;
 typedef enum { SB_DECISION_DENY, SB_DECISION_ALLOW, SB_DECISION_PENDING } sb_decision;
+
+typedef struct {
+    bool enabled, control, clipboard_read, clipboard_write;
+    unsigned lease_seconds, emergency_function_key;
+} sb_desktop_policy;
 
 typedef struct {
     char id[64];
@@ -28,6 +33,7 @@ typedef struct {
     sb_execution_identity default_identity;
     bool administrator_allowed; /* Owner configuration, independent of agent availability. */
     uint32_t tools;
+    sb_desktop_policy desktop; /* Independent session-wide disclosure/input permission. */
     char *runtime_files[16]; /* Owner-configured, exact readonly executable/DLL resources. */
     size_t runtime_file_count;
 } sb_project_policy;
@@ -66,6 +72,7 @@ typedef struct {
     bool owned_request;
     bool restricted_backend_verified; /* Actual local sandbox verification, never accepted from JSON. */
     bool administrator_backend_verified; /* Verified manager-owned agent, not a client assertion. */
+    bool desktop_cleanup; /* Validated lease status/release; never grants new control. */
 } sb_project_operation;
 
 typedef struct { sb_decision decision; const char *reason; } sb_policy_result;

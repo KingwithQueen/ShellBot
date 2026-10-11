@@ -1,6 +1,7 @@
 #include "sb_projects.h"
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 #define KEYS(object, names) sb_config_keys(object, names, sizeof(names) / sizeof((names)[0]))
 
@@ -164,13 +165,15 @@ static bool directories(sb_project *project, yyjson_val *array, bool workspace) 
 }
 
 static bool policy_parse(sb_project_policy *policy, yyjson_val *value) {
-    static const char *const allowed[] = {"approval_mode", "files", "execution", "tools"};
+    static const char *const allowed[] = {"approval_mode", "files", "execution", "tools", "desktop"};
     static const char *const file_keys[] = {"scope", "current_user_read_only"};
     static const char *const execution_keys[] = {"enabled", "default_identity", "administrator_allowed", "runtime_files"};
     policy->approval_mode = SB_PROJECT_ALWAYS;
     policy->file_scope = SB_FILES_CONFIGURED;
     policy->current_user_read_only = true;
     policy->default_identity = SB_ID_RESTRICTED;
+    policy->desktop.lease_seconds = 30;
+    policy->desktop.emergency_function_key = 9;
     policy->tools = (UINT32_C(1) << 6) - 1; /* Metadata and bounded file reading. */
     if (!value) return true;
     if (!KEYS(value, allowed)) return false;
@@ -220,6 +223,27 @@ static bool policy_parse(sb_project_policy *policy, yyjson_val *value) {
                 char *copy = sb_strdup(path); if(!copy)return false;
                 policy->runtime_files[policy->runtime_file_count++]=copy;
             }
+        }
+    }
+    yyjson_val *desktop = yyjson_obj_get(value, "desktop");
+    if (desktop) {
+        static const char *const desktop_keys[] = {"enabled", "control", "clipboard_read", "clipboard_write", "lease_seconds", "emergency_key"};
+        uint64_t seconds;
+        if (!KEYS(desktop, desktop_keys) || !bool_field(desktop,"enabled",false,&policy->desktop.enabled) ||
+            !bool_field(desktop,"control",false,&policy->desktop.control) ||
+            !bool_field(desktop,"clipboard_read",false,&policy->desktop.clipboard_read) ||
+            !bool_field(desktop,"clipboard_write",false,&policy->desktop.clipboard_write) ||
+            !number_field(desktop,"lease_seconds",30,1,120,&seconds)) return false;
+        policy->desktop.lease_seconds = (unsigned)seconds;
+        if (!policy->desktop.enabled && (policy->desktop.control || policy->desktop.clipboard_read || policy->desktop.clipboard_write)) return false;
+        yyjson_val *key = yyjson_obj_get(desktop,"emergency_key");
+        if (key) {
+            const char *text = sb_string(key); bool valid = false;
+            for (unsigned i=1; text && i<=11; ++i) {
+                char expected[4]; snprintf(expected,sizeof(expected),"F%u",i);
+                if (!strcmp(expected,text)) { policy->desktop.emergency_function_key=i; valid=true; }
+            }
+            if (!valid) return false;
         }
     }
     yyjson_val *tools = yyjson_obj_get(value, "tools");
@@ -426,6 +450,10 @@ char *sb_projects_summary(const sb_project_registry *registry) {
         yyjson_mut_obj_add_uint(doc, item, "directory_count", project->directory_count);
         yyjson_mut_obj_add_str(doc, item, "file_scope", project->policy.file_scope == SB_FILES_CONFIGURED ? "configured" : "current_user");
         yyjson_mut_obj_add_bool(doc, item, "administrator_allowed", project->policy.administrator_allowed);
+        yyjson_mut_obj_add_bool(doc, item, "desktop_enabled", project->policy.desktop.enabled);
+        yyjson_mut_obj_add_bool(doc, item, "desktop_control", project->policy.desktop.control);
+        yyjson_mut_obj_add_bool(doc, item, "clipboard_read", project->policy.desktop.clipboard_read);
+        yyjson_mut_obj_add_bool(doc, item, "clipboard_write", project->policy.desktop.clipboard_write);
         yyjson_mut_obj_add_str(doc, item, "default_execution_identity", project->policy.default_identity == SB_ID_RESTRICTED ? "restricted" :
             project->policy.default_identity == SB_ID_CURRENT_USER ? "current_user" : "administrator");
         const sb_request_context context = {.actor = "configuration-status", .project = project, .policy_revision = project->policy_revision};

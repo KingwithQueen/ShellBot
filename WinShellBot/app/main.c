@@ -29,6 +29,8 @@ static void usage(void) {
           "       WinShellBot --project-request | --project-owner ID --request FILE\n"
           "                  --manager-data-dir ABSOLUTE_DIR (local owner channel only)\n"
           "       WinShellBot --manager-stop --manager-data-dir ABSOLUTE_DIR\n"
+          "       WinShellBot --desktop-status | --desktop-pause | --desktop-resume\n"
+          "         --manager-data-dir ABSOLUTE_DIR\n"
           "       WinShellBot --administrator-start | --administrator-status | --administrator-stop\n"
           "                  --manager-data-dir ABSOLUTE_DIR (start explicitly requests UAC)\n"
           "       WinShellBot --project-administrator-allow | --project-administrator-revoke ID\n"

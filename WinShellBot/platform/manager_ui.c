@@ -106,6 +106,11 @@ static void show_project(ui_state *ui) {
             yyjson_get_bool(yyjson_obj_get(p,"administrator_allowed")) ? L"已允许" : L"未允许",
             yyjson_get_bool(yyjson_obj_get(p,"administrator_backend")) ? L"可用" : L"未就绪",
             (unsigned long long)yyjson_get_uint(yyjson_obj_get(p,"policy_revision")));
+        append(text,&length,L"桌面观察：%ls\r\n桌面输入：%ls\r\n剪贴板读取：%ls\r\n剪贴板写入：%ls\r\n\r\n",
+            yyjson_get_bool(yyjson_obj_get(p,"desktop_enabled")) ? L"已允许（整个当前会话）" : L"已关闭",
+            yyjson_get_bool(yyjson_obj_get(p,"desktop_control")) ? L"已允许" : L"已关闭",
+            yyjson_get_bool(yyjson_obj_get(p,"clipboard_read")) ? L"已允许" : L"已关闭",
+            yyjson_get_bool(yyjson_obj_get(p,"clipboard_write")) ? L"已允许" : L"已关闭");
         yyjson_val *links=yyjson_obj_get(p,"links"); wchar_t *local=to_wide(str(links,"local_mcp_url")), *public_url=to_wide(str(links,"public_mcp_url"));
         append(text,&length,L"本机 MCP 地址\r\n%ls\r\n\r\n公网 MCP 地址\r\n%ls\r\n网关：%ls\r\n\r\n",
             local ? local : L"",public_url && *public_url ? public_url : L"尚未填写公网地址",

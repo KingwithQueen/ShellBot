@@ -21,6 +21,8 @@
     <ClCompile Include="platform\windows.c"><Filter>源文件</Filter></ClCompile>
     <ClCompile Include="platform\owner.c"><Filter>源文件</Filter></ClCompile>
     <ClCompile Include="platform\manager.c"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="platform\desktop.c"><Filter>源文件</Filter></ClCompile>
+    <ClInclude Include="platform\desktop.h"><Filter>头文件</Filter></ClInclude>
     <ClCompile Include="platform\manager_ui.c"><Filter>源文件</Filter></ClCompile>
     <ClInclude Include="platform\manager_ui.h"><Filter>头文件</Filter></ClInclude>
     <ClCompile Include="platform\execution.c"><Filter>源文件</Filter></ClCompile>
@@ -36,6 +38,7 @@
     <ClCompile Include="..\core\policy\project_policy.c"><Filter>源文件</Filter></ClCompile>
     <ClCompile Include="..\core\protocol\mcp.c"><Filter>源文件</Filter></ClCompile>
     <ClCompile Include="..\core\tools\tools.c"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="..\core\tools\desktop.c"><Filter>源文件</Filter></ClCompile>
     <ClCompile Include="..\core\tools\text.c"><Filter>源文件</Filter></ClCompile>
     <ClCompile Include="..\core\tools\search.c"><Filter>源文件</Filter></ClCompile>
     <ClCompile Include="..\third_party\yyjson\yyjson.c"><Filter>源文件</Filter></ClCompile>

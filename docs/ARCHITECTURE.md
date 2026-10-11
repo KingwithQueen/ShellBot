@@ -1,5 +1,7 @@
 # ShellBot 架构与功能设计
 
+2026 年 10 月 11 日增补：dev.15 / M8 已将 [Windows 桌面工具](DESKTOP_CONTROL.md)接入普通项目工作进程，跨管理器共享同账户/会话的受保护独占锁、暂停事件和观察版本；普通管理器持有会话状态以保留工作进程重启前的暂停。每项目复用既有审批和审计，管理员代理不参与，默认不启用桌面。底层采用 GDI/WIC 截图、Win32 窗口与 SendInput，控件树、浏览器语义和管理员桌面不在本次范围。
+
 初始设计日期：2026 年 10 月 4 日；本次更新：2026 年 10 月 10 日。已确认采用多项目独立工作进程、独立 MCP 地址、解耦权限策略及按项目授权的共享管理员代理。dev.8 已完成 M1 配置与统一策略基础，见 [项目配置说明](PROJECT_CONFIGURATION.md)；多项目运行和其他新能力仍按里程碑开发。当前进度以 IMPLEMENTATION_STATUS.md 为准，迭代顺序以 [开发计划](DEVELOPMENT_PLAN.md) 为准。项目暂定名为 ShellBot。
 
 当前独立仓库位于 E:\Program\ShellBot，Windows 工程为 WinShellBot。当前阶段集中制作 Windows 10 和 Windows 11 版本，WinShellBot 针对 Windows 优化；Linux 和 macOS 的兼容通过通用核心与平台接口边界预留。第一阶段既有范围与验收保留在 PHASE_1_PLAN.md；后续多项目和权限迭代以 DEVELOPMENT_PLAN.md 为准。

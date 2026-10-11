@@ -33,10 +33,21 @@ static bool audit_record(sb_policy *policy, record *r, const char *event, const 
     if (!strcmp(event,"approval_approved")) status="approved";
     else if (!strcmp(event,"operation_started") || !strcmp(event,"write_started") || !strcmp(event,"modify_started")) status="running";
     yyjson_mut_doc *doc=policy->store ? yyjson_mut_doc_new(NULL) : NULL;
-    yyjson_mut_val *body=doc ? describe(doc,r,true) : NULL;
+    bool desktop=sb_desktop_tool(r->tool);
+    yyjson_mut_val *body=doc ? describe(doc,r,!desktop) : NULL;
     if (body && r->cached) {
         yyjson_doc *receipt=yyjson_read(r->cached,strlen(r->cached),0);
-        if (receipt) yyjson_mut_obj_add_val(doc,body,"receipt",yyjson_val_mut_copy(doc,yyjson_doc_get_root(receipt)));
+        if (receipt) {
+            yyjson_mut_val *saved=yyjson_val_mut_copy(doc,yyjson_doc_get_root(receipt));
+            /* Desktop payloads and approval arguments remain in memory only.
+               Recovery retains operation metadata without pixels, titles or text. */
+            if (desktop) {
+                yyjson_mut_obj_remove_str(saved,"content");
+                yyjson_mut_val *details=yyjson_mut_obj_get(saved,"structuredContent");
+                if (details) { yyjson_mut_obj_remove_str(details,"text"); yyjson_mut_obj_remove_str(details,"windows"); }
+            }
+            yyjson_mut_obj_add_val(doc,body,"receipt",saved);
+        }
         yyjson_doc_free(receipt);
     }
     bool ok=(!policy->store || (body && sb_store_append(policy->store,"approval",r->id,r->actor,status,event,body))) &&
@@ -48,7 +59,8 @@ static bool audit_record(sb_policy *policy, record *r, const char *event, const 
     return ok;
 }
 static bool logical_read(const record *r) {
-    return r->logical && ((!strncmp(r->tool,"fs_",3) && strcmp(r->tool,"fs_write") && strcmp(r->tool,"fs_patch")) || !strcmp(r->tool,"image_view"));
+    return r->logical && ((!strncmp(r->tool,"fs_",3) && strcmp(r->tool,"fs_write") && strcmp(r->tool,"fs_patch")) || !strcmp(r->tool,"image_view") ||
+        !strcmp(r->tool,"desktop_capture") || !strcmp(r->tool,"desktop_state") || !strcmp(r->tool,"window_list") || !strcmp(r->tool,"clipboard_read"));
 }
 static void expire(sb_policy *policy, record *r) {
     if ((r->status == PENDING || r->status == APPROVED || (r->status==COMPLETED && logical_read(r))) && sb_platform_millis() >= r->deadline) {
@@ -147,6 +159,24 @@ bool sb_policy_operation_begin(sb_host *host, const char *actor, const char *too
             *reply = error_data(doc, "Approval does not match project, caller, instance or operation arguments."); goto blocked;
         }
     } else {
+        if (sb_desktop_tool(tool)) {
+            yyjson_doc *input=yyjson_read(parameters,strlen(parameters),0);
+            const char *request_key=sb_string(yyjson_obj_get(yyjson_doc_get_root(input),"request_key"));
+            bool conflict=false;
+            for (size_t i=0;request_key && i<policy->record_limit;++i) {
+                record *candidate=&policy->records[i];
+                if (!candidate->logical || !sb_desktop_tool(candidate->tool) || strcmp(candidate->actor,actor)) continue;
+                yyjson_doc *prior=yyjson_read(candidate->text,strlen(candidate->text),0);
+                const char *old_key=sb_string(yyjson_obj_get(yyjson_doc_get_root(prior),"request_key"));
+                bool same=old_key && !strcmp(old_key,request_key); yyjson_doc_free(prior);
+                if (!same) continue;
+                conflict=strcmp(candidate->tool,tool) || strcmp(candidate->digest,digest) || strcmp(candidate->target,target);
+                if (!conflict) r=candidate;
+                break;
+            }
+            yyjson_doc_free(input);
+            if (conflict) { *reply=error_data(doc,"Desktop request_key already belongs to different arguments, tool or lease."); goto blocked; }
+        }
         for (size_t i = 0; i < policy->record_limit; ++i) {
             record *candidate = &policy->records[i];
             if (candidate->logical && candidate->status!=DENIED && candidate->status!=EXPIRED && candidate->status!=CANCELLED && candidate->status!=INTERRUPTED && !strcmp(candidate->actor, actor) && !strcmp(candidate->tool, tool) &&
@@ -232,7 +262,7 @@ bool sb_policy_operation_finish(sb_policy *policy, const char *ticket, yyjson_mu
         else if (!failed) r->used += r->charge;
         r->status = failed ? FAILED : r->pageable && more && r->used < r->budget ? APPROVED : COMPLETED;
         size_t size = 0; char *cached = result ? yyjson_mut_val_write(result,0,&size) : NULL;
-        free(r->cached); r->cached = size <= 524288 ? cached : NULL;
+        free(r->cached); r->cached = size <= (!strcmp(r->tool,"desktop_capture") ? SB_RESPONSE_LIMIT : 524288u) ? cached : NULL;
         if (!r->cached) free(cached);
         recorded=audit_record(policy,r,failed ? "operation_failed" : "operation_completed",r->actor);
     }

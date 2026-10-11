@@ -130,8 +130,8 @@ bool sb_audit_operation(sb_audit *audit, const char *event, const char *actor, c
         yyjson_mut_obj_add_str(doc,root,"version",SB_VERSION) && yyjson_mut_obj_add_uint(doc,root,"sequence",audit->sequence+1) &&
         yyjson_mut_obj_add_uint(doc,root,"time_unix_ms",sb_platform_unix_ms()) && yyjson_mut_obj_add_str(doc,root,"event",event) &&
         yyjson_mut_obj_add_str(doc,root,"actor",actor) && yyjson_mut_obj_add_str(doc,root,"project_id",project) &&
-        yyjson_mut_obj_add_str(doc,root,"backend",backend) && yyjson_mut_obj_add_str(doc,root,"tool",tool) &&
-        yyjson_mut_obj_add_str(doc,root,"request_sha256",digest);
+        yyjson_mut_obj_add_str(doc,root,"backend",backend) && yyjson_mut_obj_add_str(doc,root,"tool",tool);
+    if (ok && digest) ok=yyjson_mut_obj_add_str(doc,root,"request_sha256",digest);
     if (doc) yyjson_mut_doc_set_root(doc,root);
     size_t length=0; char *json=ok ? yyjson_mut_write(doc,0,&length) : NULL, *line=json && length<8192 ? malloc(length+1) : NULL;
     ok=ok && line && length+1<=audit->maximum-audit->bytes;
