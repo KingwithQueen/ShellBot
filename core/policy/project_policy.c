@@ -6,7 +6,7 @@ static const char *const tool_names[SB_PROJECT_TOOL_COUNT] = {
     "fs_write", "fs_patch", "task_start", "task_status", "task_output", "task_input", "task_cancel", "approval_status", "approval_cancel",
     "desktop_lease", "desktop_state", "desktop_capture", "window_list", "window_focus",
     "desktop_click", "desktop_drag", "desktop_scroll", "desktop_type", "desktop_key", "clipboard_read", "clipboard_write",
-    "document_info", "document_read", "document_preview"
+    "document_info", "document_read", "document_preview", "artifact_download", "artifact_upload"
 };
 
 const char *sb_project_tool_name(size_t index) {
@@ -60,7 +60,7 @@ sb_policy_result sb_project_evaluate(const sb_request_context *context, const sb
     if (operation->identity < SB_ID_RESTRICTED || operation->identity > SB_ID_ADMINISTRATOR)
         return result(SB_DECISION_DENY, "invalid_identity");
     bool command = tool == 8 || tool == 11;
-    bool write = tool == 6 || tool == 7;
+    bool write = tool == 6 || tool == 7 || tool == 31;
     bool directory_owned = false;
     for (size_t i = 0; i < project->directory_count; ++i)
         if (operation->directory == &project->directories[i]) directory_owned = true;

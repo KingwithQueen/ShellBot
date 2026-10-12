@@ -278,7 +278,7 @@ static bool legacy_parse(sb_project *project, yyjson_val *value, sb_error *error
         config.execution_profile == SB_EXEC_ADMINISTRATOR ? SB_ID_ADMINISTRATOR : SB_ID_CURRENT_USER;
     project->policy.execution_enabled = config.execution_enabled;
     project->policy.administrator_allowed = config.execution_enabled && config.execution_profile == SB_EXEC_ADMINISTRATOR;
-    project->policy.tools = (UINT32_C(1) << SB_PROJECT_TOOL_COUNT) - 1;
+    project->policy.tools = UINT32_MAX;
     project->approval_ttl_seconds = config.approval_ttl_seconds;
     project->audit_max_bytes = config.audit_max_bytes;
     yyjson_val *roots = yyjson_obj_get(value, "roots");

@@ -6,11 +6,11 @@ Windows 工程 WinShellBot 优先面向 Windows 10/11 x64。通用 C 核心与 W
 
 后续开发按已确认的多项目和独立权限方案推进，见 [开发计划](docs/DEVELOPMENT_PLAN.md)及 [项目权限与执行身份](docs/EXECUTION_PERMISSIONS.md)。dev.13 接通 M6 审批与持久历史，dev.14 提供 [M7 原生项目管理窗口与独立候选包](docs/PROJECT_MANAGEMENT_UI.md)。独立系统、另一设备与真实 MCP 客户端仍待验收。
 
-首次使用请阅读 [使用说明](docs/USER_GUIDE.md)，包含候选包启动、客户端连接、文件与命令权限、审批、管理员和数据保留。M1–M7 的本机开发已完成，dev.15 增加桌面工具，dev.16 增加图像完整解码与缩放，dev.17 增加 PDF / Office 阅读与预览；独立验收继续按计划推进。
+首次使用请阅读 [使用说明](docs/USER_GUIDE.md)，包含候选包启动、客户端连接、文件与命令权限、审批、管理员和数据保留。M1–M7 的本机开发已完成，dev.15 增加桌面工具，dev.16 增加图像完整解码与缩放，dev.17 增加 PDF / Office 阅读与预览，dev.18 增加受控产物上传和下载；独立验收继续按计划推进。
 
 ## 当前实现
 
-当前源码版本为 `0.1.0-dev.17`，新增 [M10 PDF / Office 阅读与预览](docs/DOCUMENT_READING.md)，是开发版本。原 dev.14 冻结候选包不包含 M8–M10；验证边界见 [M10 交接](docs/HANDOFF_20261011_M10.md)。程序只监听本机端口，域名与 cloudflared 隧道由已有环境完成，不要求域名检查；OAuth 与隧道管理暂缓。已实现：
+当前源码版本为 `0.1.0-dev.18`，新增 [M11 受控产物上传和下载](docs/ARTIFACT_TRANSFER.md)，是开发版本。原 dev.14 冻结候选包不包含 M8–M11；验证边界见 [M11 交接](docs/HANDOFF_20261012_M11.md)。程序只监听本机端口，域名与 cloudflared 隧道由已有环境完成，不要求域名检查；OAuth 与隧道管理暂缓。已实现：
 
 | 能力 | 当前行为 |
 | --- | --- |
@@ -21,6 +21,7 @@ Windows 工程 WinShellBot 优先面向 Windows 10/11 x64。通用 C 核心与 W
 | fs_search | 文件名或 UTF-8/UTF-16 内容的字面量搜索，可选递归，内容结果包含行号与有界片段 |
 | image_view | 完整解码 PNG/JPEG；可按长边保持比例缩小，较大源自动转为有界 PNG；返回实际尺寸与源/输出摘要 |
 | document_info / document_read / document_preview | PDF 页面信息、文本与页面 PNG；DOCX 正文、XLSX 工作表存储值、PPTX 幻灯片文本及明确标注的内容预览；旧 Office 格式提示转换 |
+| artifact_download / artifact_upload | 新格式项目的二进制分块下载与上传；单文件 64 MiB，块 32 KiB；上传核对大小及 SHA-256 后创建新文件、禁止覆盖；范围、只读、审批和后端归属独立核验 |
 | fs_write / fs_patch | 默认创建；覆盖和替换保留原始哈希、独占打开与私有备份；UTF-8 原文与结果均限 64 KiB；新项目按独立审批模式执行 |
 | 本机审批 | 查看完整请求、批准、拒绝、撤销、过期、绑定参数、并发重试与重启失效 |
 | 审批和写入审计 | 私有 JSONL 记录状态、执行结果和备份编号，跨重启保留，日志故障时阻止新批准和写入 |
@@ -67,8 +68,8 @@ python .\tests\smoke.py --exe .\out\x64\Release\WinShellBot.exe
 .\scripts\test.ps1 -Configuration Release
 # 分别验证核心功能，明确排除仍在调查的关闭连接诊断：
 .\scripts\test.ps1 -Configuration Release -SkipCloseProbe
-# 同时回归图像和 PDF / Office：
-.\scripts\test.ps1 -Configuration Release -SkipCloseProbe -Images -Documents
+# 同时回归图像、PDF / Office 和产物传输，不请求 UAC：
+.\scripts\test.ps1 -Configuration Release -SkipCloseProbe -Images -Documents -Transfers
 # 核心报告必须匹配当前 Release 程序才能生成测试包：
 # M7 独立候选包要求当前源码、M1–M7 与实际窗口/UAC 收据。
 .\scripts\package-candidate.ps1
@@ -131,7 +132,7 @@ fs_search 的 mode 默认 filename；设为 content 可以搜索 UTF-8/UTF-16 �
 
 已确认采用普通权限管理器、每项目独立工作进程和 /projects/{project_id}/mcp 链接；各项目独立凭据、多个工作目录、任务与审计。审批提供 always、workspace_auto、never 三种模式，目录外访问与管理员使用许可独立设置。共享管理员代理只服务已获所有者授权的项目，一个项目获准不使其他项目拥有管理员权限；cwd 不是命令沙箱，受限执行通过验证前保持不可用。
 
-当前假定外部访问环境已经准备好，程序监听本地端口，域名由外部代理完成；public_url 是可选限制和地址报告功能。现有 bearer、目录权限与所有者审批继续使用，不要求域名检查。M8 提供普通会话桌面工具，M10 提供文档阅读；受控产物传输和其他平台按后续阶段推进。
+当前假定外部访问环境已经准备好，程序监听本地端口，域名由外部代理完成；public_url 是可选限制和地址报告功能。现有 bearer、目录权限与所有者审批继续使用，不要求域名检查。M8 提供普通会话桌面工具，M10 提供文档阅读，M11 提供受控产物传输。传输由客户端组装或发送 Base64 块，没有匿名下载 URL 或自动客户端附件接入；旧 --config 和 legacy_config 不开放传输。管理员传输专项待用户方便时人工验证；其他平台按后续阶段推进。
 
 | 位置 | 内容 |
 | --- | --- |

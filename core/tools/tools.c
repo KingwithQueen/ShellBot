@@ -6,6 +6,8 @@
 
 typedef struct { const char *name; const char *description; const char *schema; } tool_definition;
 static const tool_definition definitions[] = {
+    {"artifact_download", "Transfer an authorized binary file up to 64 MiB in bounded Base64 chunks. Versioned projects only. open requires workspace_id/path and request_key; optional expected_sha256/ttl_seconds. Approval precedes all source bytes. read requires transfer_id and offset, optionally max_bytes up to 32768; continue at next_offset, retry only the last chunk. status/cancel require transfer_id. Bound to caller, project and backend; no anonymous URL or client attachment integration.", "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"open\",\"read\",\"status\",\"cancel\"]},\"workspace_id\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"request_key\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":64},\"transfer_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32},\"offset\":{\"type\":\"integer\",\"minimum\":0},\"expected_sha256\":{\"type\":\"string\",\"minLength\":64,\"maxLength\":64},\"ttl_seconds\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":900},\"max_bytes\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":32768}},\"required\":[\"action\"],\"additionalProperties\":false}"},
+    {"artifact_upload", "Upload a binary file up to 64 MiB to a NEW authorized destination. Versioned projects only, write permission mandatory. open requires workspace_id/path, request_key, exact size and expected_sha256 before approval/staging. write requires transfer_id, offset, canonical data_base64 up to 32768 decoded bytes. Append at next_offset; retry only identical last bytes. commit verifies complete size/SHA-256 then creates the file, never overwrites. status/cancel require transfer_id. Expiry/revoke/restart cannot resume staging.", "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"open\",\"write\",\"commit\",\"status\",\"cancel\"]},\"workspace_id\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"request_key\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":64},\"transfer_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32},\"offset\":{\"type\":\"integer\",\"minimum\":0},\"expected_sha256\":{\"type\":\"string\",\"minLength\":64,\"maxLength\":64},\"ttl_seconds\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":900},\"size\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":67108864},\"data_base64\":{\"type\":\"string\",\"maxLength\":43692}},\"required\":[\"action\"],\"additionalProperties\":false}"},
     {"host_info", "Report ShellBot version, native OS and uptime.", "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"},
     {"host_capabilities", "Report implemented tools, workspace permissions, limits and pending features.", "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"},
     {"fs_write", "Create UTF-8 text by default. Existing-file overwrite requires overwrite:true and expected_sha256, a private backup and local owner approval. Inspect/approve locally, then retry identical arguments with approval_id. read_only:false is required. Overwrite is a locked in-place edit with backup, not an atomic save.",
@@ -46,6 +48,7 @@ static yyjson_mut_val *tools_list(yyjson_mut_doc *doc, bool approvals) {
     yyjson_mut_obj_add_val(doc, result, "tools", array);
     for (size_t i = 0; i < tool_count(); ++i) {
         if (!approvals && !strncmp(definitions[i].name,"approval_",9)) continue;
+        if (!approvals && sb_transfer_tool(definitions[i].name)) continue;
         yyjson_mut_val *tool = yyjson_mut_obj(doc);
         yyjson_mut_obj_add_str(doc, tool, "name", definitions[i].name);
         yyjson_mut_obj_add_str(doc, tool, "description", definitions[i].description);
@@ -55,7 +58,7 @@ static yyjson_mut_val *tools_list(yyjson_mut_doc *doc, bool approvals) {
         yyjson_doc_free(schema);
         yyjson_mut_val *annotations = yyjson_mut_obj(doc);
         bool task_tool=!strncmp(definitions[i].name,"task_",5);
-        bool modifying = !strcmp(definitions[i].name, "fs_write") || !strcmp(definitions[i].name, "fs_patch") || !strcmp(definitions[i].name,"task_start") || !strcmp(definitions[i].name,"task_input") || !strcmp(definitions[i].name,"task_cancel") || !strcmp(definitions[i].name,"approval_cancel");
+        bool modifying = !strcmp(definitions[i].name,"artifact_upload") || !strcmp(definitions[i].name, "fs_write") || !strcmp(definitions[i].name, "fs_patch") || !strcmp(definitions[i].name,"task_start") || !strcmp(definitions[i].name,"task_input") || !strcmp(definitions[i].name,"task_cancel") || !strcmp(definitions[i].name,"approval_cancel");
         yyjson_mut_obj_add_bool(doc, annotations, "readOnlyHint", !modifying);
         yyjson_mut_obj_add_bool(doc, annotations, "destructiveHint", modifying);
         yyjson_mut_obj_add_bool(doc, annotations, "idempotentHint", task_tool || !modifying);
@@ -68,6 +71,7 @@ static yyjson_mut_val *tools_list(yyjson_mut_doc *doc, bool approvals) {
 yyjson_mut_val *sb_tools_list(yyjson_mut_doc *doc) { return tools_list(doc,false); }
 
 static bool project_tool_visible(sb_host *host, const char *name) {
+    if (sb_transfer_tool(name) && (!host->project || host->project->legacy_compatibility)) return false;
     if (!host->project) return true;
     int index = sb_project_tool_index(name);
     if (index >= SB_DESKTOP_TOOL_FIRST && index < SB_DESKTOP_TOOL_END) return sb_desktop_tool_visible(host,name);
@@ -84,7 +88,7 @@ yyjson_mut_val *sb_project_tools_list(sb_host *host, yyjson_mut_doc *doc) {
         yyjson_mut_val *tool = yyjson_mut_arr_get(tools,i-1);
         const char *name = yyjson_mut_get_str(yyjson_mut_obj_get(tool, "name"));
         if (!project_tool_visible(host, name)) yyjson_mut_arr_remove(tools, i - 1);
-        else if (!host->project->legacy_compatibility && (strncmp(name,"fs_",3) == 0 || !strcmp(name,"image_view") || sb_document_tool(name) || !strncmp(name,"task_",5) || !strncmp(name,"approval_",9))) {
+        else if (!host->project->legacy_compatibility && (strncmp(name,"fs_",3) == 0 || !strcmp(name,"image_view") || sb_document_tool(name) || sb_transfer_tool(name) || !strncmp(name,"task_",5) || !strncmp(name,"approval_",9))) {
             yyjson_mut_val *schema = yyjson_mut_obj_get(tool,"inputSchema"), *properties = yyjson_mut_obj_get(schema,"properties");
             yyjson_mut_val *identity = yyjson_mut_obj(doc), *choices = yyjson_mut_arr(doc);
             yyjson_mut_obj_add_str(doc,identity,"type","string");
@@ -103,11 +107,11 @@ yyjson_mut_val *sb_project_tools_list(sb_host *host, yyjson_mut_doc *doc) {
             if (!strncmp(name,"approval_",9)) continue;
             const char *policy_description="Project policy controls this operation. Administrator operations require identity:administrator and a manager-owned shared agent with owner project permission. Keep this identity on task status/output/input/cancel too. Pending replies contain approval_id; the local owner uses the matching ordinary or administrator approval channel. Keep arguments identical; file pages use next_offset and the same approval_id. With current_user file scope, omit workspace_id for an absolute local path. Read-only grants, expected hashes and private backups still apply.";
             char document_description[2048];
-            if (sb_document_tool(name)) {
+            if (sb_document_tool(name) || sb_transfer_tool(name)) {
                 snprintf(document_description,sizeof(document_description),"%s %s",yyjson_mut_get_str(yyjson_mut_obj_get(tool,"description")),policy_description);
             }
             yyjson_mut_obj_remove_str(tool,"description");
-            if (sb_document_tool(name)) yyjson_mut_obj_add_strcpy(doc,tool,"description",document_description);
+            if (sb_document_tool(name) || sb_transfer_tool(name)) yyjson_mut_obj_add_strcpy(doc,tool,"description",document_description);
             else yyjson_mut_obj_add_str(doc,tool,"description",policy_description);
         }
     }
@@ -159,9 +163,9 @@ static bool arguments_valid(const tool_definition *definition, yyjson_val *args,
         (void)value;
         const char *name = sb_string(key);
         bool project_approval = host->project && !host->project->legacy_compatibility && name && !strcmp(name,"approval_id") &&
-            (strncmp(definition->name,"fs_",3) == 0 || !strcmp(definition->name,"image_view") || sb_document_tool(definition->name) || !strcmp(definition->name,"task_start") || !strcmp(definition->name,"task_input"));
+            (strncmp(definition->name,"fs_",3) == 0 || !strcmp(definition->name,"image_view") || sb_document_tool(definition->name) || sb_transfer_tool(definition->name) || !strcmp(definition->name,"task_start") || !strcmp(definition->name,"task_input"));
         bool project_identity = host->project && !host->project->legacy_compatibility && name && !strcmp(name,"identity") &&
-            (strncmp(definition->name,"fs_",3) == 0 || !strcmp(definition->name,"image_view") || sb_document_tool(definition->name) || !strncmp(definition->name,"task_",5) || !strncmp(definition->name,"approval_",9));
+            (strncmp(definition->name,"fs_",3) == 0 || !strcmp(definition->name,"image_view") || sb_document_tool(definition->name) || sb_transfer_tool(definition->name) || !strncmp(definition->name,"task_",5) || !strncmp(definition->name,"approval_",9));
         if (!name || (!yyjson_obj_get(properties, name) && !project_approval && !project_identity)) { valid = false; break; }
         yyjson_obj_iter it = yyjson_obj_iter_with(args);
         for (size_t j = 0; j < idx; ++j) if (!strcmp(name, yyjson_get_str(yyjson_obj_iter_next(&it)))) valid = false;
@@ -284,6 +288,9 @@ static yyjson_mut_val *tool_call_inner(sb_host *host, const char *actor, const c
         yyjson_mut_obj_add_uint(doc, data, "audit_max_bytes", host->config.audit_max_bytes);
         yyjson_mut_obj_add_str(doc, data, "search_mode", "case-sensitive literal filenames or Unicode content");
         yyjson_mut_obj_add_bool(doc, data, "content_search", true);
+        yyjson_mut_obj_add_bool(doc,data,"artifact_transfer",host->project && !host->project->legacy_compatibility);
+        yyjson_mut_obj_add_uint(doc,data,"max_transfer_bytes",SB_TRANSFER_LIMIT);
+        yyjson_mut_obj_add_uint(doc,data,"max_transfer_chunk_bytes",SB_TRANSFER_CHUNK);
         yyjson_mut_obj_add_bool(doc,data,"document_read",true);
         yyjson_mut_obj_add_bool(doc,data,"pdf_page_preview",true);
         yyjson_mut_obj_add_str(doc,data,"pdf_backend","pinned PDFium 157.0.8086.0; no V8");
@@ -310,8 +317,12 @@ static yyjson_mut_val *tool_call_inner(sb_host *host, const char *actor, const c
     if (!id && !override) return failure(doc, "workspace_id is required.");
     sb_workspace *workspace = override ? override : sb_workspace_find(&host->config, id);
     if (!workspace) return failure(doc, "Unknown workspace_id.");
+    if(sb_transfer_tool(name)) {
+        bool failed;yyjson_mut_val *value=sb_transfer_call(host,actor,name,args,doc,workspace,path_override?path_override:path,sb_string(yyjson_obj_get(args,"approval_id")),&failed);
+        return content_result(doc,value,failed);
+    }
     if (!path && yyjson_obj_get(args, "path")) return failure(doc, "path must be a string without NUL.");
-    if (!path && (!strcmp(name, "fs_read") || !strcmp(name, "image_view") || sb_document_tool(name) || !strcmp(name, "fs_write") || !strcmp(name, "fs_patch"))) return failure(doc, "path is required.");
+    if (!path && (!strcmp(name, "fs_read") || !strcmp(name, "image_view") || sb_document_tool(name) || sb_transfer_tool(name) || !strcmp(name, "fs_write") || !strcmp(name, "fs_patch"))) return failure(doc, "path is required.");
     if (!path) path = ".";
     if (path_override) path = path_override;
     sb_error error = {0};
@@ -548,6 +559,30 @@ static yyjson_mut_val *project_tool_call(sb_host *host, const char *actor, const
         yyjson_doc_free(reply); free(wire); return result;
     }
     if (host->administrator_host && !administrator) return failure(doc,"Administrator identity must be explicitly selected.");
+    if(sb_transfer_tool(name)) {
+        const char *action=sb_string(yyjson_obj_get(args,"action"));
+        static const char *const download_open[]={"action","workspace_id","path","request_key","expected_sha256","ttl_seconds","identity","approval_id"};
+        static const char *const upload_open[]={"action","workspace_id","path","request_key","expected_sha256","ttl_seconds","identity","approval_id","size"};
+        static const char *const read_keys[]={"action","transfer_id","offset","max_bytes","identity"};
+        static const char *const write_keys[]={"action","transfer_id","offset","data_base64","identity"};
+        static const char *const control_keys[]={"action","transfer_id","identity"};
+        bool upload=!strcmp(name,"artifact_upload"),opening=action && !strcmp(action,"open");
+        const char *const *keys=opening ? (upload?upload_open:download_open) : action && !strcmp(action,"read") ? read_keys : action && !strcmp(action,"write") ? write_keys : control_keys;
+        size_t count=opening ? (upload?9u:8u) : action && !strcmp(action,"read") ? 5u : action && !strcmp(action,"write") ? 5u : 3u;
+        if(!action || !sb_config_keys(args,keys,count))return failure(doc,"Invalid arguments for transfer action.");
+        if(!opening) {
+            int index=sb_project_tool_index(name);
+            bool cleanup=!strcmp(action,"status") || !strcmp(action,"cancel");
+            if(!cleanup && (!project->enabled || !(project->policy.tools&(UINT32_C(1)<<index))))return failure(doc,"Transfer permission was revoked.");
+            bool failed;yyjson_mut_val *value=sb_transfer_call(host,actor,name,args,doc,NULL,NULL,NULL,&failed);
+            return content_result(doc,value,failed);
+        }
+        if(!sb_string(yyjson_obj_get(args,"path")))return failure(doc,"Transfer open requires a path.");
+        const char *key=sb_string(yyjson_obj_get(args,"request_key"));char hash[65];uint64_t ttl,size;
+        if(!key || !*key || strlen(key)>64 || !number(args,"ttl_seconds",300,1,900,&ttl) ||
+            (upload && (!sb_integer(yyjson_obj_get(args,"size"),&size) || size>SB_TRANSFER_LIMIT || !expected_hash(args,hash))) ||
+            (!upload && yyjson_obj_get(args,"expected_sha256") && !expected_hash(args,hash)))return failure(doc,"Transfer open requires a request_key, bounded expiry and valid size/checksum metadata.");
+    }
     if (!strcmp(name,"approval_status") || !strcmp(name,"approval_cancel")) {
         const char *id=sb_string(yyjson_obj_get(args,"approval_id"));
         char *wire=sb_policy_caller_request(host->policy,actor,!strcmp(name,"approval_cancel") ? "cancel" : "status",id);
@@ -570,7 +605,7 @@ static yyjson_mut_val *project_tool_call(sb_host *host, const char *actor, const
     const char *id = sb_string(yyjson_obj_get(args,"workspace_id")), *path = sb_string(yyjson_obj_get(args,"path"));
     if (!strcmp(name,"task_start") && sb_store_task_repeated(host->store,actor,sb_string(yyjson_obj_get(args,"request_key"))))
         return failure(doc,"This request_key belongs to a retained task from an earlier backend instance. Review owner history and actual effects before explicitly using a new key. No task was replayed.");
-    bool file_tool = !strncmp(name,"fs_",3) || !strcmp(name,"image_view") || sb_document_tool(name);
+    bool file_tool = !strncmp(name,"fs_",3) || !strcmp(name,"image_view") || sb_document_tool(name) || sb_transfer_tool(name);
     sb_workspace account = {0}, *workspace = id ? sb_workspace_find(&host->config,id) : NULL;
     const sb_project_directory *directory = sb_project_directory_find(project,id);
     char *relative = NULL; sb_error error = {0}; yyjson_mut_val *result = NULL;
@@ -604,7 +639,7 @@ static yyjson_mut_val *project_tool_call(sb_host *host, const char *actor, const
     }
     if(!path) path=".";
     bool directory_target=!strcmp(name,"fs_list") || !strcmp(name,"fs_search") || !strcmp(name,"task_start");
-    bool create=!strcmp(name,"fs_write") && !yyjson_get_bool(yyjson_obj_get(args,"overwrite"));
+    bool create=(!strcmp(name,"fs_write") && !yyjson_get_bool(yyjson_obj_get(args,"overwrite"))) || !strcmp(name,"artifact_upload");
     char version[65]={0}, target_version[65]={0},program_version[65]={0}, target[256],ticket[33]={0};
     char parent_id[50]={0};
     if(file_tool || !strcmp(name,"task_start")) {
@@ -630,6 +665,7 @@ static yyjson_mut_val *project_tool_call(sb_host *host, const char *actor, const
     else if(!strcmp(name,"fs_search")) { if(!number(args,"max_total_bytes",16777216,4,16777216,&budget)){result=failure(doc,"Invalid search budget.");goto done;} }
     else if(!strcmp(name,"image_view"))budget=SB_IMAGE_INPUT_LIMIT;
     else if(sb_document_tool(name))budget=SB_DOCUMENT_INPUT_LIMIT;
+    else if(sb_transfer_tool(name))budget=SB_TRANSFER_LIMIT;
     else if(!strcmp(name,"fs_write") || !strcmp(name,"fs_patch"))budget=SB_TEXT_LIMIT;
     if(!file_tool && decision.decision==SB_DECISION_ALLOW && !yyjson_obj_get(args,"approval_id")) {
         host->approved_target_version=target_version;host->approved_program_version=*program_version?program_version:NULL;
@@ -644,7 +680,7 @@ static yyjson_mut_val *project_tool_call(sb_host *host, const char *actor, const
     result=tool_call_inner(host,actor,name,args,doc,workspace==&account ? &account : NULL,workspace==&account ? path : NULL,true);
     host->approved_target_version=NULL;host->approved_program_version=NULL;
     /* Content is kept in the worker until the physical snapshot is checked again. */
-    if(file_tool && strncmp(name,"fs_write",8) && strcmp(name,"fs_patch") && !yyjson_mut_get_bool(yyjson_mut_obj_get(result,"isError"))) {
+    if(file_tool && strncmp(name,"fs_write",8) && strcmp(name,"fs_patch") && strcmp(name,"artifact_upload") && !yyjson_mut_get_bool(yyjson_mut_obj_get(result,"isError"))) {
         char after[65]; if(!sb_platform_target_version(workspace->root,path,directory_target,false,!strcmp(name,"fs_search") && yyjson_get_bool(yyjson_obj_get(args,"recursive")),after,&error) || strcmp(version,after))
             result=failure(doc,"Physical target changed while accessing it; no content returned.");
     }
@@ -664,7 +700,8 @@ done:
 }
 
 yyjson_mut_val *sb_tool_call(sb_host *host, const char *actor, const char *name, yyjson_val *args, yyjson_mut_doc *doc) {
-    bool file=host->project && !host->project->legacy_compatibility && (!strncmp(name,"fs_",3) || !strcmp(name,"image_view") || sb_document_tool(name));
+    bool file=host->project && !host->project->legacy_compatibility && (!strncmp(name,"fs_",3) || !strcmp(name,"image_view") || sb_document_tool(name) || sb_transfer_tool(name));
+    if(sb_transfer_tool(name)) {const char *action=sb_string(yyjson_obj_get(args,"action"));if(action && (!strcmp(action,"cancel") || !strcmp(action,"status")))file=false;}
     const char *identity=sb_string(yyjson_obj_get(args,"identity"));
     /* The ordinary forwarding worker cannot claim it accessed admin content. */
     if (file && identity && !strcmp(identity,"administrator") && !host->administrator_host) file=false;

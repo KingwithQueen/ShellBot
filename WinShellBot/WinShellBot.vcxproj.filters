@@ -38,6 +38,7 @@
     <ClCompile Include="..\core\policy\project_policy.c"><Filter>源文件</Filter></ClCompile>
     <ClCompile Include="..\core\protocol\mcp.c"><Filter>源文件</Filter></ClCompile>
     <ClCompile Include="..\core\tools\tools.c"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="..\core\tools\transfer.c"><Filter>源文件</Filter></ClCompile>
     <ClCompile Include="..\core\tools\image.c"><Filter>源文件</Filter></ClCompile>
     <ClCompile Include="..\core\tools\png_validate.c"><Filter>源文件</Filter></ClCompile>
     <ClCompile Include="platform\image.c"><Filter>源文件</Filter></ClCompile>

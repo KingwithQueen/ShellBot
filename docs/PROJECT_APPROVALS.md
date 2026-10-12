@@ -4,9 +4,9 @@
 
 ## 三种模式与范围
 
-| 模式 | 文件工具（含文档阅读） | task_start / task_input |
+| 模式 | 文件工具（含文档阅读及传输 open） | task_start / task_input |
 | --- | --- | --- |
-| always | 列表、读取、搜索、图像、文档信息/阅读/预览、创建、修改均待批准 | 待批准 |
+| always | 列表、读取、搜索、图像、文档信息/阅读/预览、创建、修改及上传/下载 open 均待批准 | 待批准 |
 | workspace_auto | 工作目录按读写许可自动；额外目录和账户其他位置待批准 | 待批准 |
 | never | 授予范围内自动；不会增加范围、工具或写权限 | 已启用身份内自动 |
 
@@ -39,6 +39,8 @@ $bot = 'E:/Program/ShellBot/out/x64/Release/WinShellBot.exe'
 fs_read 单页最多 64 KiB，同一许可总计最多 1 MiB；fs_list 单页最多 200 条，同一许可最多 1000 条。后续页只允许返回的 next_offset，保留原页面大小及范围，可传返回的 encoding；同页重试返回原页，不能跳页。文件或目录对象版本变化需要新批准；许可到期后不能继续读取，即使旧页有缓存。搜索保留原扫描、读取字节与时间预算，图像最多 2 MiB/头部 1600 万像素。超过回执缓存的图像，在原期限和相同物理版本内重新读取并返回相同图像，不重复消耗预算。
 
 dev.16 image_view 改为先完整解码，源最多 16 MiB / 16,777,216 像素，输出最多 2 MiB。dev.17 的 document_info / document_read / document_preview 在批准前只检查文件对象元数据，不解析页数、工作表名称、文本或图片；源最多 32 MiB。document_read 的许可绑定一个 unit、参数及源版本，单页最多 64 KiB、总提取/分页最多 1 MiB，仅能沿 next_offset 继续；改换 PDF 页、工作表或幻灯片需新许可。文档预览输出 PNG 最多 2 MiB，超出 512 KiB 回执缓存的只读结果仍在原许可/版本内重新生成，只计量一次。详见 [文档阅读](DOCUMENT_READING.md)。
+
+dev.18 的 artifact_download / artifact_upload 由 open 申请一份完整传输许可，最多 64 MiB，不使用 fs_read 的 1 MiB 分页总量。下载批准前只核验对象元数据；上传许可绑定目标及物理父目录、准确大小、SHA-256、request_key 和期限。批准后才打开内容或创建私有暂存。后续块沿 next_offset 继续，至多重试最近一块，始终核验原 actor、项目、后端、期限和原许可。所有者可在 open 已完成后撤销许可，阻止后续读取、写块和新提交；原已成功 commit 的重试只返回历史回执，不再次写入。status/cancel 仍允许本人查询/清理；已提交文件不会因取消而删除。普通与管理员批准池及传输编号独立，实际管理员传输本轮待人工验证，见 [产物传输](ARTIFACT_TRANSFER.md)。
 
 写入和修改重试返回同一回执及原备份，不再修改；已完成任务启动重试返回原 task_id、created_new:false。同实例、同 actor、相同参数的文件修改视为同一逻辑操作；要执行不同修改，须使用新的准确内容/原始哈希，不要把旧完成回执当作文件当前状态。task_start 使用 request_key，task_input 使用 input_key，输入精确文本和 EOF 只发送一次。审计故障阻止新操作；状态和取消仍按既有任务归属提供。
 

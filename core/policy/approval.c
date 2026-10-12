@@ -59,7 +59,7 @@ static bool audit_record(sb_policy *policy, record *r, const char *event, const 
     return ok;
 }
 static bool logical_read(const record *r) {
-    return r->logical && ((!strncmp(r->tool,"fs_",3) && strcmp(r->tool,"fs_write") && strcmp(r->tool,"fs_patch")) || !strcmp(r->tool,"image_view") || sb_document_tool(r->tool) ||
+    return r->logical && ((!strncmp(r->tool,"fs_",3) && strcmp(r->tool,"fs_write") && strcmp(r->tool,"fs_patch")) || !strcmp(r->tool,"image_view") || sb_document_tool(r->tool) || sb_transfer_tool(r->tool) ||
         !strcmp(r->tool,"desktop_capture") || !strcmp(r->tool,"desktop_state") || !strcmp(r->tool,"window_list") || !strcmp(r->tool,"clipboard_read"));
 }
 static void expire(sb_policy *policy, record *r) {
@@ -71,6 +71,13 @@ static void expire(sb_policy *policy, record *r) {
 static record *find(sb_policy *policy, const char *id) {
     for (size_t i = 0; i < policy->record_limit; ++i) if (*policy->records[i].id && !strcmp(policy->records[i].id, id)) return &policy->records[i];
     return NULL;
+}
+bool sb_policy_transfer_valid(sb_policy *policy,const char *ticket,const char *actor) {
+    if(!policy || !ticket || !*ticket)return false;
+    sb_platform_mutex_lock(policy->mutex);record *r=find(policy,ticket);
+    if(r)expire(policy,r);
+    bool ok=r && r->logical && sb_transfer_tool(r->tool) && !strcmp(r->actor,actor) && r->status==COMPLETED && sb_platform_millis()<r->deadline;
+    sb_platform_mutex_unlock(policy->mutex);return ok;
 }
 static yyjson_mut_val *error_data(yyjson_mut_doc *doc, const char *message) {
     yyjson_mut_val *data = yyjson_mut_obj(doc);

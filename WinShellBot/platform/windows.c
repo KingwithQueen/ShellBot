@@ -413,7 +413,7 @@ void sb_platform_lease_close(sb_lease *lease) {
     if (lease) { CloseHandle(lease->handle); sb_platform_root_close(lease->root); free(lease); }
 }
 
-sb_journal *sb_platform_journal_open(sb_lease *lease, const char *filename, sb_error *error) {
+static sb_journal *protected_file(sb_lease *lease, const char *filename, bool temporary, sb_error *error) {
     wchar_t *name = wide(filename);
     if (!lease || !name || !*name || wcspbrk(name, L"\\/:*?\"<>|")) {
         free(name); sb_fail(error, "Invalid audit journal name."); return NULL;
@@ -445,8 +445,8 @@ sb_journal *sb_platform_journal_open(sb_lease *lease, const char *filename, sb_e
     IO_STATUS_BLOCK io = {0}; HANDLE handle = NULL;
     /* Create-new relative to the pinned directory, never open a pre-existing link.
        Only readers may share the handle. Protected DACL excludes inherited grants. */
-    NTSTATUS status = secured && create ? create(&handle, GENERIC_WRITE | SYNCHRONIZE, &attributes, &io, NULL,
-        FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, 2, 0x00200060, NULL, 0) : (NTSTATUS)-1;
+    NTSTATUS status = secured && create ? create(&handle, GENERIC_WRITE | SYNCHRONIZE | (temporary ? GENERIC_READ | DELETE : 0), &attributes, &io, NULL,
+        FILE_ATTRIBUTE_NORMAL, temporary ? 0 : FILE_SHARE_READ, 2, 0x00200060 | (temporary ? 0x1000 : 0), NULL, 0) : (NTSTATUS)-1;
     if (descriptor) LocalFree(descriptor);
     free(name);
     if (status < 0) { sb_fail(error, "Cannot create a protected audit journal."); return NULL; }
@@ -464,6 +464,22 @@ sb_journal *sb_platform_journal_open(sb_lease *lease, const char *filename, sb_e
     sb_journal *journal = valid ? malloc(sizeof(*journal)) : NULL;
     if (!journal) { CloseHandle(handle); sb_fail(error, "Audit storage requires a protected file ACL."); return NULL; }
     journal->handle = handle; return journal;
+}
+sb_journal *sb_platform_journal_open(sb_lease *lease,const char *name,sb_error *error) { return protected_file(lease,name,false,error); }
+sb_file *sb_platform_transfer_spool(sb_lease *lease,sb_error *error) {
+    unsigned char nonce[16];char name[64]="transfer-";
+    if(!sb_platform_random(nonce,sizeof(nonce),error))return NULL;
+    for(size_t i=0;i<sizeof(nonce);++i)snprintf(name+9+i*2,3,"%02x",nonce[i]);strcat(name,".tmp");
+    sb_journal *journal=protected_file(lease,name,true,error);sb_file *file=journal ? calloc(1,sizeof(*file)) : NULL;
+    if(!file){sb_platform_journal_close(journal);return NULL;}
+    file->handle=journal->handle;file->path=final_path(file->handle);free(journal);
+    if(!file->path){sb_platform_close(file);return NULL;}return file;
+}
+bool sb_platform_spool_append(sb_file *file,const unsigned char *bytes,size_t length,sb_error *error) {
+    LARGE_INTEGER position;position.QuadPart=(LONGLONG)file->size;DWORD written=0;
+    bool ok=length<=SB_TRANSFER_CHUNK && file->size+length<=SB_TRANSFER_LIMIT &&
+        SetFilePointerEx(file->handle,position,NULL,FILE_BEGIN) && WriteFile(file->handle,bytes,(DWORD)length,&written,NULL) && written==length;
+    if(ok)file->size+=length;else sb_fail(error,"Private transfer write failed; cancel this upload.");return ok;
 }
 
 bool sb_platform_journal_append(sb_journal *journal, const char *line, size_t length, sb_error *error) {
@@ -688,7 +704,7 @@ void sb_platform_create_close(sb_create *plan) {
     if (plan) { sb_platform_close(plan->parent); free(plan->leaf); free(plan->target); free(plan); }
 }
 
-bool sb_platform_create_text(sb_create *plan, const char *text, size_t length, sb_error *error) {
+static bool create_bytes(sb_create *plan, const char *text, size_t length, sb_file *source, sb_error *error) {
     /* Native relative opens anchor all mutations to the already validated directory.
        A lexical path/reparse change cannot redirect these operations elsewhere. */
     typedef NTSTATUS (NTAPI *create_fn)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PIO_STATUS_BLOCK,
@@ -702,7 +718,7 @@ bool sb_platform_create_text(sb_create *plan, const char *text, size_t length, s
     _Static_assert(sizeof(create) == sizeof(create_address), "Native function pointer size");
     _Static_assert(sizeof(set) == sizeof(set_address), "Native function pointer size");
     memcpy(&create, &create_address, sizeof(create)); memcpy(&set, &set_address, sizeof(set));
-    if (!create || !set || length > SB_TEXT_LIMIT) { sb_fail(error, "Native anchored creation is unavailable."); return false; }
+    if (!create || !set || length > (source ? SB_TRANSFER_LIMIT : SB_TEXT_LIMIT)) { sb_fail(error, "Native anchored creation is unavailable."); return false; }
     unsigned char random[16];
     if (!sb_platform_random(random, sizeof(random), error)) return false;
     wchar_t temporary[64];
@@ -720,8 +736,14 @@ bool sb_platform_create_text(sb_create *plan, const char *text, size_t length, s
         FILE_ATTRIBUTE_NORMAL, 0, 2, 0x00200060, NULL, 0);
     if (status < 0) { sb_fail(error, "Cannot create a temporary file in the approved parent directory."); return false; }
     DWORD written = 0;
-    bool ok = GetFileType(file) == FILE_TYPE_DISK && WriteFile(file, text, (DWORD)length, &written, NULL) &&
-        written == length && FlushFileBuffers(file);
+    bool ok = GetFileType(file) == FILE_TYPE_DISK;
+    if(source) {
+        unsigned char *buffer=malloc(SB_TRANSFER_CHUNK);uint64_t offset=0;ok=ok && buffer;
+        while(ok && offset<length){size_t got=0;ok=sb_platform_read(source,offset,buffer,SB_TRANSFER_CHUNK,&got,error) && got &&
+            WriteFile(file,buffer,(DWORD)got,&written,NULL) && written==got;offset+=got;}
+        free(buffer);
+    } else ok=ok && WriteFile(file,text,(DWORD)length,&written,NULL) && written==length;
+    ok=ok && FlushFileBuffers(file);
     size_t rename_size = sizeof(rename_info) + wcslen(plan->leaf) * sizeof(wchar_t);
     rename_info *rename = ok ? calloc(1, rename_size) : NULL;
     if (rename) {
@@ -740,6 +762,8 @@ bool sb_platform_create_text(sb_create *plan, const char *text, size_t length, s
     CloseHandle(file);
     return ok;
 }
+bool sb_platform_create_text(sb_create *plan,const char *text,size_t length,sb_error *error) { return create_bytes(plan,text,length,NULL,error); }
+bool sb_platform_create_file(sb_create *plan,sb_file *source,sb_error *error) { return create_bytes(plan,NULL,(size_t)sb_platform_size(source),source,error); }
 
 sb_modify *sb_platform_prepare_modify(sb_root *root, const char *relative, sb_error *error) {
     return sb_platform_prepare_modify_guarded(root,relative,NULL,error);

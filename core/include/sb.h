@@ -6,7 +6,9 @@
 #include <stdint.h>
 #include "yyjson.h"
 
-#define SB_VERSION "0.1.0-dev.17"
+#define SB_VERSION "0.1.0-dev.18"
+#define SB_TRANSFER_LIMIT (64u * 1024u * 1024u)
+#define SB_TRANSFER_CHUNK 32768u
 #define SB_MAX_ROOTS 16
 #define SB_MAX_WORKSPACES (SB_MAX_ROOTS * 2)
 #define SB_PATH_CAP 32768
@@ -34,6 +36,7 @@ typedef struct sb_store sb_store;
 typedef struct sb_modify sb_modify;
 typedef struct sb_execution sb_execution;
 typedef struct sb_desktop sb_desktop;
+typedef struct sb_transfers sb_transfers;
 typedef struct sb_project sb_project;
 typedef enum { SB_EXEC_CONTROLLED, SB_EXEC_USER, SB_EXEC_ADMINISTRATOR } sb_execution_profile;
 typedef enum { SB_APPROVAL_ALWAYS, SB_APPROVAL_RULES } sb_execution_approval;
@@ -77,6 +80,7 @@ typedef struct {
     uint64_t started_ms;
     sb_execution *execution;
     sb_desktop *desktop; /* Ordinary project desktop; never the elevated backend. */
+    sb_transfers *transfers;
     bool administrator_backend; /* Trusted manager status, never read from tool arguments. */
     bool administrator_host; /* Only the verified elevated project host sets this. */
     char *(*administrator_call)(void *context, const char *name, yyjson_val *arguments);
@@ -204,6 +208,9 @@ const char *sb_platform_create_target(sb_create *plan);
 const char *sb_platform_create_identity(sb_create *plan);
 bool sb_platform_create_version(sb_create *plan, char version[65], sb_error *error);
 bool sb_platform_create_text(sb_create *plan, const char *text, size_t length, sb_error *error);
+bool sb_platform_create_file(sb_create *plan, sb_file *source, sb_error *error);
+sb_file *sb_platform_transfer_spool(sb_lease *lease, sb_error *error);
+bool sb_platform_spool_append(sb_file *file, const unsigned char *bytes, size_t length, sb_error *error);
 void sb_platform_create_close(sb_create *plan);
 sb_modify *sb_platform_prepare_modify(sb_root *root, const char *relative, sb_error *error);
 sb_modify *sb_platform_prepare_modify_guarded(sb_root *root, const char *relative, const char *version, sb_error *error);
@@ -254,6 +261,12 @@ bool sb_policy_operation_begin(sb_host *host, const char *actor, const char *too
     bool approval_required, uint64_t offset, uint64_t budget, yyjson_mut_doc *doc,
     yyjson_mut_val **reply, char ticket[33]);
 bool sb_policy_operation_finish(sb_policy *policy, const char *ticket, yyjson_mut_val *result);
+bool sb_policy_transfer_valid(sb_policy *policy, const char *ticket, const char *actor);
+bool sb_transfer_tool(const char *name);
+sb_transfers *sb_transfers_new(sb_error *error);
+void sb_transfers_free(sb_transfers *transfers);
+yyjson_mut_val *sb_transfer_call(sb_host *host, const char *actor, const char *name, yyjson_val *args,
+    yyjson_mut_doc *doc, sb_workspace *workspace, const char *path, const char *ticket, bool *failed);
 yyjson_mut_val *sb_policy_write_authorized(sb_host *host, const char *actor, sb_workspace *workspace,
     const char *path, const char *text, yyjson_mut_doc *doc, bool *failed);
 yyjson_mut_val *sb_policy_modify_authorized(sb_host *host, const char *actor, sb_workspace *workspace,

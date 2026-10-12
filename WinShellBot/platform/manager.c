@@ -1049,6 +1049,7 @@ int sb_project_worker(int argc, wchar_t **argv) {
     host.policy = sb_policy_new(host.config.approval_ttl_seconds, host.audit, &error); if (!host.policy) goto done;
     sb_policy_limit(host.policy, host.config.limits.approval_records);
     sb_policy_store(host.policy,host.store);
+    host.transfers=sb_transfers_new(&error);if(!host.transfers)goto done;
     host.desktop=sb_win_desktop_new(&host,&error);
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL); if (!doc) goto done;
     yyjson_mut_val *ready = yyjson_mut_obj(doc); yyjson_mut_doc_set_root(doc, ready);
@@ -1106,7 +1107,7 @@ int sb_project_worker(int argc, wchar_t **argv) {
     }
 done:
     if (code && *error.text) { char *failure=error_json(error.text); if (failure) send_frame(pipe,failure,false,0); free(failure); }
-    free(bytes); free(data_identity); sb_win_desktop_free(host.desktop); sb_policy_free(host.policy); sb_execution_free(host.execution); sb_store_free(host.store); sb_audit_free(host.audit);
+    free(bytes); free(data_identity); sb_win_desktop_free(host.desktop); sb_transfers_free(host.transfers); sb_policy_free(host.policy); sb_execution_free(host.execution); sb_store_free(host.store); sb_audit_free(host.audit);
     sb_config_free(&host.config); sb_platform_lease_close(host.lease); sb_projects_free(&registry); CloseHandle(pipe);
     return code;
 }

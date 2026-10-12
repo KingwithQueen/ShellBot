@@ -26,7 +26,7 @@ static char *failure(const char *message) {
     char *text = yyjson_mut_write(doc, 0, NULL); yyjson_mut_doc_free(doc); return text;
 }
 static void clear(admin_project *project) {
-    sb_policy_free(project->host.policy); sb_execution_free(project->host.execution); sb_audit_free(project->host.audit);
+    sb_transfers_free(project->host.transfers); sb_policy_free(project->host.policy); sb_execution_free(project->host.execution); sb_audit_free(project->host.audit);
     sb_store_free(project->host.store);
     sb_config_free(&project->host.config); sb_platform_lease_close(project->host.lease);
     sb_projects_free(&project->registry); if (project->worker) CloseHandle(project->worker);
@@ -84,6 +84,7 @@ static char *register_project(sb_shared_admin *state, yyjson_val *root) {
     candidate.host.audit = sb_audit_new(candidate.host.lease,p->audit_max_bytes,&error); if (!candidate.host.audit) goto failed;
     candidate.host.store=sb_store_new(candidate.host.lease,p->id,p->policy_revision,instance,"administrator",&error);
     if (!candidate.host.store) goto failed;
+    candidate.host.transfers=sb_transfers_new(&error);if(!candidate.host.transfers)goto failed;
     candidate.host.policy = sb_policy_new(p->approval_ttl_seconds,candidate.host.audit,&error); if (!candidate.host.policy) goto failed;
     sb_policy_limit(candidate.host.policy,p->limits.approval_records);
     sb_policy_store(candidate.host.policy,candidate.host.store);
@@ -141,8 +142,9 @@ char *sb_shared_admin_request(sb_shared_admin *state, yyjson_val *root) {
         bool allowed=yyjson_get_bool(yyjson_obj_get(operation,"allowed"));
         project->allowed=false; project->registry.projects[0].policy.administrator_allowed=false;
         if (!sb_win_execution_cancel_all(project->host.execution)) return failure("Administrator tasks could not all be cancelled; permission remains revoked.");
+        sb_transfers_free(project->host.transfers);project->host.transfers=sb_transfers_new(&error);
         sb_policy_free(project->host.policy); project->host.policy=sb_policy_new(project->host.config.approval_ttl_seconds,project->host.audit,&error);
-        if (!project->host.policy) return failure("Administrator approvals unavailable; permission remains revoked.");
+        if (!project->host.policy || !project->host.transfers) return failure("Administrator approvals unavailable; permission remains revoked.");
         sb_policy_limit(project->host.policy,project->host.config.limits.approval_records);
         sb_policy_store(project->host.policy,project->host.store);
         if (!sb_audit_project(project->host.audit,allowed?"administrator_permission_granted":"administrator_permission_revoked",id,revision,GetProcessId(project->worker)))
