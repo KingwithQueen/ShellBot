@@ -5,6 +5,11 @@
 #include "sb.h"
 /* Windows-only declarations; native tokens never enter the portable core. */
 bool sb_win_owner_token_allowed(HANDLE token);
+bool sb_win_elevated_owner(void);
+HANDLE sb_win_ordinary_owner_token(sb_error *error);
+/* Exact non-administrator virtual service account in Session 0. Windows may
+   report TokenElevation=true for this unsplit service token. */
+bool sb_win_service_process(void);
 int sb_win_execution_agent(int argc, wchar_t **argv);
 int sb_win_owner_boundary_probe(const char *data_dir);
 sb_execution *sb_win_shared_start(sb_error *error);

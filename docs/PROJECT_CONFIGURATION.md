@@ -2,7 +2,7 @@
 
 dev.15 保持 `format_version: 1`，新增可选 `policy.desktop`，分别控制观察、输入和剪贴板；默认关闭。配置完整示例及权限边界见 [Windows 桌面工具](DESKTOP_CONTROL.md)。`tools` 还须明确包含相应工具，既有文件和任务权限不自动扩大。
 
-更新日期：2026 年 10 月 12 日。代码版本：`0.1.0-dev.18`。配置格式：`format_version: 1`。
+更新日期：2026 年 10 月 12 日。代码版本：`0.1.0-dev.19`。配置格式：`format_version: 1`。
 
 M1 完成配置与统一判断，M2/M3 接入运行和地址，M4 接通全工具审批及 LPAC，M5 接通[共享管理员代理](SHARED_ADMINISTRATOR.md)。M6 增加可选 gateway.owner_token_env 独立所有者凭据引用，见[远程审批与恢复](REMOTE_APPROVALS.md)。格式保持 1；`--config` 在创建 Data 或初始化执行身份前拒绝版本化配置。
 
@@ -41,7 +41,7 @@ policy.approval_mode 为 always、workspace_auto 或 never。always 对全部文
 
 policy.files.scope 为 configured 或 current_user。configured 仅包含工作目录和显式 extra_directories；current_user 额外允许账户可访问的文件范围，其他位置的 current_user_read_only 默认 true，必须显式 false 才能写。current_user_read_only 只可用于 current_user 范围。显式目录的 read_only 独立保留，不因全文件范围或 never 被覆盖。
 
-policy.execution 保存 enabled、default_identity、administrator_allowed 和可选 runtime_files。普通默认身份只能为 restricted 或 current_user。管理员操作须明确选择 identity:administrator；正常新配置禁止向 restricted 或 configured 隔离项目授予 administrator_allowed。许可只允许使用已由所有者启动的共享代理，不隐式请求 UAC；命令还必须开启 enabled。运行期 allow/revoke 不写回注册配置，持久更新继续导出配置并明确重启。
+policy.execution 保存 enabled、default_identity、administrator_allowed 和可选 runtime_files。普通默认身份只能为 restricted 或 current_user。管理员操作须明确选择 identity:administrator；正常新配置禁止向 restricted 或 configured 隔离项目授予 administrator_allowed。许可只允许使用所有者管理的共享代理，项目请求不隐式弹 UAC；命令还必须开启 enabled。已提升管理器可按预配置许可创建一次代理并复用已有令牌，普通启动仍须所有者明确启动代理。运行期 allow/revoke 不写回注册配置，持久更新继续导出配置并明确重启。
 
 runtime_files 只允许 restricted，最多 16 个不重复绝对文件路径。运行时限本地盘符、普通单链接文件，分别授予只读/执行，并在整个工作进程期间保持读句柄，阻止写入、删除和替换。列表中的 .exe 才能作为 task_start 程序；可以额外列出它需要的 DLL 或只读资源，不能授予整个系统目录。管理器或任一项目 Data 内的文件不可列为运行资源。ShellBot-SandboxProbe.exe 是旁置的产品启动检查依赖，由主工程自动构建，不是用户测试夹具；缺失时受限后端不可用。
 
@@ -56,6 +56,8 @@ dev.17 文档工具遵循文件范围、只读和审批策略，不要求启用 
 dev.18 传输仅用于正常新格式项目，已有项目须自行显式启用相应工具。artifact_download 允许读取授权的二进制文件；artifact_upload 还必须获得目标目录写权限，current_user 路径也保留目录只读上限。manager.example.json 只增加下载，保持只读及 always。执行权限和桌面权限无需为普通文件传输开启。旧 --config / legacy_config 不开放这两个工具，完整用法见 [产物传输](ARTIFACT_TRANSFER.md)。
 
 ## 统一判断和后续接入契约
+
+dev.19 启动配置是与注册配置分开的私有 DPAPI 快照；准备时验证当前注册配置并捕获启用项目和所有者凭据，明确选定开机/登录启动项目，既有注册文件不被改写。普通 --manager 仍要求显式启用项目，只有新的启动配置采用预先选择的列表。服务要求 configured 本地目录、独立 owner_token_env、无 legacy/desktop/administrator 及账户任意命令，其文件访问身份为实际虚拟服务账户。两模式同时运行须用独立端口和 Data，见 [常驻与自动启动](STARTUP.md) 和 [服务示例](../config/service.example.json)。原格式及 32 个 MCP 工具保持不变，自启设置不提供给 MCP。
 
 [sb_projects.h](../core/include/sb_projects.h) 定义项目、策略、目录和审批绑定结构；[project_policy.c](../core/policy/project_policy.c) 是无副作用判断入口。sb_host 和 sb_request_context 增加可信项目绑定位置；现有单实例传输不从请求填入这些字段；M2 管理器通信为工作进程固定项目和版本。
 

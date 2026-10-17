@@ -53,8 +53,9 @@ typedef struct {
     sb_owner *owner;
     sb_config gateway_config;
     sb_http_server *gateway;
+    bool service_mode, elevated;
     sb_win_desktop_session *desktop_session;
-    HANDLE stop;
+    HANDLE stop, ordinary_token;
     sb_mutex *administrator_lock;
     sb_execution *administrator;
     uint64_t administrator_generation, administrator_sequence;
@@ -89,7 +90,7 @@ static PSECURITY_DESCRIPTOR security(void) {
     GetTokenInformation(token, TokenUser, NULL, 0, &size);
     user = size ? malloc(size) : NULL;
     if (user && GetTokenInformation(token, TokenUser, user, size, &size) && ConvertSidToStringSidW(((TOKEN_USER *)user)->User.Sid, &sid)) {
-        wchar_t sddl[256]; swprintf(sddl, 256, L"D:P(A;;GA;;;SY)(A;;GA;;;%ls)", sid);
+        wchar_t sddl[256]; swprintf(sddl, 256, L"D:P(A;;GA;;;SY)(A;;GA;;;%ls)S:(ML;;NW;;;ME)", sid);
         ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &descriptor, NULL);
     }
     if (sid) LocalFree(sid);
@@ -310,9 +311,9 @@ static bool start_worker(manager *m, worker *w, sb_error *error) {
         w->pipe = CreateNamedPipeW(name, PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, 1, 65536, 65536, 0, &sa);
         if (w->pipe == INVALID_HANDLE_VALUE) w->pipe = NULL;
-        child = w->pipe ? CreateFileW(name, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
+        child = w->pipe && !m->ordinary_token ? CreateFileW(name, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
             SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, NULL) : INVALID_HANDLE_VALUE;
-        ok = w->pipe && child != INVALID_HANDLE_VALUE && SetHandleInformation(child, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+        ok = w->pipe && (m->ordinary_token || (child != INVALID_HANDLE_VALUE && SetHandleInformation(child, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)));
     }
     if (descriptor) LocalFree(descriptor);
     SIZE_T attr_size = 0; STARTUPINFOEXW startup = {0}; PROCESS_INFORMATION process = {0};
@@ -322,16 +323,24 @@ static bool start_worker(manager *m, worker *w, sb_error *error) {
     bool initialized = startup.lpAttributeList && InitializeProcThreadAttributeList(startup.lpAttributeList, 1, 0, &attr_size);
     wchar_t *env = ok ? environment(&m->registry) : NULL;
     if (ok && initialized && env) {
-        ok = UpdateProcThreadAttribute(startup.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, &child, sizeof(child), NULL, NULL) != FALSE;
-        swprintf(line, SB_PATH_CAP, L"\"%ls\" --project-worker %llu %lu", exe, (unsigned long long)(uintptr_t)child, GetCurrentProcessId());
+        if(m->ordinary_token)swprintf(line,SB_PATH_CAP,L"\"%ls\" --project-worker \"%ls\" %lu",exe,name,GetCurrentProcessId());
+        else {
+            ok = UpdateProcThreadAttribute(startup.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, &child, sizeof(child), NULL, NULL) != FALSE;
+            swprintf(line, SB_PATH_CAP, L"\"%ls\" --project-worker %llu %lu", exe, (unsigned long long)(uintptr_t)child, GetCurrentProcessId());
+        }
         w->job = CreateJobObjectW(NULL, NULL);
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
         limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_ACTIVE_PROCESS | JOB_OBJECT_LIMIT_JOB_MEMORY;
         limits.BasicLimitInformation.ActiveProcessLimit = 1024;
         limits.JobMemoryLimit = (SIZE_T)w->project->limits.worker_memory_mb * 1024 * 1024;
+        STARTUPINFOW ordinary_startup={0};ordinary_startup.cb=sizeof(ordinary_startup);
         ok = ok && w->job && SetInformationJobObject(w->job, JobObjectExtendedLimitInformation, &limits, sizeof(limits)) &&
-            CreateProcessW(exe, line, NULL, NULL, TRUE, CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
-                env, NULL, &startup.StartupInfo, &process);
+            (m->ordinary_token ?
+                CreateProcessAsUserW(m->ordinary_token,exe,line,NULL,NULL,FALSE,CREATE_SUSPENDED|CREATE_NO_WINDOW|CREATE_UNICODE_ENVIRONMENT,env,NULL,&ordinary_startup,&process) :
+                CreateProcessW(exe,line,NULL,NULL,TRUE,CREATE_SUSPENDED|CREATE_NO_WINDOW|CREATE_UNICODE_ENVIRONMENT|EXTENDED_STARTUPINFO_PRESENT,env,NULL,&startup.StartupInfo,&process));
+        if(!ok && m->ordinary_token && GetLastError()==ERROR_PRIVILEGE_NOT_HELD)
+            ok=CreateProcessWithTokenW(m->ordinary_token,0,exe,line,CREATE_SUSPENDED|CREATE_NO_WINDOW|CREATE_UNICODE_ENVIRONMENT,env,NULL,&ordinary_startup,&process)!=FALSE;
+        if (!ok && m->ordinary_token) { char message[160];snprintf(message,sizeof(message),"Ordinary worker creation failed (Windows %lu); no elevated fallback.",GetLastError());sb_fail(error,message); }
         if (ok) {
             w->process = process.hProcess; w->pid = process.dwProcessId;
             ok = AssignProcessToJobObject(w->job, w->process) && ResumeThread(process.hThread) != (DWORD)-1;
@@ -342,6 +351,25 @@ static bool start_worker(manager *m, worker *w, sb_error *error) {
     if (child != INVALID_HANDLE_VALUE) CloseHandle(child);
     if (initialized) DeleteProcThreadAttributeList(startup.lpAttributeList);
     free(startup.lpAttributeList); free(env);
+    if(ok && m->ordinary_token) {
+        /* No inherited handles across token creation. Authenticate the actual
+           child before sending any project snapshot over the private pipe. */
+        OVERLAPPED connect={0};connect.hEvent=CreateEventW(NULL,TRUE,FALSE,NULL);DWORD got=0;
+        ok=connect.hEvent!=NULL;
+        if(ok && !ConnectNamedPipe(w->pipe,&connect)) {
+            DWORD failure=GetLastError();
+            if(failure==ERROR_IO_PENDING) {
+                HANDLE events[]={connect.hEvent,w->process};
+                ok=WaitForMultipleObjects(2,events,FALSE,WORKER_IO_MS)==WAIT_OBJECT_0 && GetOverlappedResult(w->pipe,&connect,&got,FALSE);
+                if(!ok){CancelIoEx(w->pipe,&connect);GetOverlappedResult(w->pipe,&connect,&got,TRUE);}
+            } else ok=failure==ERROR_PIPE_CONNECTED;
+        }
+        if(connect.hEvent)CloseHandle(connect.hEvent);
+        ULONG client=0;HANDLE verified=NULL;
+        ok=ok && GetNamedPipeClientProcessId(w->pipe,&client) && client==w->pid && sb_win_shared_worker(client,&verified);
+        if(verified)CloseHandle(verified);
+        if(!ok)sb_fail(error,"Ordinary worker pipe could not authenticate its exact child; no project configuration was sent.");
+    }
     uint64_t deadline = sb_platform_millis() + WORKER_IO_MS;
     char *greeting = ok && send_frame(w->pipe, w->snapshot, true, deadline) && send_frame(w->pipe, w->data_identity, true, deadline) ?
         receive_frame(w->pipe, true, deadline, 4096) : NULL;
@@ -691,6 +719,8 @@ static char *manager_request(void *context, const char *request, size_t length) 
         json = sb_strdup("{\"status\":\"stopping\"}"); goto done;
     }
     if (WaitForSingleObject(m->stop, 0) == WAIT_OBJECT_0) { json = error_json("Manager is stopping."); goto done; }
+    if (m->service_mode && (!strcmp(command,"administrator-start") || !strncmp(command,"project-administrator-",22) ||
+        !strncmp(command,"desktop-",8))) { json=error_json("Service mode does not expose interactive desktop or administrator authorization.");goto done; }
     if ((!strcmp(command,"desktop-status") || !strcmp(command,"desktop-pause") || !strcmp(command,"desktop-resume")) && !id && !payload) {
         json=sb_win_desktop_owner(command,m->audit); goto done;
     }
@@ -735,7 +765,9 @@ static char *manager_request(void *context, const char *request, size_t length) 
         }
         yyjson_mut_obj_add_val(doc, result, "projects", array);
         yyjson_mut_obj_add_uint(doc, result, "manager_pid", GetCurrentProcessId());
-        yyjson_mut_obj_add_bool(doc, result, "elevated", false);
+        yyjson_mut_obj_add_bool(doc, result, "elevated", m->elevated);
+        yyjson_mut_obj_add_bool(doc, result, "service_mode",m->service_mode);
+        yyjson_mut_obj_add_bool(doc,result,"console_attached",GetConsoleWindow()!=NULL);
         yyjson_mut_obj_add_uint(doc, result, "owner_workers", 4);
         yyjson_mut_obj_add_bool(doc, result, "http_gateway", m->gateway != NULL);
         yyjson_mut_obj_add_uint(doc, result, "http_workers", m->gateway ? 4 : 0);
@@ -864,7 +896,11 @@ done:
     yyjson_doc_free(input); return json;
 }
 static bool preflight(manager *m, const char *data_dir, const char *bytes, size_t length, sb_error *error) {
-    if (!ordinary()) { sb_fail(error, "Manager requires a normal, unelevated owner token; it never requests UAC."); return false; }
+    bool is_ordinary=ordinary();
+    if(!is_ordinary && !m->service_mode && sb_win_elevated_owner()) {
+        m->ordinary_token=sb_win_ordinary_owner_token(error);if(!m->ordinary_token)return false;
+    } else if (!is_ordinary && !(m->service_mode && sb_win_service_process())) { sb_fail(error, "Manager requires an interactive owner or its exact non-administrator service identity in Session 0; it never requests UAC itself."); return false; }
+    m->elevated=!is_ordinary;
     if (!sb_project_path_valid(data_dir) || !sb_projects_parse(&m->registry, bytes, length, error)) return false;
     m->lease = sb_platform_lease(data_dir, error); if (!m->lease) return false;
     m->data_root = sb_platform_root(data_dir, error); if (!m->data_root) return false;
@@ -923,16 +959,19 @@ overlap:
 done:
     yyjson_doc_free(source); return ok;
 }
-static int run_manager(const char *source, const char *data, bool http) {
+static int run_manager(const char *source, const char *data, bool http,const char *configuration,
+                       const char *const *projects,size_t count,HANDLE external_stop,HANDLE ready,bool service_mode) {
     sb_error error = {0};size_t length=0;wchar_t *source_name=wide(source);
     HANDLE source_pin=source_name?CreateFileW(source_name,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL):INVALID_HANDLE_VALUE;
     free(source_name);
-    char *bytes=source_pin!=INVALID_HANDLE_VALUE?sb_platform_load_config(source,&length,&error):NULL;
+    char *bytes=configuration ? sb_strdup(configuration) : source_pin!=INVALID_HANDLE_VALUE?sb_platform_load_config(source,&length,&error):NULL;
+    if(configuration)length=strlen(configuration);
     manager *m = calloc(1, sizeof(*m)); int code = 2;
+    if(m)m->service_mode=service_mode;
     if (m) m->administrator_lock=sb_platform_mutex_new();
     if (!m || !m->administrator_lock || !bytes || !preflight(m, data, bytes, length, &error)) goto done;
     m->stop = CreateEventW(NULL, TRUE, FALSE, NULL); if (!m->stop) goto done;
-    m->desktop_session=sb_win_desktop_session_new();
+    m->desktop_session=service_mode?NULL:sb_win_desktop_session_new();
     if (http) {
         if (!gateway_credentials(m, &error)) goto done;
         sb_config_defaults(&m->gateway_config); m->gateway_config.port = m->registry.port;
@@ -941,9 +980,29 @@ static int run_manager(const char *source, const char *data, bool http) {
         m->gateway = sb_http_start(&m->gateway_config, &routes, m, &error); if (!m->gateway) goto done;
     }
     m->owner = sb_owner_start_handler(data, manager_request, m, &error); if (!m->owner) goto done;
-    printf("{\"manager_ready\":true,\"elevated\":false,\"http_gateway\":%s}\n", http ? "true" : "false"); fflush(stdout);
+    if(m->ordinary_token) {
+        bool configured=false;for(size_t i=0;i<m->registry.project_count;++i)
+            if(m->workers[i].project->enabled && m->workers[i].administrator_allowed)configured=true;
+        if(configured) {
+            if(!sb_audit_operation(m->audit,"administrator_start_requested","elevated-startup","manager","administrator","reuse_existing_token",NULL) ||
+                !administrator_begin_locked(m,&error))goto done;
+        }
+    }
+    size_t started=0;
+    for(size_t i=0;i<count;++i) {
+        if(external_stop && WaitForSingleObject(external_stop,0)==WAIT_OBJECT_0)goto done;
+        for(size_t j=0;j<m->registry.project_count;++j)if(!strcmp(projects[i],m->workers[j].project->id)) {
+            worker *w=&m->workers[j];EnterCriticalSection(&w->lock);
+            if(start_worker(m,w,&error))++started;
+            else {fprintf(stderr,"ShellBot project %s: %s\n",w->project->id,*error.text?error.text:"Startup failed.");fflush(stderr);*error.text=0;} /* Never restart or replay it. */
+            LeaveCriticalSection(&w->lock);
+        }
+    }
+    printf("{\"manager_ready\":true,\"elevated\":%s,\"http_gateway\":%s,\"startup_projects\":%zu,\"startup_projects_running\":%zu,\"service_mode\":%s}\n",m->elevated?"true":"false", http ? "true" : "false",count,started,service_mode?"true":"false"); fflush(stdout);
+    if(ready)SetEvent(ready);
     /* Explicit startup per project. The manager never replays failed work. */
-    while (WaitForSingleObject(m->stop, 100) == WAIT_TIMEOUT && !sb_owner_stopping(m->owner) && (!m->gateway || !sb_http_stopping())) {
+    while (WaitForSingleObject(m->stop, 100) == WAIT_TIMEOUT && (!external_stop || WaitForSingleObject(external_stop,0)!=WAIT_OBJECT_0) &&
+           !sb_owner_stopping(m->owner) && (!m->gateway || !sb_http_stopping())) {
         sb_platform_mutex_lock(m->administrator_lock); administrator_refresh_locked(m); sb_platform_mutex_unlock(m->administrator_lock);
         for (size_t i = 0; i < m->registry.project_count; ++i) {
             worker *w = &m->workers[i];
@@ -970,6 +1029,7 @@ done:
             sb_platform_root_close(m->workers[i].data_root); DeleteCriticalSection(&m->workers[i].lock);
         }
         if (m->stop) CloseHandle(m->stop);
+        if (m->ordinary_token) CloseHandle(m->ordinary_token);
         sb_win_desktop_session_free(m->desktop_session);
         sb_audit_free(m->audit); sb_platform_root_close(m->data_root); sb_platform_lease_close(m->lease);
         sb_config_free(&m->gateway_config);
@@ -999,10 +1059,13 @@ static char *worker_administrator_call(void *context, const char *name, yyjson_v
     free(wire); return reply;
 }
 int sb_project_worker(int argc, wchar_t **argv) {
-    if (argc != 4 || !ordinary()) return 2;
-    wchar_t *end = NULL; unsigned long long value = _wcstoui64(argv[2], &end, 10);
-    if (!value || !end || *end) return 2;
-    HANDLE pipe = (HANDLE)(uintptr_t)value;
+    if (argc != 4 || (!ordinary() && !sb_win_service_process())) return 2;
+    wchar_t *end = NULL;HANDLE pipe=INVALID_HANDLE_VALUE;
+    const wchar_t prefix[]=L"\\\\.\\pipe\\ShellBot-worker-";
+    if(!wcsncmp(argv[2],prefix,wcslen(prefix)))
+        pipe=CreateFileW(argv[2],GENERIC_READ|GENERIC_WRITE,0,NULL,OPEN_EXISTING,SECURITY_SQOS_PRESENT|SECURITY_IDENTIFICATION,NULL);
+    else {unsigned long long value=_wcstoui64(argv[2],&end,10);if(!value || !end || *end)return 2;pipe=(HANDLE)(uintptr_t)value;}
+    if(pipe==INVALID_HANDLE_VALUE)return 2;
     unsigned long expected = wcstoul(argv[3], &end, 10); ULONG server = 0;
     if (!expected || !end || *end || !GetNamedPipeServerProcessId(pipe, &server) || server != expected) return 2;
     HANDLE parent = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, server);
@@ -1112,6 +1175,10 @@ done:
     return code;
 }
 
+int sb_manager_startup(const char *configuration,const char *data,const char *const *projects,
+                      size_t count,void *stop,void *ready,bool service_mode) {
+    return run_manager(NULL,data,true,configuration,projects,count,stop,ready,service_mode);
+}
 bool sb_manager_option(const char *option) {
     static const char *const names[] = {"--manager", "--manager-stop", "--project-create", "--project-configure", "--project-start",
         "--project-stop", "--project-pause", "--project-resume", "--project-status", "--management-status", "--manage", "--project-request", "--project-owner", "--project-links", "--administrator-start", "--administrator-stop", "--administrator-status",
@@ -1154,7 +1221,7 @@ int sb_manager_cli(int argc, char **argv) {
         puts("{\"exported\":true,\"source_backup_saved\":true,\"running_configuration_changed\":false}"); code = 0;
     } else if (!strcmp(mode, "--manager")) {
         if (!registry || !data || definition || output || request_file) goto invalid;
-        code = run_manager(registry, data, http);
+        code = run_manager(registry, data, http,NULL,NULL,0,NULL,NULL,false);
     } else if(!strcmp(mode,"--manage")) {
         if(!data || !sb_project_path_valid(data) || registry || definition || output || request_file)goto invalid;
         code=sb_manager_ui(data);

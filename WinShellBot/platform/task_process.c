@@ -227,7 +227,7 @@ sb_win_tasks *sb_win_tasks_new_limited(sb_execution_profile profile, const sb_re
     bool ok = OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token) && sb_win_owner_token_allowed(token) &&
         GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &bytes);
     if (token) CloseHandle(token);
-    if (!ok || profile == SB_EXEC_CONTROLLED || (profile == SB_EXEC_USER && elevation.TokenIsElevated) || (profile == SB_EXEC_ADMINISTRATOR && !elevation.TokenIsElevated)) return NULL;
+    if (!ok || profile == SB_EXEC_CONTROLLED || (profile == SB_EXEC_USER && elevation.TokenIsElevated && !sb_win_service_process()) || (profile == SB_EXEC_ADMINISTRATOR && !elevation.TokenIsElevated)) return NULL;
     sb_win_tasks *tasks = calloc(1, sizeof(*tasks)); if (!tasks) return NULL;
     tasks->limits = *limits;
     InitializeSRWLock(&tasks->lock); tasks->profile = profile; tasks->elevated = elevation.TokenIsElevated != 0;
@@ -249,7 +249,7 @@ bool sb_win_tasks_watch_worker(sb_win_tasks *tasks, HANDLE worker) {
     if (tasks->worker) { ReleaseSRWLockExclusive(&tasks->lock); CloseHandle(copy); return false; }
     tasks->worker=copy; ReleaseSRWLockExclusive(&tasks->lock); return true;
 }
-void sb_win_tasks_restrict(sb_win_tasks *tasks, sb_win_sandbox *sandbox) { tasks->sandbox=sandbox;tasks->profile=SB_EXEC_CONTROLLED; }
+void sb_win_tasks_restrict(sb_win_tasks *tasks, sb_win_sandbox *sandbox) { tasks->sandbox=sandbox;tasks->profile=SB_EXEC_CONTROLLED;tasks->elevated=false; }
 void sb_win_tasks_store(sb_win_tasks *tasks, sb_store *store, sb_audit *audit) {
     AcquireSRWLockExclusive(&tasks->lock); tasks->store=store; tasks->audit=audit; ReleaseSRWLockExclusive(&tasks->lock);
 }

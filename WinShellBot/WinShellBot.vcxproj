@@ -162,7 +162,7 @@
       <RuntimeLibrary Condition="'$(Configuration)'=='Release'">MultiThreaded</RuntimeLibrary>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>Ws2_32.lib;Bcrypt.lib;Shell32.lib;Ole32.lib;Uuid.lib;Advapi32.lib;Userenv.lib;Comctl32.lib;Gdi32.lib;Windowscodecs.lib;Wtsapi32.lib;Shlwapi.lib;Xmllite.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>Ws2_32.lib;Bcrypt.lib;Crypt32.lib;Shell32.lib;Ole32.lib;OleAut32.lib;Taskschd.lib;Uuid.lib;Advapi32.lib;Userenv.lib;Comctl32.lib;Gdi32.lib;Windowscodecs.lib;Wtsapi32.lib;Shlwapi.lib;Xmllite.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Manifest>
       <AdditionalManifestFiles>$(MSBuildProjectDirectory)\app\shellbot.manifest;%(AdditionalManifestFiles)</AdditionalManifestFiles>
@@ -180,6 +180,10 @@
     <ClInclude Include="platform\document.h" />
     <ClCompile Include="platform\owner.c" />
     <ClCompile Include="platform\manager.c" />
+    <ClCompile Include="platform\startup.c" />
+    <ClCompile Include="platform\task_startup.c" />
+    <ClCompile Include="platform\service.c" />
+    <ClInclude Include="platform\startup.h" />
     <ClCompile Include="platform\desktop.c" />
     <ClInclude Include="platform\desktop.h" />
     <ClCompile Include="platform\manager_ui.c" />
@@ -236,6 +240,9 @@
     </ProjectReference>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Target Name="BuildResidentLauncher" BeforeTargets="PrepareForBuild">
+    <MSBuild Projects="$(MSBuildProjectDirectory)\Launcher.vcxproj" Targets="Build" Properties="Configuration=$(Configuration);Platform=$(Platform)" />
+  </Target>
   <Target Name="CopyPinnedPdfium" AfterTargets="Build">
     <Copy SourceFiles="$(MSBuildProjectDirectory)\..\third_party\pdfium\$(Platform)\pdfium.dll" DestinationFiles="$(OutDir)pdfium.dll" SkipUnchangedFiles="true" />
   </Target>

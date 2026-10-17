@@ -21,6 +21,10 @@
     <ClCompile Include="platform\windows.c"><Filter>源文件</Filter></ClCompile>
     <ClCompile Include="platform\owner.c"><Filter>源文件</Filter></ClCompile>
     <ClCompile Include="platform\manager.c"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="platform\startup.c"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="platform\task_startup.c"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="platform\service.c"><Filter>源文件</Filter></ClCompile>
+    <ClInclude Include="platform\startup.h"><Filter>头文件</Filter></ClInclude>
     <ClCompile Include="platform\desktop.c"><Filter>源文件</Filter></ClCompile>
     <ClInclude Include="platform\desktop.h"><Filter>头文件</Filter></ClInclude>
     <ClCompile Include="platform\manager_ui.c"><Filter>源文件</Filter></ClCompile>

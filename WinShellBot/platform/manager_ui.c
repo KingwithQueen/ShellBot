@@ -1,9 +1,11 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <commctrl.h>
+#include <shellapi.h>
 #include "sb_projects.h"
 #include "manager_ui.h"
 #include "execution.h"
+#include "startup.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -13,11 +15,19 @@
 enum { UI_REFRESH=1001, UI_START, UI_STOP, UI_PAUSE, UI_RESUME, UI_LOCAL, UI_PUBLIC,
        UI_DIAGNOSE, UI_COPY, UI_ADMIN_START, UI_ADMIN_STOP, UI_LIST=1100, UI_DETAILS, UI_STATUS, UI_HEADER, UI_PATH, UI_CONTEXT };
 #define UI_RESULT (WM_APP+1)
+#define UI_TRAY (WM_APP+2)
+#define UI_SHOW 1201
+#define UI_HIDE 1202
+#define UI_EXIT 1203
+#define UI_LOGON_ENABLE 1204
+#define UI_LOGON_DISABLE 1205
+#define UI_ADMIN_LOGON_ENABLE 1206
+#define UI_ADMIN_LOGON_DISABLE 1207
 #define UI_TEXT_CAP 65536u
 typedef struct {
     HWND window;
     char *data, *request, *reply;
-    bool snapshot, diagnostic;
+    bool snapshot, diagnostic, logon, enable, admin_logon;
     sb_error error;
 } ui_work;
 typedef struct {
@@ -28,7 +38,48 @@ typedef struct {
     yyjson_doc *snapshot;
     char selected[64];
     bool busy, rendering, diagnostic;
+    bool resident, tray_added;
+    HANDLE stop, manager_thread;
+    const char *profile_path;
+    UINT taskbar_created;
 } ui_state;
+
+static void logon_request(ui_state *ui,bool enable,bool administrator);
+
+static bool tray(ui_state *ui,DWORD action) {
+    NOTIFYICONDATAW icon={0};icon.cbSize=sizeof(icon);icon.hWnd=ui->window;icon.uID=1;
+    icon.uFlags=NIF_MESSAGE|NIF_ICON|NIF_TIP;icon.uCallbackMessage=UI_TRAY;
+    icon.hIcon=LoadIconW(NULL,IDI_APPLICATION);wcscpy(icon.szTip,L"ShellBot · 后台运行；单击打开管理");
+    bool ok=Shell_NotifyIconW(action,&icon)!=FALSE;
+    if(action==NIM_ADD && !ok)ok=Shell_NotifyIconW(NIM_MODIFY,&icon)!=FALSE;
+    if(action==NIM_ADD)ui->tray_added=ok;else if(action==NIM_DELETE)ui->tray_added=false;return ok;
+}
+static void show_resident(ui_state *ui) {
+    ShowWindow(ui->window,SW_RESTORE);SetForegroundWindow(ui->window);
+    PostMessageW(ui->window,WM_COMMAND,1001,0);
+}
+static void resident_command(ui_state *ui,int id) {
+    if(id==UI_SHOW)show_resident(ui);
+    else if(id==UI_HIDE){if(ui->tray_added)ShowWindow(ui->window,SW_HIDE);}
+    else if(id==UI_EXIT){SetEvent(ui->stop);DestroyWindow(ui->window);}
+    else if(id==UI_LOGON_ENABLE || id==UI_LOGON_DISABLE) {
+        logon_request(ui,id==UI_LOGON_ENABLE,false);
+    } else if(id==UI_ADMIN_LOGON_ENABLE || id==UI_ADMIN_LOGON_DISABLE) {
+        logon_request(ui,id==UI_ADMIN_LOGON_ENABLE,true);
+    }
+}
+static void tray_menu(ui_state *ui) {
+    HMENU menu=CreatePopupMenu();if(!menu)return;
+    AppendMenuW(menu,MF_STRING,UI_SHOW,L"打开项目管理");AppendMenuW(menu,MF_STRING,UI_HIDE,L"隐藏管理窗口");
+    AppendMenuW(menu,MF_SEPARATOR,0,NULL);AppendMenuW(menu,MF_STRING,UI_LOGON_ENABLE,L"登录时自动启动");
+    AppendMenuW(menu,MF_STRING,UI_LOGON_DISABLE,L"关闭登录自动启动");AppendMenuW(menu,MF_SEPARATOR,0,NULL);
+    AppendMenuW(menu,MF_STRING|(sb_win_elevated_owner()?0:MF_GRAYED),UI_ADMIN_LOGON_ENABLE,L"登录时以管理员身份自动启动");
+    AppendMenuW(menu,MF_STRING|(sb_win_elevated_owner()?0:MF_GRAYED),UI_ADMIN_LOGON_DISABLE,L"关闭管理员登录自动启动");AppendMenuW(menu,MF_SEPARATOR,0,NULL);
+    AppendMenuW(menu,MF_STRING,UI_EXIT,L"退出 ShellBot（停止本实例）");
+    POINT cursor;GetCursorPos(&cursor);SetForegroundWindow(ui->window);
+    int id=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_NONOTIFY|TPM_RIGHTBUTTON,cursor.x,cursor.y,0,ui->window,NULL);
+    DestroyMenu(menu);PostMessageW(ui->window,WM_NULL,0,0);if(id)resident_command(ui,id);
+}
 
 static wchar_t *to_wide(const char *text) {
     int size=text ? MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,text,-1,NULL,0) : 0;
@@ -150,9 +201,21 @@ static void render(ui_state *ui) {
 static void free_work(ui_work *work) { free(work->data); free(work->request); free(work->reply); free(work); }
 static DWORD WINAPI exchange(void *context) {
     ui_work *work=context;
-    work->reply=sb_owner_exchange(work->data,work->request,strlen(work->request),&work->error);
+    if(work->logon) {
+        char *args[]={"WinShellBot",work->admin_logon?(work->enable?"--admin-logon-enable":"--admin-logon-disable"):(work->enable?"--logon-enable":"--logon-disable"),"--startup-profile",work->request};
+        work->reply=sb_strdup(sb_startup_cli(4,args)==0?(work->enable?"{\"logon_enabled\":true}":"{\"logon_enabled\":false}"):
+            "{\"error\":\"Logon result could not be confirmed. Inspect the current logon status before retrying.\"}");
+    } else work->reply=sb_owner_exchange(work->data,work->request,strlen(work->request),&work->error);
     if(!PostMessageW(work->window,UI_RESULT,0,(LPARAM)work))free_work(work);
     return 0;
+}
+static void logon_request(ui_state *ui,bool enable,bool administrator) {
+    if(ui->busy)return;ui_work *work=calloc(1,sizeof(*work));if(!work)return;
+    work->window=ui->window;work->logon=true;work->enable=enable;work->admin_logon=administrator;work->request=sb_strdup(ui->profile_path);
+    if(!work->request){free_work(work);return;}
+    ui->thread=CreateThread(NULL,0,exchange,work,0,NULL);
+    if(!ui->thread){free_work(work);return;}
+    ui->busy=true;SetWindowTextW(ui->status,L"正在设置登录自动启动…");update_buttons(ui);
 }
 static void request(ui_state *ui, const char *command, bool diagnostic) {
     if(ui->busy)return;
@@ -242,6 +305,7 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LP
     ui_state *ui=(ui_state *)GetWindowLongPtrW(window,GWLP_USERDATA);
     if(message==WM_NCCREATE) { ui=((CREATESTRUCTW *)lparam)->lpCreateParams; ui->window=window; SetWindowLongPtrW(window,GWLP_USERDATA,(LONG_PTR)ui); }
     if(!ui)return DefWindowProcW(window,message,wparam,lparam);
+    if(ui->resident && message==ui->taskbar_created){ui->tray_added=false;tray(ui,NIM_ADD);SetPropW(window,L"ShellBotTrayRegistered",ui->tray_added?(HANDLE)1:NULL);return 0;}
     switch(message) {
     case WM_CREATE: {
         fonts(ui);
@@ -259,7 +323,21 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LP
         ui->status=control(ui,0,L"STATIC",L"",0,UI_STATUS); update_buttons(ui); layout(ui);
         PostMessageW(window,WM_COMMAND,UI_REFRESH,0); return 0;
     }
-    case WM_COMMAND: if(HIWORD(wparam)==BN_CLICKED)click(ui,LOWORD(wparam)); return 0;
+    case WM_COMMAND:
+        if(ui->resident && LOWORD(wparam)>=UI_SHOW && LOWORD(wparam)<=UI_ADMIN_LOGON_DISABLE)resident_command(ui,LOWORD(wparam));
+        else if(HIWORD(wparam)==BN_CLICKED)click(ui,LOWORD(wparam));return 0;
+    case UI_TRAY:
+        if(ui->resident && wparam==1){if(lparam==WM_LBUTTONUP || lparam==WM_LBUTTONDBLCLK)show_resident(ui);else if(lparam==WM_RBUTTONUP)tray_menu(ui);}return 0;
+    case WM_TIMER:
+        if(ui->resident){
+            if(WaitForSingleObject(ui->manager_thread,0)!=WAIT_TIMEOUT){DestroyWindow(window);return 0;}
+            if(!ui->tray_added){tray(ui,NIM_ADD);SetPropW(window,L"ShellBotTrayRegistered",ui->tray_added?(HANDLE)1:NULL);}
+        }return 0;
+    case WM_CLOSE:
+        if(ui->resident && ui->tray_added){ShowWindow(window,SW_HIDE);return 0;}break;
+    case WM_QUERYENDSESSION:return TRUE;
+    case WM_ENDSESSION:
+        if(ui->resident && wparam){SetEvent(ui->stop);DestroyWindow(window);}return 0;
     case WM_NOTIFY: {
         NMHDR *header=(NMHDR *)lparam;
         if(header->idFrom==UI_LIST && header->code==LVN_ITEMCHANGED && !ui->rendering) {
@@ -277,6 +355,8 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LP
             ui->diagnostic=true; set_utf8(ui->details,reply ? work->reply : work->error.text);
             SetWindowTextW(ui->status,L"请求未完成。请核对诊断与当前状态，再决定后续操作。");
             if(work->snapshot) { yyjson_doc_free(ui->snapshot); ui->snapshot=NULL; *ui->selected=0; ListView_DeleteAllItems(ui->list); SetWindowTextW(ui->context,L"未连接管理器。请先启动对应管理器，再刷新。 "); }
+        } else if(work->logon) {
+            SetWindowTextW(ui->status,work->enable?L"已启用此配置的登录自动启动。":L"已关闭此配置的登录自动启动；本次仍继续运行。");
         } else if(work->snapshot) {
             yyjson_doc_free(ui->snapshot); ui->snapshot=reply; reply=NULL; render(ui);
             SetWindowTextW(ui->status,L"状态已刷新。地址不含凭据；暂停状态仅在当前管理器有效。");
@@ -284,7 +364,7 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LP
             char *json=yyjson_val_write(root,YYJSON_WRITE_PRETTY,NULL); set_utf8(ui->details,json); free(json); ui->diagnostic=true;
             SetWindowTextW(ui->status,L"已查询实际运行能力；诊断可复制。");
         }
-        bool refresh=!work->snapshot && !work->diagnostic && reply && !*error;
+        bool refresh=!work->snapshot && !work->diagnostic && !work->logon && reply && !*error;
         yyjson_doc_free(reply); free_work(work); update_buttons(ui);
         if(refresh)request(ui,"management-status",false);
         return 0;
@@ -295,17 +375,19 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LP
         RECT *rect=(RECT *)lparam; SetWindowPos(window,NULL,rect->left,rect->top,rect->right-rect->left,rect->bottom-rect->top,SWP_NOZORDER|SWP_NOACTIVATE);
         fonts(ui); layout(ui); return 0;
     }
-    case WM_DESTROY: PostQuitMessage(0); return 0;
+    case WM_DESTROY: if(ui->resident){KillTimer(window,1);tray(ui,NIM_DELETE);RemovePropW(window,L"ShellBotTrayRegistered");SetEvent(ui->stop);}PostQuitMessage(0); return 0;
     default: return DefWindowProcW(window,message,wparam,lparam);
     }
+    return DefWindowProcW(window,message,wparam,lparam);
 }
-int sb_manager_ui(const char *data_dir) {
+static int run_ui(const char *data_dir,HANDLE stop,HANDLE manager_thread,const char *profile_path) {
     HANDLE token=NULL; TOKEN_ELEVATION elevation={0}; DWORD size=0;
     bool allowed=OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&token) && sb_win_owner_token_allowed(token) &&
-        GetTokenInformation(token,TokenElevation,&elevation,sizeof(elevation),&size) && !elevation.TokenIsElevated;
+        GetTokenInformation(token,TokenElevation,&elevation,sizeof(elevation),&size) && (!elevation.TokenIsElevated || sb_win_elevated_owner());
     if(token)CloseHandle(token);
-    if(!allowed) { fputs("ShellBot: Management window requires an ordinary, unelevated owner token.\n",stderr); return 2; }
-    ui_state ui={0}; ui.data=sb_strdup(data_dir); if(!ui.data)return 2;
+    if(!allowed) { fputs("ShellBot: Management window requires a valid interactive owner token.\n",stderr); return 2; }
+    ui_state ui={0};ui.resident=stop!=NULL;ui.stop=stop;ui.manager_thread=manager_thread;ui.profile_path=profile_path;
+    ui.taskbar_created=RegisterWindowMessageW(L"TaskbarCreated");ui.data=sb_strdup(data_dir); if(!ui.data)return 2;
     SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     INITCOMMONCONTROLSEX controls={sizeof(controls),ICC_LISTVIEW_CLASSES}; InitCommonControlsEx(&controls);
     WNDCLASSW klass={0}; klass.lpfnWndProc=window_proc; klass.hInstance=GetModuleHandleW(NULL); klass.hCursor=LoadCursorW(NULL,IDC_ARROW);
@@ -319,10 +401,15 @@ int sb_manager_ui(const char *data_dir) {
     if(!window) { free(ui.data); return 2; }
     /* Detach only our GUI process; never hide the caller's terminal window. */
     FreeConsole(); STARTUPINFOW startup={0}; startup.cb=sizeof(startup); GetStartupInfoW(&startup);
-    ShowWindow(window,startup.dwFlags&STARTF_USESHOWWINDOW ? startup.wShowWindow : SW_SHOWNORMAL); UpdateWindow(window);
+    if(ui.resident){tray(&ui,NIM_ADD);SetPropW(window,L"ShellBotTrayRegistered",ui.tray_added?(HANDLE)1:NULL);SetTimer(window,1,2000,NULL);}
+    ShowWindow(window,ui.resident ? (ui.tray_added ? SW_HIDE : SW_SHOWNORMAL) : startup.dwFlags&STARTF_USESHOWWINDOW ? startup.wShowWindow : SW_SHOWNORMAL); UpdateWindow(window);
     MSG message; while(GetMessageW(&message,NULL,0,0)>0) { if(!IsDialogMessageW(window,&message)) { TranslateMessage(&message); DispatchMessageW(&message); } }
     /* Work items own their data independently; closing the GUI never stops or
        retries a manager operation. Process exit releases any outstanding item. */
     if(ui.thread)CloseHandle(ui.thread);
     yyjson_doc_free(ui.snapshot); DeleteObject(ui.font); DeleteObject(ui.heading); free(ui.data); return 0;
+}
+int sb_manager_ui(const char *data_dir) {return run_ui(data_dir,NULL,NULL,NULL);}
+int sb_manager_resident_ui(const char *data_dir,HANDLE stop,HANDLE manager_thread,const char *profile_path) {
+    return run_ui(data_dir,stop,manager_thread,profile_path);
 }

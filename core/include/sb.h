@@ -6,7 +6,7 @@
 #include <stdint.h>
 #include "yyjson.h"
 
-#define SB_VERSION "0.1.0-dev.18"
+#define SB_VERSION "0.1.0-dev.19"
 #define SB_TRANSFER_LIMIT (64u * 1024u * 1024u)
 #define SB_TRANSFER_CHUNK 32768u
 #define SB_MAX_ROOTS 16

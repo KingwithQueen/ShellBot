@@ -1,0 +1,19 @@
+{
+  "format_version": 1,
+  "gateway": { "port": 8766, "owner_token_env": "SHELLBOT_SERVICE_OWNER_TOKEN" },
+  "projects": [
+    {
+      "id": "example",
+      "policy_revision": 1,
+      "token_env": "SHELLBOT_SERVICE_EXAMPLE_TOKEN",
+      "data_dir": "C:/ProgramData/ShellBotService/example",
+      "workspaces": [{ "id": "workspace", "path": "C:/ShellBotServiceWorkspace", "read_only": true }],
+      "policy": {
+        "approval_mode": "always",
+        "files": { "scope": "configured" },
+        "execution": { "enabled": false, "default_identity": "restricted", "administrator_allowed": false },
+        "tools": ["host_info", "host_capabilities", "fs_list", "fs_read", "fs_search", "image_view", "document_info", "document_read", "document_preview", "artifact_download"]
+      }
+    }
+  ]
+}

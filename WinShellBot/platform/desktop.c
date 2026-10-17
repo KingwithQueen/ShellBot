@@ -8,6 +8,7 @@
 #include <wincodec.h>
 #include <objbase.h>
 #include "desktop.h"
+#include "execution.h"
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,6 +40,7 @@ struct sb_desktop {
     HWND window; HHOOK keyboard,mouse; HANDLE foreground_hook;
     volatile LONG available,input_epoch,physical_inputs,foreign_inputs,truncated_inputs; DWORD session;
     ULONG_PTR input_tag; bool leased,tray,was_paused,hotkey;
+    UINT taskbar_created; uint64_t tray_retry_after;
     char lease_id[33],actor[64]; uint64_t deadline;
     unsigned next_observation,emergency_stops; observation observations[OBSERVATIONS];
     wchar_t sid[192]; DWORD integrity; uint64_t resume_after; volatile LONG local_input;
@@ -97,9 +99,9 @@ static bool token_identity(HANDLE process, wchar_t sid[192], DWORD *integrity) {
     else *integrity=*GetSidSubAuthority(label->Label.Sid,*GetSidSubAuthorityCount(label->Label.Sid)-1);
     free(label); CloseHandle(token); return ok;
 }
-static bool shared_objects(HANDLE *mutex, HANDLE *pause, HANDLE *epoch_map, volatile LONG **epoch, DWORD *session, wchar_t sid[192], DWORD *integrity) {
+static bool shared_objects(HANDLE *mutex, HANDLE *pause, HANDLE *epoch_map, volatile LONG **epoch, DWORD *session, wchar_t sid[192], DWORD *integrity,bool owner) {
     if (!ProcessIdToSessionId(GetCurrentProcessId(),session) || !*session || !token_identity(GetCurrentProcess(),sid,integrity) ||
-        *integrity<SECURITY_MANDATORY_MEDIUM_RID || *integrity>=SECURITY_MANDATORY_HIGH_RID) return false;
+        *integrity<SECURITY_MANDATORY_MEDIUM_RID || (*integrity>=SECURITY_MANDATORY_HIGH_RID && (!owner || !sb_win_elevated_owner()))) return false;
     wchar_t sddl[512],name[256]; PSECURITY_DESCRIPTOR sd=NULL;
     swprintf(sddl,512,L"D:P(A;;GA;;;%ls)(A;;GA;;;SY)S:(ML;;NWNR;;;ME)",sid);
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl,SDDL_REVISION_1,&sd,NULL)) return false;
@@ -117,7 +119,7 @@ static bool shared_objects(HANDLE *mutex, HANDLE *pause, HANDLE *epoch_map, vola
 }
 sb_win_desktop_session *sb_win_desktop_session_new(void) {
     sb_win_desktop_session *state=calloc(1,sizeof(*state)); DWORD session=0,integrity=0; wchar_t sid[192]={0};
-    if (state && !shared_objects(&state->mutex,&state->pause,&state->mapping,&state->epoch,&session,sid,&integrity)) { free(state); state=NULL; }
+    if (state && !shared_objects(&state->mutex,&state->pause,&state->mapping,&state->epoch,&session,sid,&integrity,true)) { free(state); state=NULL; }
     return state;
 }
 void sb_win_desktop_session_free(sb_win_desktop_session *state) {
@@ -666,16 +668,31 @@ static void process_job(sb_desktop *desktop,desktop_job *job) {
     }
     SetEvent(job->done); job_release(job);
 }
+static void tray_register(sb_desktop *desktop) {
+    NOTIFYICONDATAW icon={0}; icon.cbSize=sizeof(icon); icon.hWnd=desktop->window; icon.uID=1; icon.uFlags=NIF_ICON|NIF_MESSAGE|NIF_TIP;
+    icon.uCallbackMessage=DESKTOP_TRAY; icon.hIcon=LoadIconW(NULL,IDI_APPLICATION);
+    wchar_t *project=wide(desktop->host->project->id);
+    swprintf(icon.szTip,128,L"ShellBot 桌面：%ls；Ctrl+Alt+F%u 停止",project?project:L"",desktop->policy.emergency_function_key); free(project);
+    desktop->tray=Shell_NotifyIconW(NIM_ADD,&icon)!=0;
+    if(!desktop->tray)desktop->tray=Shell_NotifyIconW(NIM_MODIFY,&icon)!=0;
+    SetPropW(desktop->window,L"ShellBotDesktopTrayRegistered",desktop->tray?(HANDLE)1:NULL);
+    desktop->tray_retry_after=sb_platform_millis()+2000;
+}
 static void tray_delete(sb_desktop *desktop) {
     if (desktop->tray) { NOTIFYICONDATAW icon={0}; icon.cbSize=sizeof(icon); icon.hWnd=desktop->window; icon.uID=1; Shell_NotifyIconW(NIM_DELETE,&icon); desktop->tray=false; }
+    RemovePropW(desktop->window,L"ShellBotDesktopTrayRegistered");
 }
 static LRESULT CALLBACK desktop_window(HWND window,UINT message,WPARAM wparam,LPARAM lparam) {
     sb_desktop *desktop=(sb_desktop *)GetWindowLongPtrW(window,GWLP_USERDATA);
     if (message==WM_NCCREATE) { desktop=((CREATESTRUCTW *)lparam)->lpCreateParams; desktop->window=window; SetWindowLongPtrW(window,GWLP_USERDATA,(LONG_PTR)desktop); }
     if (!desktop) return DefWindowProcW(window,message,wparam,lparam);
+    if(desktop->taskbar_created && message==desktop->taskbar_created) {
+        desktop->tray=false;tray_register(desktop);return 0;
+    }
     if (message==DESKTOP_JOB) { process_job(desktop,(desktop_job *)lparam); return 0; }
     if (message==WM_HOTKEY && wparam==1) { ++desktop->emergency_stops; pause_local(desktop); return 0; }
     if (message==WM_TIMER) {
+        if(!desktop->tray && sb_platform_millis()>=desktop->tray_retry_after)tray_register(desktop);
         bool available=interactive(desktop); InterlockedExchange(&desktop->available,available?1:0);
         if (desktop->leased && (!available || sb_platform_millis()>=desktop->deadline)) {
             sb_audit_operation(desktop->host->audit,available?"desktop_lease_expired":"desktop_session_unavailable",desktop->actor,
@@ -713,17 +730,14 @@ static DWORD WINAPI desktop_thread(void *parameter) {
     sb_desktop *desktop=parameter; hook_context=desktop;
     HRESULT initialized=CoInitializeEx(NULL,COINIT_APARTMENTTHREADED);
     SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    desktop->taskbar_created=RegisterWindowMessageW(L"TaskbarCreated");
     WNDCLASSW cls={0}; cls.lpfnWndProc=desktop_window; cls.hInstance=GetModuleHandleW(NULL); cls.lpszClassName=L"ShellBotDesktopController.v1";
     if (!RegisterClassW(&cls) && GetLastError()!=ERROR_CLASS_ALREADY_EXISTS) { SetEvent(desktop->ready); goto done; }
     desktop->window=CreateWindowExW(WS_EX_TOOLWINDOW,cls.lpszClassName,L"ShellBot 桌面控制",WS_OVERLAPPED,0,0,0,0,NULL,NULL,cls.hInstance,desktop);
     if (!desktop->window) { SetEvent(desktop->ready); goto done; }
     SetTimer(desktop->window,1,100,NULL); InterlockedExchange(&desktop->available,interactive(desktop)?1:0);
     desktop->was_paused=WaitForSingleObject(desktop->pause,0)==WAIT_OBJECT_0;
-    NOTIFYICONDATAW icon={0}; icon.cbSize=sizeof(icon); icon.hWnd=desktop->window; icon.uID=1; icon.uFlags=NIF_ICON|NIF_MESSAGE|NIF_TIP;
-    icon.uCallbackMessage=DESKTOP_TRAY; icon.hIcon=LoadIconW(NULL,IDI_APPLICATION);
-    wchar_t *project=wide(desktop->host->project->id);
-    swprintf(icon.szTip,128,L"ShellBot 桌面：%ls；Ctrl+Alt+F%u 停止",project?project:L"",desktop->policy.emergency_function_key); free(project);
-    desktop->tray=Shell_NotifyIconW(NIM_ADD,&icon)!=0; SetEvent(desktop->ready);
+    tray_register(desktop); SetEvent(desktop->ready);
     MSG message; while (GetMessageW(&message,NULL,0,0)>0) { TranslateMessage(&message); DispatchMessageW(&message); }
 done:
     InterlockedExchange(&desktop->available,0); hook_context=NULL;
@@ -733,7 +747,7 @@ sb_desktop *sb_win_desktop_new(sb_host *host,sb_error *error) {
     if (!host->project || host->project->legacy_compatibility || !host->project->policy.desktop.enabled || host->administrator_host) return NULL;
     sb_desktop *desktop=calloc(1,sizeof(*desktop)); if (!desktop) return NULL;
     desktop->host=host; desktop->policy=host->project->policy.desktop;
-    if (!shared_objects(&desktop->mutex,&desktop->pause,&desktop->epoch_map,&desktop->epoch,&desktop->session,desktop->sid,&desktop->integrity)) goto failed;
+    if (!shared_objects(&desktop->mutex,&desktop->pause,&desktop->epoch_map,&desktop->epoch,&desktop->session,desktop->sid,&desktop->integrity,false)) goto failed;
     /* Mouse hooks can retain only the low 32 bits of dwExtraInfo on Windows.
        Use a random positive tag represented identically by both input paths. */
     uint32_t tag=0; if (!sb_platform_random((unsigned char *)&tag,sizeof(tag),error)) goto failed;
@@ -773,7 +787,7 @@ yyjson_mut_val *sb_desktop_capabilities(sb_desktop *desktop,yyjson_mut_doc *doc)
 char *sb_win_desktop_owner(const char *command,sb_audit *audit) {
     if (!command || (strcmp(command,"desktop-status") && strcmp(command,"desktop-pause") && strcmp(command,"desktop-resume"))) return failed("unknown_desktop_owner_command");
     HANDLE mutex=NULL,pause=NULL,mapping=NULL; volatile LONG *epoch=NULL; DWORD session=0,integrity=0; wchar_t sid[192]={0};
-    if (!shared_objects(&mutex,&pause,&mapping,&epoch,&session,sid,&integrity)) return failed("desktop_owner_requires_normal_interactive_user");
+    if (!shared_objects(&mutex,&pause,&mapping,&epoch,&session,sid,&integrity,true)) return failed("desktop_owner_requires_normal_interactive_user");
     bool changing=strcmp(command,"desktop-status")!=0; const char *error=NULL;
     if (changing && !sb_audit_operation(audit,"desktop_owner_control","local-owner","manager","ordinary",command,NULL)) error="Audit unavailable; desktop control change was not performed.";
     if (!error && changing) { InterlockedIncrement(epoch); if (!strcmp(command,"desktop-pause")) SetEvent(pause); else if (!strcmp(command,"desktop-resume")) ResetEvent(pause); }

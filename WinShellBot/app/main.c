@@ -4,6 +4,7 @@
 #include "sb_projects.h"
 #include "../platform/execution.h"
 #include "../platform/manager.h"
+#include "../platform/startup.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,6 +23,13 @@ static void usage(void) {
           "                  [--projects REGISTRY] --output NEW (never overwrites existing files)\n"
           "       WinShellBot --manager [--http] --projects REGISTRY --manager-data-dir ABSOLUTE_DIR\n"
           "       WinShellBot --manage | --management-status --manager-data-dir ABSOLUTE_DIR\n"
+          "       WinShellBot --startup-prepare --mode tray|service --projects REGISTRY\n"
+          "                  --manager-data-dir ABSOLUTE_DIR --output NEW_PROFILE [--start-project ID ...]\n"
+          "       WinShellBot --startup-inspect | --startup-console | --resident --startup-profile FILE\n"
+          "       WinShellBot --logon-enable | --logon-disable | --logon-status --startup-profile FILE\n"
+          "       WinShellBot --service-install | --service-uninstall | --service-start | --service-stop\n"
+          "                  --startup-profile FILE (install needs an elevated terminal)\n"
+          "       WinShellBot --service-status [--startup-profile FILE]\n"
           "       WinShellBot --project-start | --project-stop ID --manager-data-dir ABSOLUTE_DIR\n"
           "       WinShellBot --project-pause | --project-resume ID --manager-data-dir ABSOLUTE_DIR\n"
           "       WinShellBot --project-status [ID] --manager-data-dir ABSOLUTE_DIR\n"
@@ -31,6 +39,8 @@ static void usage(void) {
           "       WinShellBot --manager-stop --manager-data-dir ABSOLUTE_DIR\n"
           "       WinShellBot --desktop-status | --desktop-pause | --desktop-resume\n"
           "         --manager-data-dir ABSOLUTE_DIR\n"
+          "       WinShellBot --admin-logon-enable | --admin-logon-disable | --admin-logon-status\n"
+          "                  --startup-profile FILE (highest-privilege logon task)\n"
           "       WinShellBot --administrator-start | --administrator-status | --administrator-stop\n"
           "                  --manager-data-dir ABSOLUTE_DIR (start explicitly requests UAC)\n"
           "       WinShellBot --project-administrator-allow | --project-administrator-revoke ID\n"
@@ -101,6 +111,7 @@ done:
 
 static int run(int argc, char **argv) {
     sb_error error = {0};
+    if(argc>=2 && sb_startup_option(argv[1]))return sb_startup_cli(argc,argv);
     if (argc >= 2 && sb_manager_option(argv[1])) return sb_manager_cli(argc, argv);
     if (argc == 2 && !strcmp(argv[1], "--help")) { usage(); return 0; }
     if (argc == 2 && !strcmp(argv[1], "--version")) { puts("ShellBot " SB_VERSION " (C17)"); return 0; }

@@ -145,7 +145,7 @@ static sb_owner *start(const char *data_dir, sb_host *host, sb_owner_handler han
     wchar_t sddl[256];
     bool secured = owner->user && ConvertSidToStringSidW(((TOKEN_USER *)owner->user)->User.Sid, &sid);
     if (secured) {
-        swprintf(sddl, 256, L"D:P(A;;GA;;;SY)(A;;GA;;;%ls)", sid);
+        swprintf(sddl, 256, handler?L"D:P(A;;GA;;;SY)(A;;GA;;;%ls)S:(ML;;NW;;;ME)":L"D:P(A;;GA;;;SY)(A;;GA;;;%ls)", sid);
         secured = ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &descriptor, NULL) != FALSE;
     }
     if (sid) LocalFree(sid);

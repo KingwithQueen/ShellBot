@@ -8,6 +8,7 @@
 #include "task_process.h"
 #include "sandbox.h"
 #include "shared_admin.h"
+#include "startup.h"
 
 
 /* A 16 KiB UTF-8 page can expand to six JSON bytes per control byte,
@@ -102,6 +103,62 @@ bool sb_win_owner_token_allowed(HANDLE token) {
     }
     free(label);
     return ok;
+}
+
+bool sb_win_elevated_owner(void) {
+    HANDLE token=NULL;identity actual={0};
+    bool ok=OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&token) && read_identity(token,&actual) &&
+        actual.session_id && actual.elevated && actual.administrator_enabled &&
+        actual.integrity>=SECURITY_MANDATORY_HIGH_RID && !actual.restricted && !actual.appcontainer;
+    if(token)CloseHandle(token);return ok;
+}
+
+HANDLE sb_win_ordinary_owner_token(sb_error *error) {
+    HANDLE token=NULL,result=NULL;TOKEN_LINKED_TOKEN linked={0};DWORD size=0;identity high={0},normal={0};
+    const char *stage="owner_identity";SetLastError(ERROR_SUCCESS);
+    bool ok=OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&token) && read_identity(token,&high) && sb_win_elevated_owner();
+    if(ok){stage="linked_query";ok=GetTokenInformation(token,TokenLinkedToken,&linked,sizeof(linked),&size)!=FALSE;}
+    if(ok){stage="linked_identity";ok=read_identity(linked.LinkedToken,&normal);}
+    if(ok){stage="linked_validation";ok=!normal.elevated && !normal.administrator_enabled &&
+        !normal.restricted && !normal.appcontainer && normal.integrity>=SECURITY_MANDATORY_MEDIUM_RID &&
+        normal.integrity<SECURITY_MANDATORY_HIGH_RID && normal.session_id==high.session_id && !strcmp(normal.user_sid,high.user_sid);}
+    if(ok){stage="linked_duplicate";ok=DuplicateTokenEx(linked.LinkedToken,MAXIMUM_ALLOWED,
+        NULL,SecurityImpersonation,TokenPrimary,&result)!=FALSE;}
+    /* Windows may expose the linked token at identification level only, or
+       provide no linked token for a scheduled launch. Use the actual ordinary
+       shell token only after independently checking the same user/session. */
+    if(!ok && token && high.elevated && high.administrator_enabled && high.session_id) {
+        HANDLE shell=NULL,source=NULL;DWORD pid=0;ULONGLONG deadline=GetTickCount64()+10000;
+        stage="ordinary_shell";
+        do {
+            HWND window=GetShellWindow();if(window)GetWindowThreadProcessId(window,&pid);
+            if(pid)break;Sleep(100);
+        } while(GetTickCount64()<deadline);
+        if(pid)shell=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,pid);
+        ok=shell && OpenProcessToken(shell,TOKEN_QUERY|TOKEN_DUPLICATE,&source) && read_identity(source,&normal) &&
+            !normal.elevated && !normal.administrator_enabled && !normal.restricted && !normal.appcontainer &&
+            normal.integrity>=SECURITY_MANDATORY_MEDIUM_RID && normal.integrity<SECURITY_MANDATORY_HIGH_RID &&
+            normal.session_id==high.session_id && !strcmp(normal.user_sid,high.user_sid) &&
+            DuplicateTokenEx(source,MAXIMUM_ALLOWED,
+                NULL,SecurityImpersonation,TokenPrimary,&result);
+        if(source)CloseHandle(source);if(shell)CloseHandle(shell);
+    }
+    DWORD failure=GetLastError();
+    if(linked.LinkedToken)CloseHandle(linked.LinkedToken);if(token)CloseHandle(token);
+    if(!ok){if(result)CloseHandle(result);result=NULL;char message[256];
+        snprintf(message,sizeof(message),"Ordinary owner token unavailable (%s, Windows %lu; elevated=%lu, admin=%lu, restricted=%lu, appcontainer=%lu, integrity=%lu, session=%lu).",stage,failure,normal.elevated,normal.administrator_enabled,normal.restricted,normal.appcontainer,normal.integrity,normal.session_id);sb_fail(error,message);}
+    return result;
+}
+
+bool sb_win_service_process(void) {
+    HANDLE token=NULL;identity actual={0};BYTE expected[SECURITY_MAX_SID_SIZE];DWORD size=0;
+    TOKEN_USER *user=NULL;
+    bool ok=sb_startup_service_sid(expected,&size) && OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&token) &&
+        read_identity(token,&actual) && sb_win_owner_token_allowed(token);
+    if(ok)user=token_buffer(token,TokenUser);
+    ok=ok && user && EqualSid(user->User.Sid,expected) && actual.session_id==0 &&
+        !actual.administrator_enabled && !actual.restricted && !actual.appcontainer;
+    free(user);if(token)CloseHandle(token);return ok;
 }
 
 /* Preparation only. This token does not yet grant any command capability.
@@ -204,10 +261,19 @@ static bool start_agent(sb_execution *execution, bool shared, sb_error *error) {
     SHELLEXECUTEINFOW launch = {0}; launch.cbSize = sizeof(launch);
     launch.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI;
     launch.lpVerb = L"runas"; launch.lpFile = image; launch.lpParameters = arguments; launch.nShow = SW_HIDE;
-    HRESULT com = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-    bool launched = SUCCEEDED(com) && ShellExecuteExW(&launch);
-    DWORD launch_error = launched ? ERROR_SUCCESS : FAILED(com) ? ERROR_NOT_READY : GetLastError();
-    if (SUCCEEDED(com)) CoUninitialize();
+    bool launched=false;DWORD launch_error=ERROR_SUCCESS;
+    if(sb_win_elevated_owner()) {
+        /* Already authorized by Windows. Do not invoke runas or ask for UAC. */
+        wchar_t command[SB_PATH_CAP+160];STARTUPINFOW startup={0};PROCESS_INFORMATION process={0};startup.cb=sizeof(startup);
+        swprintf(command,SB_PATH_CAP+160,L"\"%ls\" %ls",image,arguments);
+        launched=CreateProcessW(image,command,NULL,NULL,FALSE,CREATE_NO_WINDOW,NULL,NULL,&startup,&process)!=FALSE;
+        if(launched){launch.hProcess=process.hProcess;CloseHandle(process.hThread);}else launch_error=GetLastError();
+    } else {
+        HRESULT com=CoInitializeEx(NULL,COINIT_APARTMENTTHREADED|COINIT_DISABLE_OLE1DDE);
+        launched=SUCCEEDED(com) && ShellExecuteExW(&launch);
+        launch_error=launched?ERROR_SUCCESS:FAILED(com)?ERROR_NOT_READY:GetLastError();
+        if(SUCCEEDED(com))CoUninitialize();
+    }
     execution->process = launch.hProcess;
     if (launched && execution->process) {
         HANDLE events[] = {connect.hEvent, execution->process};
@@ -462,19 +528,21 @@ bool sb_win_execution_watch_worker(sb_execution *execution, HANDLE worker) { ret
 void sb_win_execution_store(sb_execution *execution, sb_store *store, sb_audit *audit) {
     if (execution && execution->tasks) sb_win_tasks_store(execution->tasks,store,audit);
 }
-bool sb_win_shared_worker(DWORD pid, HANDLE *process) {
+static bool shared_process(DWORD pid, HANDLE *process, bool allow_elevated_owner) {
     *process = NULL; HANDLE token = NULL, self_token = NULL; identity peer = {0}, self = {0};
     HANDLE candidate = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);
     wchar_t image[SB_PATH_CAP], own[SB_PATH_CAP]; DWORD size = SB_PATH_CAP;
     bool ok = candidate && WaitForSingleObject(candidate, 0) == WAIT_TIMEOUT && QueryFullProcessImageNameW(candidate, 0, image, &size) &&
         GetModuleFileNameW(NULL, own, SB_PATH_CAP) && !_wcsicmp(image, own) && OpenProcessToken(candidate, TOKEN_QUERY, &token) &&
-        read_identity(token, &peer) && sb_win_owner_token_allowed(token) && !peer.elevated && !peer.administrator_enabled &&
+        read_identity(token, &peer) && sb_win_owner_token_allowed(token) &&
+        ((!peer.elevated && !peer.administrator_enabled) || (allow_elevated_owner && peer.elevated && peer.administrator_enabled && peer.integrity>=SECURITY_MANDATORY_HIGH_RID)) &&
         OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &self_token) && read_identity(self_token, &self) &&
         !strcmp(peer.user_sid, self.user_sid) && peer.session_id == self.session_id;
     if (token) CloseHandle(token); if (self_token) CloseHandle(self_token);
     if (ok) *process = candidate; else if (candidate) CloseHandle(candidate);
     return ok;
 }
+bool sb_win_shared_worker(DWORD pid,HANDLE *process) { return shared_process(pid,process,false); }
 
 int sb_win_execution_agent(int argc, wchar_t **argv) {
     if (argc != 4 || !*argv[2] || wcslen(argv[3]) != 32 || wcsspn(argv[3], L"0123456789abcdef") != 32) return 2;
@@ -495,7 +563,7 @@ int sb_win_execution_agent(int argc, wchar_t **argv) {
     bool shared = !wcscmp(argv[1], L"--shared-administrator-agent");
     if (shared) {
         HANDLE verified = NULL;
-        if (!sb_win_shared_worker((DWORD)parent_id, &verified)) { CloseHandle(parent); return 2; }
+        if (!shared_process((DWORD)parent_id, &verified,true)) { CloseHandle(parent); return 2; }
         CloseHandle(verified);
     }
     wchar_t name[128]; swprintf(name, 128, L"\\\\.\\pipe\\ShellBot-execution-%lu-%ls", parent_id, argv[3]);

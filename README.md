@@ -6,11 +6,11 @@ Windows 工程 WinShellBot 优先面向 Windows 10/11 x64。通用 C 核心与 W
 
 后续开发按已确认的多项目和独立权限方案推进，见 [开发计划](docs/DEVELOPMENT_PLAN.md)及 [项目权限与执行身份](docs/EXECUTION_PERMISSIONS.md)。dev.13 接通 M6 审批与持久历史，dev.14 提供 [M7 原生项目管理窗口与独立候选包](docs/PROJECT_MANAGEMENT_UI.md)。独立系统、另一设备与真实 MCP 客户端仍待验收。
 
-首次使用请阅读 [使用说明](docs/USER_GUIDE.md)，包含候选包启动、客户端连接、文件与命令权限、审批、管理员和数据保留。M1–M7 的本机开发已完成，dev.15 增加桌面工具，dev.16 增加图像完整解码与缩放，dev.17 增加 PDF / Office 阅读与预览，dev.18 增加受控产物上传和下载；独立验收继续按计划推进。
+首次使用请阅读 [使用说明](docs/USER_GUIDE.md)，包含候选包启动、客户端连接、文件与命令权限、审批、管理员和数据保留。M1–M7 的本机开发已完成，dev.15 增加桌面工具，dev.16 增加图像完整解码与缩放，dev.17 增加 PDF / Office 阅读与预览，dev.18 增加受控产物上传和下载，dev.19 增加服务与托盘常驻；独立验收继续按计划推进。
 
 ## 当前实现
 
-当前源码版本为 `0.1.0-dev.18`，新增 [M11 受控产物上传和下载](docs/ARTIFACT_TRANSFER.md)，是开发版本。原 dev.14 冻结候选包不包含 M8–M11；验证边界见 [M11 交接](docs/HANDOFF_20261012_M11.md)。程序只监听本机端口，域名与 cloudflared 隧道由已有环境完成，不要求域名检查；OAuth 与隧道管理暂缓。已实现：
+当前源码版本为 `0.1.0-dev.19`，新增 [M12 常驻与自动启动](docs/STARTUP.md)，同时提供服务和托盘模式，是开发版本。支持已提升管理器复用管理员权限，以及由 Windows 管理的最高权限登录计划任务；普通工作进程和原审批规则保留。按用户确认，自启以实际登记及回读设置验收，不要求重启测试。原 dev.14 冻结候选包不包含 M8–M12，证据见 [人工验收记录](docs/MANUAL_ACCEPTANCE_20261012.md)。程序只监听本机端口，域名与 cloudflared 隧道由已有环境完成，不要求域名检查；OAuth 与隧道管理暂缓。已实现：
 
 | 能力 | 当前行为 |
 | --- | --- |
@@ -22,6 +22,7 @@ Windows 工程 WinShellBot 优先面向 Windows 10/11 x64。通用 C 核心与 W
 | image_view | 完整解码 PNG/JPEG；可按长边保持比例缩小，较大源自动转为有界 PNG；返回实际尺寸与源/输出摘要 |
 | document_info / document_read / document_preview | PDF 页面信息、文本与页面 PNG；DOCX 正文、XLSX 工作表存储值、PPTX 幻灯片文本及明确标注的内容预览；旧 Office 格式提示转换 |
 | artifact_download / artifact_upload | 新格式项目的二进制分块下载与上传；单文件 64 MiB，块 32 KiB；上传核对大小及 SHA-256 后创建新文件、禁止覆盖；范围、只读、审批和后端归属独立核验 |
+| 常驻与启动配置 | 私有 DPAPI 凭据和项目快照、选定项目启动、托盘窗口与后台任务；普通 Run 或最高权限登录任务；独立虚拟账户的自动延迟启动 Windows 服务，实际回读系统设置 |
 | fs_write / fs_patch | 默认创建；覆盖和替换保留原始哈希、独占打开与私有备份；UTF-8 原文与结果均限 64 KiB；新项目按独立审批模式执行 |
 | 本机审批 | 查看完整请求、批准、拒绝、撤销、过期、绑定参数、并发重试与重启失效 |
 | 审批和写入审计 | 私有 JSONL 记录状态、执行结果和备份编号，跨重启保留，日志故障时阻止新批准和写入 |
@@ -30,7 +31,7 @@ Windows 工程 WinShellBot 优先面向 Windows 10/11 x64。通用 C 核心与 W
 | M2 项目管理器 | 本机创建、配置、启停；独立普通工作进程、Data、任务、幂等记录、审批和备份；配额与本人 Job 清理 |
 | M3 项目 MCP 网关 | 一个回环端口、/projects/ID/mcp、逐项目 bearer、显式默认项目 /mcp、地址生成、有界并发和进程通信超时 |
 | M4 项目审批与受限任务 | 六个文件工具、命令启动和输入统一审批；原队列查看/批准/拒绝/撤销；有界分页和结果重试；LPAC 实际身份与权限验证后开放声明程序 |
-| M5 共享管理员代理 | 所有者异步启动 UAC；逐项目可信注册、许可与撤销；显式 identity:administrator 文件与任务；独立审批和归属清理 |
+| M5 共享管理员代理 | 普通管理器由所有者异步启动 UAC；已提升管理器复用已有权限；逐项目可信注册、许可与撤销；显式 identity:administrator 文件与任务，独立审批和归属清理 |
 | M6 远程审批与恢复 | 独立所有者凭据与有限页面/API；客户端 URL 提示；本人审批查询/取消；有界私有请求/任务历史；重启中断及完整生命周期审计 |
 | M8 Windows 桌面工具 | 默认关闭的独立观察/输入/剪贴板权限；短期会话独占控制、PNG 截图、窗口与物理坐标输入；人工输入暂停、紧急热键和仅本机恢复 |
 | 运行保护 | 数据目录实例锁、请求和结果大小上限；HTTP 令牌、Host/Origin 检查 |
@@ -70,6 +71,8 @@ python .\tests\smoke.py --exe .\out\x64\Release\WinShellBot.exe
 .\scripts\test.ps1 -Configuration Release -SkipCloseProbe
 # 同时回归图像、PDF / Office 和产物传输，不请求 UAC：
 .\scripts\test.ps1 -Configuration Release -SkipCloseProbe -Images -Documents -Transfers
+# 常驻与服务策略常规回归；需要暂时排除登录登记时：
+.\scripts\test.ps1 -Configuration Release -SkipCloseProbe -Images -Documents -Transfers -Startup -SkipLogonRegistration
 # 核心报告必须匹配当前 Release 程序才能生成测试包：
 # M7 独立候选包要求当前源码、M1–M7 与实际窗口/UAC 收据。
 .\scripts\package-candidate.ps1
@@ -129,6 +132,8 @@ $env:SHELLBOT_TOKEN = & .\out\x64\Release\WinShellBot.exe --generate-token
 fs_search 的 mode 默认 filename；设为 content 可以搜索 UTF-8/UTF-16 文本，返回行号、UTF-8 字节列号和最多 1024 字节的命中片段。默认读取每文件前 256 KiB、总计 4 MiB；查询不完整时明确返回 truncated 和扫描计数，二进制/无效编码被检测到后跳过，不遍历重解析目录。详见[文本内容搜索](docs/CONTENT_SEARCH.md)。
 
 ## 后续架构
+
+dev.19 提供当前账户托盘和独立虚拟账户 Windows 服务两种模式。服务限定本地配置目录、无桌面/管理员权限及受限命令，普通登录账户不从本机管道接管服务 SID；审批沿用独立所有者页面。启动配置存放完整加密快照，配置或凭据改变须明确切换新快照，不自动重放副作用任务。服务示例为 [service.example.json](config/service.example.json)，使用与验收边界见 [常驻说明](docs/STARTUP.md)。默认构建同时生成原生 GUI 产品组件 ShellBot-Launcher.exe，用于无控制台登录启动；保留其文件名和位置。新的候选打包器尚需适配此组件和阶段验收，本轮未生成新包。
 
 已确认采用普通权限管理器、每项目独立工作进程和 /projects/{project_id}/mcp 链接；各项目独立凭据、多个工作目录、任务与审计。审批提供 always、workspace_auto、never 三种模式，目录外访问与管理员使用许可独立设置。共享管理员代理只服务已获所有者授权的项目，一个项目获准不使其他项目拥有管理员权限；cwd 不是命令沙箱，受限执行通过验证前保持不可用。
 

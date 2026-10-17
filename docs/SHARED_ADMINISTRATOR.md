@@ -2,7 +2,7 @@
 
 dev.14 的[本机管理窗口](PROJECT_MANAGEMENT_UI.md)复用以下异步启动/停止协议；只有明确启动管理员才请求 UAC。暂停项目只撤离并结束该项目的管理员任务，其他项目和代理继续运行；窗口停止代理影响全部管理员任务，普通任务继续运行。
 
-管理器、网关和项目工作进程保持普通权限。所有者显式启动一个管理员代理，已经允许的项目共同复用；普通任务继续使用项目的默认身份。项目 MCP 不能启动 UAC、注册项目、授权管理员使用或批准自己的操作。
+普通启动时管理器和网关使用普通权限，所有者显式启动管理员代理，已经允许的项目共同复用。dev.19 另支持已提升的交互所有者启动管理器：有预先允许的项目时自动创建一次代理，复用已有管理员令牌，不再次请求 UAC；工作进程、普通任务及 LPAC 任务仍使用原默认身份。最高权限登录计划任务见 [常驻与自动启动](STARTUP.md)。项目 MCP 不能启动 UAC、注册项目、授权管理员使用或批准自己的操作。
 
 ## 所有者操作
 
@@ -19,7 +19,7 @@ WinShellBot.exe --project-administrator-revoke C --manager-data-dir E:\ShellBot\
 WinShellBot.exe --administrator-stop --manager-data-dir E:\ShellBot\ManagerData
 ```
 
-项目配置中的 execution.administrator_allowed 是预先保存的所有者许可。allow/revoke 是当前管理器运行期的显式更新，返回 authorization_version、persisted_to_registry:false；不会修改被固定的配置文件。永久更改继续使用 project-configure 导出新配置，并由所有者停止、切换配置和重启管理器。重启会恢复配置内的许可，代理仍需重新显式启动和 UAC。能力和 project-status 显示当前运行许可。
+项目配置中的 execution.administrator_allowed 是预先保存的所有者许可。allow/revoke 是当前管理器运行期的显式更新，返回 authorization_version、persisted_to_registry:false；不会修改被固定的配置文件。永久更改继续使用 project-configure 导出新配置，并由所有者停止、切换配置和重启管理器。重启恢复配置内的许可；普通管理器需重新显式启动代理和确认 UAC，已提升管理器可复用本次令牌。能力和 project-status 显示当前运行许可。
 
 administrator-start 立即返回 administrator_starting 状态，在独立线程等待 UAC；随后查询 administrator-status，直到 administrator_alive:true 或出现 startup_error。等待期间普通项目请求和管理器停止仍可响应。重复 start/status 不另启启动尝试，代理可用后复用同一 PID。administrator-stop 可取消未完成的启动发布，Windows 弹窗仍需点击“否”；若稍后允许，产生的代理也会关闭，不能接收项目。新增项目必须经过配置或 allow 的所有者授权，已有代理通常不另弹 UAC。拒绝启动、跨账户提权、代理死亡均保持管理员后端不可用，不自动重新弹窗或以普通权限执行原管理员请求。dev.12 共享代理仅接受同账户、同会话提权；跨账户路径明确拒绝，旧单实例诊断单独保留。
 
@@ -52,7 +52,7 @@ WinShellBot.exe --project-administrator-owner A --request E:\ShellBot\inspect.js
 
 ## 可信通信和生命周期
 
-代理的唯一通信对端是启动它的管理器。私有消息管道拒绝远程访问、固定单连接且不向 worker/task 继承；管理器核对 ShellExecute 返回的真实进程句柄、管道客户端 PID、实际提升令牌、SID 和会话，代理核对实际服务器 PID、持续持有的普通管理器进程、同一程序路径和真实令牌。SECURITY_IDENTIFICATION 防止普通管理器借用管理员模拟令牌。
+代理的唯一通信对端是启动它的管理器。私有消息管道拒绝远程访问、固定单连接且不向 worker/task 继承；管理器核对 ShellExecute 或已有提升令牌创建返回的真实进程句柄、管道客户端 PID、实际提升令牌、SID 和会话，代理核对实际服务器 PID、持续持有的管理器进程、同一程序路径和真实令牌。注册的项目 worker 仍独立要求普通身份。SECURITY_IDENTIFICATION 防止普通管理器借用管理员模拟令牌。
 
 项目注册只由该管理器通道发送可信快照；代理再次校验格式、可用身份和普通 worker 的真实进程令牌，持有 worker 句柄并绑定实例。每次操作验证注册项目、配置版本、管理员授权版本、实例、固定主体、规范化请求摘要、单调序号和有界期限，再由代理中的工具策略独立决定是否执行。worker 请求还必须与管理器已认证的原始工具调用完全一致，不能改写参数或选择主体。仅有同账户 SID、项目编号或自报批准不构成管理员授权。
 

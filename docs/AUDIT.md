@@ -12,6 +12,8 @@ dev.18 的 artifact_download / artifact_upload 接入文件调用开始/完成�
 
 ## 记录内容
 
+dev.19 的托盘/服务复用原管理器和项目审计，预选项目启动仍产生 project_started，停止清理按原本人归属处理；旧许可不恢复，失败项目不自动重跑。启动配置在独立私有 DPAPI 文件内捕获凭据和配置，审计不保存其密文或明文凭据。SHELLBOT_STARTUP_TRACE=1 仅输出固定阶段名到 stderr，不打印路径、参数或凭据。服务 SCM 生命周期和登录登记本身不额外复制为项目执行事件，应通过相应本机状态和独立验收收据判断，见 [常驻与自动启动](STARTUP.md)。
+
 记录包含格式版本、程序版本、实例编号、实例内递增序号、UTC Unix 毫秒时间、事件和调用身份。审批相关事件还包含审批编号、工具名、workspace_id、规范目标、拟写入内容的 SHA-256 与字节数。
 
 事件包括 instance_opened、instance_closed、approval_requested、approval_approved、approval_denied、approval_revoked、approval_expired、write_started、backup_saved、write_completed 和 write_failed。修改事件增加 operation、original_sha256，备份后增加 backup_id；backup_saved 刷新成功后才修改原文件。完整原文只进入独立私有备份，不进入审计正文，见 FILE_EDIT.md。过期按请求检查记录；普通读取和原始 HTTP 交互尚不在审计范围。
