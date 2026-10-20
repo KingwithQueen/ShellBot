@@ -6,7 +6,7 @@
 #include <stdint.h>
 #include "yyjson.h"
 
-#define SB_VERSION "0.1.0-dev.19"
+#define SB_VERSION "0.1.0-dev.21"
 #define SB_TRANSFER_LIMIT (64u * 1024u * 1024u)
 #define SB_TRANSFER_CHUNK 32768u
 #define SB_MAX_ROOTS 16
@@ -34,6 +34,7 @@ typedef struct sb_audit sb_audit;
 typedef struct sb_journal sb_journal;
 typedef struct sb_store sb_store;
 typedef struct sb_modify sb_modify;
+typedef struct sb_fs_plan sb_fs_plan;
 typedef struct sb_execution sb_execution;
 typedef struct sb_desktop sb_desktop;
 typedef struct sb_transfers sb_transfers;
@@ -261,6 +262,8 @@ bool sb_policy_operation_begin(sb_host *host, const char *actor, const char *too
     bool approval_required, uint64_t offset, uint64_t budget, yyjson_mut_doc *doc,
     yyjson_mut_val **reply, char ticket[33]);
 bool sb_policy_operation_finish(sb_policy *policy, const char *ticket, yyjson_mut_val *result);
+yyjson_mut_val *sb_policy_operation_receipt(sb_host *host, const char *actor, const char *tool,
+    const char *parameters, const char *target, const char *approval_id, yyjson_mut_doc *doc);
 bool sb_policy_transfer_valid(sb_policy *policy, const char *ticket, const char *actor);
 bool sb_transfer_tool(const char *name);
 sb_transfers *sb_transfers_new(sb_error *error);
@@ -296,6 +299,19 @@ yyjson_mut_val *sb_search(sb_workspace *workspace, const char *path, const char 
                          bool recursive, bool content, size_t maximum, size_t per_file,
                          size_t total_bytes, yyjson_mut_doc *document, sb_error *error);
 bool sb_tool_exists(const char *name);
+bool sb_file_manage_tool(const char *name);
+typedef struct {
+    bool directory;
+    uint64_t size;
+    char version[65];
+} sb_fs_info;
+sb_fs_plan *sb_platform_fs_prepare(const char *operation, sb_root *source, const char *path,
+    bool directory, sb_root *destination, const char *destination_path, sb_fs_info *info,
+    char version[65], sb_error *error);
+typedef bool (*sb_fs_backup_receipt)(void *context, const char *path, uint64_t bytes, const char *backup_id);
+bool sb_platform_fs_execute(sb_fs_plan *plan, sb_lease *lease, sb_fs_backup_receipt receipt,
+    void *context, char backup_id[33], sb_error *error);
+void sb_platform_fs_close(sb_fs_plan *plan);
 bool sb_desktop_tool(const char *name);
 bool sb_desktop_tool_visible(sb_host *host, const char *name);
 void sb_desktop_tools_list(sb_host *host, yyjson_mut_doc *doc, yyjson_mut_val *tools);

@@ -6,7 +6,7 @@
 #define SB_PROJECT_FORMAT 1
 #define SB_MAX_PROJECTS 16
 #define SB_MAX_PROJECT_DIRECTORIES (SB_MAX_ROOTS * 2)
-#define SB_PROJECT_TOOL_COUNT 32
+#define SB_PROJECT_TOOL_COUNT 37
 #define SB_DESKTOP_TOOL_FIRST 15
 #define SB_DESKTOP_TOOL_END 27
 
@@ -34,7 +34,7 @@ typedef struct {
     bool execution_enabled;
     sb_execution_identity default_identity;
     bool administrator_allowed; /* Owner configuration, independent of agent availability. */
-    uint32_t tools;
+    uint64_t tools;
     sb_desktop_policy desktop; /* Independent session-wide disclosure/input permission. */
     char *runtime_files[16]; /* Owner-configured, exact readonly executable/DLL resources. */
     size_t runtime_file_count;
@@ -75,6 +75,7 @@ typedef struct {
     bool restricted_backend_verified; /* Actual local sandbox verification, never accepted from JSON. */
     bool administrator_backend_verified; /* Verified manager-owned agent, not a client assertion. */
     bool desktop_cleanup; /* Validated lease status/release; never grants new control. */
+    bool file_source_read; /* Trusted resolver: copy source is read-only, destination is a write. */
 } sb_project_operation;
 
 typedef struct { sb_decision decision; const char *reason; } sb_policy_result;
@@ -103,5 +104,6 @@ char *sb_projects_migrate(const char *bytes, size_t length, const char *project_
 /* Owner CLI export to a new file. Existing registry is never modified in place. */
 char *sb_projects_edit(const char *bytes, size_t length, const char *project_json,
                        size_t project_length, const char *id, bool configure, sb_error *error);
+char *sb_projects_remove(const char *bytes, size_t length, const char *id, sb_error *error);
 
 #endif

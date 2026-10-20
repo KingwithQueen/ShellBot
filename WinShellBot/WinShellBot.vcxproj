@@ -162,7 +162,7 @@
       <RuntimeLibrary Condition="'$(Configuration)'=='Release'">MultiThreaded</RuntimeLibrary>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>Ws2_32.lib;Bcrypt.lib;Crypt32.lib;Shell32.lib;Ole32.lib;OleAut32.lib;Taskschd.lib;Uuid.lib;Advapi32.lib;Userenv.lib;Comctl32.lib;Gdi32.lib;Windowscodecs.lib;Wtsapi32.lib;Shlwapi.lib;Xmllite.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>Ws2_32.lib;Bcrypt.lib;Crypt32.lib;Shell32.lib;Ole32.lib;OleAut32.lib;Taskschd.lib;Uuid.lib;Advapi32.lib;Userenv.lib;Comctl32.lib;Comdlg32.lib;Gdi32.lib;Windowscodecs.lib;Wtsapi32.lib;Shlwapi.lib;Xmllite.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Manifest>
       <AdditionalManifestFiles>$(MSBuildProjectDirectory)\app\shellbot.manifest;%(AdditionalManifestFiles)</AdditionalManifestFiles>
@@ -187,6 +187,12 @@
     <ClCompile Include="platform\desktop.c" />
     <ClInclude Include="platform\desktop.h" />
     <ClCompile Include="platform\manager_ui.c" />
+    <ClCompile Include="platform\desktop_app.c" />
+    <ClCompile Include="platform\desktop_dialog.c" />
+    <ClCompile Include="platform\desktop_store.c" />
+    <ClInclude Include="platform\desktop_app.h" />
+    <ClCompile Include="platform\project_settings.c" />
+    <ClInclude Include="platform\project_settings.h" />
     <ClInclude Include="platform\manager_ui.h" />
     <ClCompile Include="platform\execution.c" />
     <ClCompile Include="platform\shared_admin.c" />
@@ -226,6 +232,7 @@
     <ClInclude Include="platform\manager.h" />
     <ClInclude Include="platform\task_process.h" />
     <ClInclude Include="app\owner_ui.h" />
+    <ClInclude Include="app\http_response.h" />
     <ClInclude Include="..\third_party\yyjson\yyjson.h" />
     <ClInclude Include="..\third_party\civetweb\include\civetweb.h" />
     <None Include="app\shellbot.manifest" />

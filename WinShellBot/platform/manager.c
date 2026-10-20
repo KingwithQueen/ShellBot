@@ -5,6 +5,7 @@
 #include "execution.h"
 #include "manager.h"
 #include "manager_ui.h"
+#include "project_settings.h"
 #include "sandbox.h"
 #include "desktop.h"
 #include <stdio.h>
@@ -53,7 +54,8 @@ typedef struct {
     sb_owner *owner;
     sb_config gateway_config;
     sb_http_server *gateway;
-    bool service_mode, elevated;
+    bool service_mode, elevated, desktop_mode;
+    SRWLOCK registry_lock;
     sb_win_desktop_session *desktop_session;
     HANDLE stop, ordinary_token;
     sb_mutex *administrator_lock;
@@ -64,7 +66,10 @@ typedef struct {
     uint64_t administrator_launch_attempts;
     char owner_token[257];
     size_t owner_token_length;
+    const char *configuration;
+    char *live_configuration;
 } manager;
+static char *apply_configuration(manager *m,yyjson_val *configuration);
 
 static wchar_t *wide(const char *s) {
     int n = s ? MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s, -1, NULL, 0) : 0;
@@ -523,7 +528,7 @@ invalid_owner:
 invalid:
     sb_fail(error, "Every enabled project requires a 32..256 byte visible-ASCII bearer in its token_env; gateway startup blocked."); return false;
 }
-static void *gateway_open(void *context, const char *path, const char *authorization, bool *health, int *http_status) {
+static void *gateway_open_unlocked(void *context, const char *path, const char *authorization, bool *health, int *http_status) {
     manager *m = context; worker *w = NULL;
     const char *suffix = !strcmp(path, "/mcp") ? "mcp" : !strcmp(path, "/healthz") ? "healthz" : NULL;
     if (suffix) {
@@ -547,7 +552,14 @@ static void *gateway_open(void *context, const char *path, const char *authoriza
     if (!w->process) { LeaveCriticalSection(&w->lock); *http_status = 503; return NULL; }
     *health = !strcmp(suffix, "healthz"); *http_status = 200; return w;
 }
-static void gateway_close(void *context, void *binding) { (void)context; LeaveCriticalSection(&((worker *)binding)->lock); }
+static void *gateway_open(void *context,const char *path,const char *authorization,bool *health,int *http_status) {
+    manager *m=context; AcquireSRWLockShared(&m->registry_lock);
+    void *binding=gateway_open_unlocked(context,path,authorization,health,http_status);
+    if (!binding) ReleaseSRWLockShared(&m->registry_lock); return binding;
+}
+static void gateway_close(void *context, void *binding) {
+    LeaveCriticalSection(&((worker *)binding)->lock); ReleaseSRWLockShared(&((manager *)context)->registry_lock);
+}
 static bool owner_enabled(void *context) { return ((manager *)context)->owner_token_length!=0; }
 static bool owner_authorized(void *context, const char *authorization) {
     manager *m=context;
@@ -558,7 +570,7 @@ static bool owner_authorized(void *context, const char *authorization) {
 }
 /* A limited owner API. It cannot dispatch MCP, start a backend, modify policy,
    or accept caller-selected actors. Decisions carry the inspected binding. */
-static char *owner_call(void *context, const char *request, size_t length, int *http_status) {
+static char *owner_call_unlocked(void *context, const char *request, size_t length, int *http_status) {
     manager *m=context; *http_status=400;
     yyjson_doc *input=length<=65536 ? yyjson_read(request,length,0) : NULL;
     yyjson_val *root=yyjson_doc_get_root(input);
@@ -619,6 +631,10 @@ invalid:
     reply=error_json("Invalid limited owner request or missing inspected decision binding.");
 done:
     yyjson_doc_free(input); return reply;
+}
+static char *owner_call(void *context,const char *request,size_t length,int *http_status) {
+    manager *m=context; AcquireSRWLockShared(&m->registry_lock);
+    char *reply=owner_call_unlocked(context,request,length,http_status); ReleaseSRWLockShared(&m->registry_lock); return reply;
 }
 static char *gateway_call(void *context, void *binding, const char *request, size_t length,
                           const sb_request_context *transport, size_t *response_length, int *http_status) {
@@ -705,7 +721,7 @@ static void management_details(manager *m, worker *w, yyjson_mut_doc *doc, yyjso
     }
     yyjson_mut_obj_add_val(doc,value,"directories",directories);
 }
-static char *manager_request(void *context, const char *request, size_t length) {
+static char *manager_request_unlocked(void *context, const char *request, size_t length) {
     manager *m = context;
     yyjson_doc *input = yyjson_read(request, length, 0);
     yyjson_val *root = yyjson_doc_get_root(input);
@@ -717,6 +733,12 @@ static char *manager_request(void *context, const char *request, size_t length) 
         (payload && !yyjson_is_obj(payload))) { json = error_json("Invalid manager request."); goto done; }
     if (!strcmp(command, "manager-stop") && !id && !payload) {
         json = sb_strdup("{\"status\":\"stopping\"}"); goto done;
+    }
+    if (!strcmp(command,"configuration-snapshot") && !id && !payload) {
+        size_t capacity=m->configuration ? strlen(m->configuration)+32 : 0;
+        json=capacity ? malloc(capacity) : NULL;
+        if (json) snprintf(json,capacity,"{\"configuration\":%s}",m->configuration);
+        goto done;
     }
     if (WaitForSingleObject(m->stop, 0) == WAIT_OBJECT_0) { json = error_json("Manager is stopping."); goto done; }
     if (m->service_mode && (!strcmp(command,"administrator-start") || !strncmp(command,"project-administrator-",22) ||
@@ -895,16 +917,7 @@ static char *manager_request(void *context, const char *request, size_t length) 
 done:
     yyjson_doc_free(input); return json;
 }
-static bool preflight(manager *m, const char *data_dir, const char *bytes, size_t length, sb_error *error) {
-    bool is_ordinary=ordinary();
-    if(!is_ordinary && !m->service_mode && sb_win_elevated_owner()) {
-        m->ordinary_token=sb_win_ordinary_owner_token(error);if(!m->ordinary_token)return false;
-    } else if (!is_ordinary && !(m->service_mode && sb_win_service_process())) { sb_fail(error, "Manager requires an interactive owner or its exact non-administrator service identity in Session 0; it never requests UAC itself."); return false; }
-    m->elevated=!is_ordinary;
-    if (!sb_project_path_valid(data_dir) || !sb_projects_parse(&m->registry, bytes, length, error)) return false;
-    m->lease = sb_platform_lease(data_dir, error); if (!m->lease) return false;
-    m->data_root = sb_platform_root(data_dir, error); if (!m->data_root) return false;
-    m->audit = sb_audit_new(m->lease, SB_AUDIT_LIMIT, error); if (!m->audit) return false;
+static bool prepare_workers(manager *m,const char *bytes,size_t length,const manager *prior,sb_error *error) {
     yyjson_doc *source = yyjson_read(bytes, length, 0);
     yyjson_val *array = yyjson_obj_get(yyjson_doc_get_root(source), "projects");
     bool ok = false;
@@ -913,8 +926,9 @@ static bool preflight(manager *m, const char *data_dir, const char *bytes, size_
         w->administrator_allowed=w->project->policy.administrator_allowed && !w->project->legacy_compatibility; w->authorization_version=1;
         InitializeCriticalSection(&w->lock); ++m->initialized;
         /* Physical Data comparison includes junction/UNC aliases; roots stay pinned. */
-        sb_lease *probe = sb_platform_lease(w->project->data_dir, error);
-        if (!probe) goto done;
+        bool reused=prior && i<prior->registry.project_count && !_stricmp(w->project->data_dir,prior->registry.projects[i].data_dir);
+        sb_lease *probe = reused ? NULL : sb_platform_lease(w->project->data_dir, error);
+        if (!reused && !probe) goto done;
         w->data_root = sb_platform_root(w->project->data_dir, error); sb_platform_lease_close(probe);
         if (!w->data_root) goto done;
         if (!sb_platform_root_identity(w->data_root, w->data_identity, error)) goto done;
@@ -959,17 +973,99 @@ overlap:
 done:
     yyjson_doc_free(source); return ok;
 }
+static bool preflight(manager *m,const char *data_dir,const char *bytes,size_t length,sb_error *error) {
+    bool is_ordinary=ordinary();
+    if(!is_ordinary && !m->service_mode && sb_win_elevated_owner()) {
+        m->ordinary_token=sb_win_ordinary_owner_token(error);if(!m->ordinary_token)return false;
+    } else if (!is_ordinary && !(m->service_mode && sb_win_service_process())) { sb_fail(error,"Manager requires an interactive owner or its exact non-administrator service identity in Session 0; it never requests UAC itself."); return false; }
+    m->elevated=!is_ordinary;
+    if (!sb_project_path_valid(data_dir) || !sb_projects_parse(&m->registry,bytes,length,error)) return false;
+    m->lease=sb_platform_lease(data_dir,error); if (!m->lease) return false;
+    m->data_root=sb_platform_root(data_dir,error); if (!m->data_root) return false;
+    m->audit=sb_audit_new(m->lease,SB_AUDIT_LIMIT,error); if (!m->audit) return false;
+    return prepare_workers(m,bytes,length,NULL,error);
+}
+static void release_project(sb_project *p) {
+    for (size_t i=0;i<p->directory_count;++i) free(p->directories[i].path);
+    for (size_t i=0;i<p->policy.runtime_file_count;++i) free(p->policy.runtime_files[i]);
+    free(p->data_dir); memset(p,0,sizeof(*p));
+}
+static char *apply_configuration(manager *m,yyjson_val *configuration) {
+    sb_error error={0}; char *bytes=NULL,*reply=NULL,*success=NULL; manager *candidate=NULL;
+    if (!m->desktop_mode || m->service_mode) return error_json("Live configuration belongs to the desktop application.");
+    candidate=calloc(1,sizeof(*candidate)); bytes=configuration ? yyjson_val_write(configuration,0,NULL) : NULL;
+    if (!candidate || !bytes || !sb_projects_parse(&candidate->registry,bytes,strlen(bytes),&error)) goto done;
+    const sb_project_registry *next=&candidate->registry;
+    if (next->project_count<m->registry.project_count || next->port!=m->registry.port || strcmp(next->public_origin,m->registry.public_origin) ||
+        strcmp(next->owner_token_env,m->registry.owner_token_env) || strcmp(next->default_project_id,m->registry.default_project_id)) {
+        sb_fail(&error,"Project edits must retain existing project order and gateway settings."); goto done;
+    }
+    for (size_t i=0;i<m->registry.project_count;++i) if (strcmp(next->projects[i].id,m->registry.projects[i].id)) {
+        sb_fail(&error,"Existing project identifiers are immutable."); goto done;
+    }
+    candidate->data_root=m->data_root;
+    if (!prepare_workers(candidate,bytes,strlen(bytes),m,&error) || !gateway_credentials(candidate,&error)) goto done;
+    for (size_t i=0;i<m->registry.project_count;++i) {
+        if (!strcmp(candidate->workers[i].snapshot,m->workers[i].snapshot)) continue;
+        if (m->workers[i].process) { sb_fail(&error,"Stop the edited project before changing its configuration; other projects stay running."); goto done; }
+        if (candidate->registry.projects[i].policy_revision<=m->registry.projects[i].policy_revision) {
+            sb_fail(&error,"Edited project policy revision must advance."); goto done;
+        }
+    }
+    if (!sb_audit_operation(m->audit,"desktop_configuration_apply","local-owner","manager","ordinary","replace_stopped_project",NULL)) {
+        sb_fail(&error,"Configuration audit could not be saved."); goto done;
+    }
+    success=sb_strdup("{\"configuration_applied\":true,\"unmodified_projects_preserved\":true}");if (!success) goto done;
+    for (size_t i=0;i<next->project_count;++i) {
+        worker *w=&m->workers[i],*prepared=&candidate->workers[i];
+        if (i<m->registry.project_count && !strcmp(w->snapshot,prepared->snapshot)) continue;
+        if (i<m->registry.project_count) {
+            reap(m,w,"stopped"); free(w->snapshot); sb_platform_root_close(w->data_root); release_project(&m->registry.projects[i]);
+        } else { InitializeCriticalSection(&w->lock); ++m->initialized; }
+        m->registry.projects[i]=candidate->registry.projects[i]; memset(&candidate->registry.projects[i],0,sizeof(sb_project));
+        w->project=&m->registry.projects[i]; w->snapshot=prepared->snapshot; prepared->snapshot=NULL;
+        w->data_root=prepared->data_root; prepared->data_root=NULL;
+        strcpy(w->data_identity,prepared->data_identity); memcpy(w->token,prepared->token,sizeof(w->token));w->token_length=prepared->token_length;
+        w->administrator_allowed=prepared->administrator_allowed; w->authorization_version++; w->paused=false; w->state="stopped";
+    }
+    m->registry.project_count=next->project_count;
+    free(m->live_configuration); m->live_configuration=bytes; bytes=NULL; m->configuration=m->live_configuration;
+    reply=success;success=NULL;
+done:
+    if (!reply) reply=error_json(*error.text ? error.text : "Cannot prepare desktop project configuration.");
+    if (candidate) {
+        for (size_t i=0;i<candidate->initialized;++i) {
+            free(candidate->workers[i].snapshot); sb_platform_root_close(candidate->workers[i].data_root); DeleteCriticalSection(&candidate->workers[i].lock);
+            SecureZeroMemory(candidate->workers[i].token,sizeof(candidate->workers[i].token));
+        }
+        sb_projects_free(&candidate->registry); SecureZeroMemory(candidate->owner_token,sizeof(candidate->owner_token)); free(candidate);
+    }
+    free(bytes);free(success); return reply;
+}
+static char *manager_request(void *context,const char *request,size_t length) {
+    manager *m=context; yyjson_doc *doc=yyjson_read(request,length,0); yyjson_val *root=yyjson_doc_get_root(doc);
+    const char *command=sb_string(yyjson_obj_get(root,"command")); char *reply;
+    if (command && !strcmp(command,"configuration-apply") && yyjson_obj_size(root)==2 && yyjson_is_obj(yyjson_obj_get(root,"request"))) {
+        AcquireSRWLockExclusive(&m->registry_lock);
+        reply=WaitForSingleObject(m->stop,0)==WAIT_TIMEOUT ? apply_configuration(m,yyjson_obj_get(root,"request")) : error_json("Manager is stopping.");
+        ReleaseSRWLockExclusive(&m->registry_lock);
+    } else {
+        AcquireSRWLockShared(&m->registry_lock); reply=manager_request_unlocked(context,request,length); ReleaseSRWLockShared(&m->registry_lock);
+    }
+    yyjson_doc_free(doc); return reply;
+}
 static int run_manager(const char *source, const char *data, bool http,const char *configuration,
-                       const char *const *projects,size_t count,HANDLE external_stop,HANDLE ready,bool service_mode) {
+                       const char *const *projects,size_t count,HANDLE external_stop,HANDLE ready,bool service_mode,bool desktop_mode) {
     sb_error error = {0};size_t length=0;wchar_t *source_name=wide(source);
     HANDLE source_pin=source_name?CreateFileW(source_name,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL):INVALID_HANDLE_VALUE;
     free(source_name);
     char *bytes=configuration ? sb_strdup(configuration) : source_pin!=INVALID_HANDLE_VALUE?sb_platform_load_config(source,&length,&error):NULL;
     if(configuration)length=strlen(configuration);
     manager *m = calloc(1, sizeof(*m)); int code = 2;
-    if(m)m->service_mode=service_mode;
+    if(m){m->service_mode=service_mode;m->desktop_mode=desktop_mode;InitializeSRWLock(&m->registry_lock);}
     if (m) m->administrator_lock=sb_platform_mutex_new();
     if (!m || !m->administrator_lock || !bytes || !preflight(m, data, bytes, length, &error)) goto done;
+    m->configuration=bytes;
     m->stop = CreateEventW(NULL, TRUE, FALSE, NULL); if (!m->stop) goto done;
     m->desktop_session=service_mode?NULL:sb_win_desktop_session_new();
     if (http) {
@@ -1004,14 +1100,15 @@ static int run_manager(const char *source, const char *data, bool http,const cha
     while (WaitForSingleObject(m->stop, 100) == WAIT_TIMEOUT && (!external_stop || WaitForSingleObject(external_stop,0)!=WAIT_OBJECT_0) &&
            !sb_owner_stopping(m->owner) && (!m->gateway || !sb_http_stopping())) {
         sb_platform_mutex_lock(m->administrator_lock); administrator_refresh_locked(m); sb_platform_mutex_unlock(m->administrator_lock);
+        AcquireSRWLockShared(&m->registry_lock);
         for (size_t i = 0; i < m->registry.project_count; ++i) {
             worker *w = &m->workers[i];
             if (TryEnterCriticalSection(&w->lock)) { refresh(m, w); LeaveCriticalSection(&w->lock); }
         }
+        ReleaseSRWLockShared(&m->registry_lock);
     }
     SetEvent(m->stop); code = 0;
 done:
-    free(bytes);
     if (m) {
         if (m->stop) SetEvent(m->stop);
         if (m->administrator_lock) {
@@ -1041,9 +1138,10 @@ done:
                A late agent cannot bind to a dead manager or receive projects. */
         }
         sb_execution_free(m->administrator); sb_platform_mutex_free(m->administrator_lock);
-        sb_projects_free(&m->registry); SecureZeroMemory(m->owner_token,sizeof(m->owner_token)); free(m);
+        sb_projects_free(&m->registry); SecureZeroMemory(m->owner_token,sizeof(m->owner_token)); free(m->live_configuration); free(m);
     }
     if(source_pin!=INVALID_HANDLE_VALUE)CloseHandle(source_pin);
+    free(bytes);
     if (code) fprintf(stderr, "ShellBot: %s\n", *error.text ? error.text : "Manager startup failed.");
     return code;
 }
@@ -1177,10 +1275,13 @@ done:
 
 int sb_manager_startup(const char *configuration,const char *data,const char *const *projects,
                       size_t count,void *stop,void *ready,bool service_mode) {
-    return run_manager(NULL,data,true,configuration,projects,count,stop,ready,service_mode);
+    return run_manager(NULL,data,true,configuration,projects,count,stop,ready,service_mode,false);
+}
+int sb_manager_desktop_startup(const char *configuration,const char *data,const char *const *projects,size_t count,void *stop,void *ready) {
+    return run_manager(NULL,data,true,configuration,projects,count,stop,ready,false,true);
 }
 bool sb_manager_option(const char *option) {
-    static const char *const names[] = {"--manager", "--manager-stop", "--project-create", "--project-configure", "--project-start",
+    static const char *const names[] = {"--manager", "--manager-stop", "--project-create", "--project-configure", "--project-remove", "--project-settings", "--project-start",
         "--project-stop", "--project-pause", "--project-resume", "--project-status", "--management-status", "--manage", "--project-request", "--project-owner", "--project-links", "--administrator-start", "--administrator-stop", "--administrator-status",
         "--project-administrator-allow", "--project-administrator-revoke", "--project-administrator-owner", "--project-administrator-boundary-probe",
         "--desktop-status", "--desktop-pause", "--desktop-resume"};
@@ -1189,10 +1290,11 @@ bool sb_manager_option(const char *option) {
 }
 int sb_manager_cli(int argc, char **argv) {
     const char *mode = argv[1], *id = NULL, *registry = NULL, *data = NULL, *definition = NULL, *output = NULL, *request_file = NULL;
-    bool editing = !strcmp(mode, "--project-create") || !strcmp(mode, "--project-configure");
+    bool removing=!strcmp(mode,"--project-remove");
+    bool editing = !strcmp(mode, "--project-create") || !strcmp(mode, "--project-configure") || removing;
     bool payload = !strcmp(mode, "--project-request") || !strcmp(mode, "--project-owner") || !strcmp(mode,"--project-administrator-owner");
     bool global=!strcmp(mode,"--administrator-start") || !strcmp(mode,"--administrator-stop") || !strcmp(mode,"--administrator-status") ||
-        !strcmp(mode,"--management-status") || !strcmp(mode,"--manage") ||
+        !strcmp(mode,"--management-status") || !strcmp(mode,"--manage") || !strcmp(mode,"--project-settings") ||
         !strcmp(mode,"--desktop-status") || !strcmp(mode,"--desktop-pause") || !strcmp(mode,"--desktop-resume");
     bool http = false;
     int index = 2;
@@ -1211,17 +1313,20 @@ int sb_manager_cli(int argc, char **argv) {
     sb_error error = {0}; int code = 2; char *bytes = NULL, *project = NULL, *json = NULL, *backup = NULL;
     size_t length = 0, project_length = 0;
     if (editing) {
-        if (!definition || !output || data || request_file || !sb_project_path_valid(output) || (!strcmp(mode, "--project-configure") && !registry)) goto invalid;
+        if ((!removing && !definition) || (removing && (definition || !registry)) || !output || data || request_file || !sb_project_path_valid(output) || (!strcmp(mode, "--project-configure") && !registry)) goto invalid;
         if (registry) { bytes = sb_platform_load_config(registry, &length, &error); if (!bytes) goto done; }
-        project = sb_platform_load_config(definition, &project_length, &error); if (!project) goto done;
-        json = sb_projects_edit(bytes, length, project, project_length, id, !strcmp(mode, "--project-configure"), &error); if (!json) goto done;
+        if (!removing) { project = sb_platform_load_config(definition, &project_length, &error); if (!project) goto done; }
+        json = removing ? sb_projects_remove(bytes,length,id,&error) : sb_projects_edit(bytes, length, project, project_length, id, !strcmp(mode, "--project-configure"), &error); if (!json) goto done;
         size_t capacity = strlen(output) + sizeof(".source-backup.json"); backup = malloc(capacity); if (!backup) goto done;
         snprintf(backup, capacity, "%s.source-backup.json", output);
         if (!sb_platform_export_config(output, backup, json, strlen(json), bytes ? bytes : project, bytes ? length : project_length, &error)) goto done;
         puts("{\"exported\":true,\"source_backup_saved\":true,\"running_configuration_changed\":false}"); code = 0;
+    } else if (!strcmp(mode,"--project-settings")) {
+        if (data || definition || output || request_file) goto invalid;
+        code=sb_project_settings(NULL,registry,NULL);
     } else if (!strcmp(mode, "--manager")) {
         if (!registry || !data || definition || output || request_file) goto invalid;
-        code = run_manager(registry, data, http,NULL,NULL,0,NULL,NULL,false);
+        code = run_manager(registry, data, http,NULL,NULL,0,NULL,NULL,false,false);
     } else if(!strcmp(mode,"--manage")) {
         if(!data || !sb_project_path_valid(data) || registry || definition || output || request_file)goto invalid;
         code=sb_manager_ui(data);

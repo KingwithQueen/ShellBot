@@ -28,6 +28,10 @@
     <ClCompile Include="platform\desktop.c"><Filter>源文件</Filter></ClCompile>
     <ClInclude Include="platform\desktop.h"><Filter>头文件</Filter></ClInclude>
     <ClCompile Include="platform\manager_ui.c"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="platform\desktop_app.c"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="platform\desktop_dialog.c"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="platform\desktop_store.c"><Filter>源文件</Filter></ClCompile>
+    <ClInclude Include="platform\desktop_app.h"><Filter>头文件</Filter></ClInclude>
     <ClInclude Include="platform\manager_ui.h"><Filter>头文件</Filter></ClInclude>
     <ClCompile Include="platform\execution.c"><Filter>源文件</Filter></ClCompile>
     <ClCompile Include="platform\shared_admin.c"><Filter>源文件</Filter></ClCompile>
@@ -72,4 +76,8 @@
     <ClCompile Include="..\core\tools\document.c"><Filter>源文件</Filter></ClCompile>
     <ClInclude Include="platform\document.h"><Filter>头文件</Filter></ClInclude>
   </ItemGroup>
-</Project>
+    <ItemGroup>
+      <ClCompile Include="platform\project_settings.c"><Filter>源文件</Filter></ClCompile>
+      <ClInclude Include="platform\project_settings.h"><Filter>头文件</Filter></ClInclude>
+    </ItemGroup>
+  </Project>

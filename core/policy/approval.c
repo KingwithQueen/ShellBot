@@ -59,7 +59,8 @@ static bool audit_record(sb_policy *policy, record *r, const char *event, const 
     return ok;
 }
 static bool logical_read(const record *r) {
-    return r->logical && ((!strncmp(r->tool,"fs_",3) && strcmp(r->tool,"fs_write") && strcmp(r->tool,"fs_patch")) || !strcmp(r->tool,"image_view") || sb_document_tool(r->tool) || sb_transfer_tool(r->tool) ||
+    return r->logical && ((!strncmp(r->tool,"fs_",3) && strcmp(r->tool,"fs_write") && strcmp(r->tool,"fs_patch") &&
+        (!sb_file_manage_tool(r->tool) || !strcmp(r->tool,"fs_stat"))) || !strcmp(r->tool,"image_view") || sb_document_tool(r->tool) || sb_transfer_tool(r->tool) ||
         !strcmp(r->tool,"desktop_capture") || !strcmp(r->tool,"desktop_state") || !strcmp(r->tool,"window_list") || !strcmp(r->tool,"clipboard_read"));
 }
 static void expire(sb_policy *policy, record *r) {
@@ -166,13 +167,13 @@ bool sb_policy_operation_begin(sb_host *host, const char *actor, const char *too
             *reply = error_data(doc, "Approval does not match project, caller, instance or operation arguments."); goto blocked;
         }
     } else {
-        if (sb_desktop_tool(tool)) {
+        if (sb_desktop_tool(tool) || sb_file_manage_tool(tool)) {
             yyjson_doc *input=yyjson_read(parameters,strlen(parameters),0);
             const char *request_key=sb_string(yyjson_obj_get(yyjson_doc_get_root(input),"request_key"));
             bool conflict=false;
             for (size_t i=0;request_key && i<policy->record_limit;++i) {
                 record *candidate=&policy->records[i];
-                if (!candidate->logical || !sb_desktop_tool(candidate->tool) || strcmp(candidate->actor,actor)) continue;
+                if (!candidate->logical || (sb_desktop_tool(tool) ? !sb_desktop_tool(candidate->tool) : !sb_file_manage_tool(candidate->tool)) || strcmp(candidate->actor,actor)) continue;
                 yyjson_doc *prior=yyjson_read(candidate->text,strlen(candidate->text),0);
                 const char *old_key=sb_string(yyjson_obj_get(yyjson_doc_get_root(prior),"request_key"));
                 bool same=old_key && !strcmp(old_key,request_key); yyjson_doc_free(prior);
@@ -182,7 +183,7 @@ bool sb_policy_operation_begin(sb_host *host, const char *actor, const char *too
                 break;
             }
             yyjson_doc_free(input);
-            if (conflict) { *reply=error_data(doc,"Desktop request_key already belongs to different arguments, tool or lease."); goto blocked; }
+            if (conflict) { *reply=error_data(doc,"request_key already belongs to different arguments, tool or target."); goto blocked; }
         }
         for (size_t i = 0; i < policy->record_limit; ++i) {
             record *candidate = &policy->records[i];
@@ -256,6 +257,24 @@ blocked:
     sb_platform_mutex_unlock(policy->mutex); return false;
 }
 
+yyjson_mut_val *sb_policy_operation_receipt(sb_host *host, const char *actor, const char *tool,
+    const char *parameters, const char *target, const char *approval_id, yyjson_mut_doc *doc) {
+    char digest[65]; sb_error error={0}; yyjson_mut_val *result=NULL;
+    if (!parameters || !sb_platform_sha256(parameters,strlen(parameters),digest,&error)) return NULL;
+    sb_policy *policy=host->policy; sb_platform_mutex_lock(policy->mutex);
+    for (size_t i=0;i<policy->record_limit;++i) {
+        record *r=&policy->records[i];
+        if (!r->logical || !r->cached || (r->status!=COMPLETED && r->status!=FAILED) ||
+            (approval_id && strcmp(r->id,approval_id)) || strcmp(r->actor,actor) || strcmp(r->tool,tool) ||
+            strcmp(r->digest,digest) || strcmp(r->target,target) || strcmp(r->project,host->project->id) ||
+            r->revision!=host->project->policy_revision || strcmp(r->instance,sb_execution_instance(host->execution))) continue;
+        yyjson_doc *cached=yyjson_read(r->cached,strlen(r->cached),0);
+        if (cached) result=yyjson_val_mut_copy(doc,yyjson_doc_get_root(cached));
+        yyjson_doc_free(cached); break;
+    }
+    sb_platform_mutex_unlock(policy->mutex); return result;
+}
+
 bool sb_policy_operation_finish(sb_policy *policy, const char *ticket, yyjson_mut_val *result) {
     bool recorded=false;
     sb_platform_mutex_lock(policy->mutex);
@@ -263,6 +282,8 @@ bool sb_policy_operation_finish(sb_policy *policy, const char *ticket, yyjson_mu
     if (r && r->logical && r->status == RUNNING) {
         bool failed = !result || yyjson_mut_get_bool(yyjson_mut_obj_get(result,"isError"));
         yyjson_mut_val *data = yyjson_mut_obj_get(result,"structuredContent");
+        const char *backup_id=yyjson_mut_get_str(yyjson_mut_obj_get(data,"backup_id"));
+        if (backup_id && strlen(backup_id)==32 && strspn(backup_id,"0123456789abcdef")==32) strcpy(r->backup_id,backup_id);
         uint64_t next = yyjson_mut_get_uint(yyjson_mut_obj_get(data,"next_offset"));
         bool more = yyjson_mut_get_bool(yyjson_mut_obj_get(data,"truncated")) || yyjson_mut_get_bool(yyjson_mut_obj_get(data,"has_more"));
         if (r->pageable && !failed && next >= r->last_offset) { r->used += next - r->last_offset; r->next_offset = next; }

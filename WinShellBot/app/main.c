@@ -5,6 +5,7 @@
 #include "../platform/execution.h"
 #include "../platform/manager.h"
 #include "../platform/startup.h"
+#include "../platform/desktop_app.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,6 +20,8 @@ static void usage(void) {
           "                  [--public-url DOMAIN_OR_HTTP_ORIGIN]\n"
           "       WinShellBot --generate-token | --version | --help\n"
           "       WinShellBot --validate-projects FILE\n"
+            "       WinShellBot --project-settings [--projects REGISTRY]\n"
+            "       WinShellBot --project-remove ID --projects REGISTRY --output NEW\n"
           "       WinShellBot --project-create | --project-configure ID --project-config FILE\n"
           "                  [--projects REGISTRY] --output NEW (never overwrites existing files)\n"
           "       WinShellBot --manager [--http] --projects REGISTRY --manager-data-dir ABSOLUTE_DIR\n"
@@ -111,6 +114,8 @@ done:
 
 static int run(int argc, char **argv) {
     sb_error error = {0};
+    if (argc==2 && !strcmp(argv[1],"--desktop")) return sb_desktop_main(NULL);
+    if (argc==4 && !strcmp(argv[1],"--desktop") && !strcmp(argv[2],"--app-data-dir")) return sb_desktop_main(argv[3]);
     if(argc>=2 && sb_startup_option(argv[1]))return sb_startup_cli(argc,argv);
     if (argc >= 2 && sb_manager_option(argv[1])) return sb_manager_cli(argc, argv);
     if (argc == 2 && !strcmp(argv[1], "--help")) { usage(); return 0; }

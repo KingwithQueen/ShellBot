@@ -6775,6 +6775,14 @@ mg_read(struct mg_connection *conn, void *buf, size_t len)
 }
 
 
+CIVETWEB_API void
+mg_disable_keep_alive(struct mg_connection *conn)
+{
+	if (conn) {
+		conn->must_close = 1;
+	}
+}
+
 CIVETWEB_API int
 mg_write(struct mg_connection *conn, const void *buf, size_t len)
 {
@@ -17742,6 +17750,8 @@ close_socket_gracefully(struct mg_connection *conn)
 #if defined(_WIN32)
 	char buf[MG_BUF_LEN];
 	int n;
+	DWORD receive_timeout = 1000;
+	ULONGLONG drain_deadline;
 #endif
 	struct linger linger;
 	int error_code = 0;
@@ -17757,8 +17767,10 @@ close_socket_gracefully(struct mg_connection *conn)
 	 * is not recommended.", so set it to blocking now */
 	set_blocking_mode(conn->client.sock);
 
-	/* Send FIN to the client */
+	/* On Windows, allow a bounded peer drain before sending FIN below. */
+#if !defined(_WIN32)
 	shutdown(conn->client.sock, SHUTDOWN_WR);
+#endif
 
 #if defined(_WIN32)
 	/* Read and discard pending incoming data. If we do not do that and
@@ -17767,9 +17779,18 @@ close_socket_gracefully(struct mg_connection *conn)
 	 * behaviour is seen on Windows, when client keeps sending data
 	 * when server decides to close the connection; then when client
 	 * does recv() it gets no data back. */
-	do {
-		n = pull_inner(NULL, conn, buf, sizeof(buf), /* Timeout in s: */ 1.0);
-	} while (n > 0);
+	/* ShellBot: give a peer consuming a length-delimited response a bounded
+	 * opportunity to close before sending our FIN. Keep the total drain
+	 * bounded even if the peer continues sending data. */
+	drain_deadline = GetTickCount64() + 1000;
+	if (setsockopt(conn->client.sock, SOL_SOCKET, SO_RCVTIMEO,
+	               (const char *)&receive_timeout, sizeof(receive_timeout)) == 0) {
+		do {
+			n = recv(conn->client.sock, buf, sizeof(buf), 0);
+		} while (n > 0 && GetTickCount64() < drain_deadline
+		         && STOP_FLAG_IS_ZERO(&conn->phys_ctx->stop_flag));
+	}
+	shutdown(conn->client.sock, SHUTDOWN_WR);
 #endif
 
 	if (conn->dom_ctx->config[LINGER_TIMEOUT]) {

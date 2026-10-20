@@ -5,7 +5,16 @@
 #include <string.h>
 
 typedef struct { const char *name; const char *description; const char *schema; } tool_definition;
+#define FS_LOCATION "\"workspace_id\":{\"type\":\"string\"},\"path\":{\"type\":\"string\",\"minLength\":1},\"directory\":{\"type\":\"boolean\",\"default\":false}"
+#define FS_CHANGE ",\"request_key\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":64}"
+#define FS_VERSION ",\"expected_version\":{\"type\":\"string\",\"minLength\":64,\"maxLength\":64}"
+#define FS_DEST ",\"destination_workspace_id\":{\"type\":\"string\"},\"destination_path\":{\"type\":\"string\",\"minLength\":1}"
 static const tool_definition definitions[] = {
+    {"fs_stat","Inspect a file or directory and return its physical version for subsequent native file operations. Set directory:true for directories. No file content is read.","{\"type\":\"object\",\"properties\":{" FS_LOCATION "},\"required\":[\"workspace_id\",\"path\"],\"additionalProperties\":false}"},
+    {"fs_mkdir","Create one new directory in an existing authorized parent. No overwrite or recursive parent creation. Keep request_key and approval_id on retries.","{\"type\":\"object\",\"properties\":{" FS_LOCATION FS_CHANGE "},\"required\":[\"workspace_id\",\"path\",\"request_key\"],\"additionalProperties\":false}"},
+    {"fs_copy","Copy a binary file up to 64 MiB to a new destination. Source may be read-only; destination must be writable. Supply expected_version from fs_stat. Destination workspace defaults to source workspace. No directory-tree copy or overwrite.","{\"type\":\"object\",\"properties\":{" FS_LOCATION FS_CHANGE FS_VERSION FS_DEST "},\"required\":[\"workspace_id\",\"path\",\"destination_path\",\"expected_version\",\"request_key\"],\"additionalProperties\":false}"},
+    {"fs_move","Rename/move a file or directory on the same volume to a new destination. Both locations must permit writes. Supply expected_version from fs_stat; set directory:true for a directory. No overwrite; cross-volume files require explicit copy then delete.","{\"type\":\"object\",\"properties\":{" FS_LOCATION FS_CHANGE FS_VERSION FS_DEST "},\"required\":[\"workspace_id\",\"path\",\"destination_path\",\"expected_version\",\"request_key\"],\"additionalProperties\":false}"},
+    {"fs_delete","Delete one file up to 64 MiB after retaining a private binary backup, or remove an empty directory with directory:true. Supply expected_version from fs_stat. No recursive deletion. backup_id identifies the retained original bytes.","{\"type\":\"object\",\"properties\":{" FS_LOCATION FS_CHANGE FS_VERSION "},\"required\":[\"workspace_id\",\"path\",\"expected_version\",\"request_key\"],\"additionalProperties\":false}"},
     {"artifact_download", "Transfer an authorized binary file up to 64 MiB in bounded Base64 chunks. Versioned projects only. open requires workspace_id/path and request_key; optional expected_sha256/ttl_seconds. Approval precedes all source bytes. read requires transfer_id and offset, optionally max_bytes up to 32768; continue at next_offset, retry only the last chunk. status/cancel require transfer_id. Bound to caller, project and backend; no anonymous URL or client attachment integration.", "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"open\",\"read\",\"status\",\"cancel\"]},\"workspace_id\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"request_key\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":64},\"transfer_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32},\"offset\":{\"type\":\"integer\",\"minimum\":0},\"expected_sha256\":{\"type\":\"string\",\"minLength\":64,\"maxLength\":64},\"ttl_seconds\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":900},\"max_bytes\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":32768}},\"required\":[\"action\"],\"additionalProperties\":false}"},
     {"artifact_upload", "Upload a binary file up to 64 MiB to a NEW authorized destination. Versioned projects only, write permission mandatory. open requires workspace_id/path, request_key, exact size and expected_sha256 before approval/staging. write requires transfer_id, offset, canonical data_base64 up to 32768 decoded bytes. Append at next_offset; retry only identical last bytes. commit verifies complete size/SHA-256 then creates the file, never overwrites. status/cancel require transfer_id. Expiry/revoke/restart cannot resume staging.", "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"open\",\"write\",\"commit\",\"status\",\"cancel\"]},\"workspace_id\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"request_key\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":64},\"transfer_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32},\"offset\":{\"type\":\"integer\",\"minimum\":0},\"expected_sha256\":{\"type\":\"string\",\"minLength\":64,\"maxLength\":64},\"ttl_seconds\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":900},\"size\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":67108864},\"data_base64\":{\"type\":\"string\",\"maxLength\":43692}},\"required\":[\"action\"],\"additionalProperties\":false}"},
     {"host_info", "Report ShellBot version, native OS and uptime.", "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"},
@@ -42,6 +51,9 @@ bool sb_tool_exists(const char *name) {
     for (size_t i = 0; i < tool_count(); ++i) if (!strcmp(name, definitions[i].name)) return true;
     return false;
 }
+bool sb_file_manage_tool(const char *name) {
+    return name && (!strcmp(name,"fs_stat") || !strcmp(name,"fs_mkdir") || !strcmp(name,"fs_copy") || !strcmp(name,"fs_move") || !strcmp(name,"fs_delete"));
+}
 
 static yyjson_mut_val *tools_list(yyjson_mut_doc *doc, bool approvals) {
     yyjson_mut_val *result = yyjson_mut_obj(doc), *array = yyjson_mut_arr(doc);
@@ -49,6 +61,7 @@ static yyjson_mut_val *tools_list(yyjson_mut_doc *doc, bool approvals) {
     for (size_t i = 0; i < tool_count(); ++i) {
         if (!approvals && !strncmp(definitions[i].name,"approval_",9)) continue;
         if (!approvals && sb_transfer_tool(definitions[i].name)) continue;
+        if (!approvals && sb_file_manage_tool(definitions[i].name)) continue;
         yyjson_mut_val *tool = yyjson_mut_obj(doc);
         yyjson_mut_obj_add_str(doc, tool, "name", definitions[i].name);
         yyjson_mut_obj_add_str(doc, tool, "description", definitions[i].description);
@@ -58,7 +71,7 @@ static yyjson_mut_val *tools_list(yyjson_mut_doc *doc, bool approvals) {
         yyjson_doc_free(schema);
         yyjson_mut_val *annotations = yyjson_mut_obj(doc);
         bool task_tool=!strncmp(definitions[i].name,"task_",5);
-        bool modifying = !strcmp(definitions[i].name,"artifact_upload") || !strcmp(definitions[i].name, "fs_write") || !strcmp(definitions[i].name, "fs_patch") || !strcmp(definitions[i].name,"task_start") || !strcmp(definitions[i].name,"task_input") || !strcmp(definitions[i].name,"task_cancel") || !strcmp(definitions[i].name,"approval_cancel");
+        bool modifying = (sb_file_manage_tool(definitions[i].name) && strcmp(definitions[i].name,"fs_stat")) || !strcmp(definitions[i].name,"artifact_upload") || !strcmp(definitions[i].name, "fs_write") || !strcmp(definitions[i].name, "fs_patch") || !strcmp(definitions[i].name,"task_start") || !strcmp(definitions[i].name,"task_input") || !strcmp(definitions[i].name,"task_cancel") || !strcmp(definitions[i].name,"approval_cancel");
         yyjson_mut_obj_add_bool(doc, annotations, "readOnlyHint", !modifying);
         yyjson_mut_obj_add_bool(doc, annotations, "destructiveHint", modifying);
         yyjson_mut_obj_add_bool(doc, annotations, "idempotentHint", task_tool || !modifying);
@@ -72,12 +85,13 @@ yyjson_mut_val *sb_tools_list(yyjson_mut_doc *doc) { return tools_list(doc,false
 
 static bool project_tool_visible(sb_host *host, const char *name) {
     if (sb_transfer_tool(name) && (!host->project || host->project->legacy_compatibility)) return false;
+    if (sb_file_manage_tool(name) && (!host->project || host->project->legacy_compatibility)) return false;
     if (!host->project) return true;
     int index = sb_project_tool_index(name);
     if (index >= SB_DESKTOP_TOOL_FIRST && index < SB_DESKTOP_TOOL_END) return sb_desktop_tool_visible(host,name);
     /* Result polling and cancellation remain visible for already owned tasks. */
     return index >= 0 && ((index == 9 || index == 10 || index == 12 || index==13 || index==14) ||
-        (host->project->enabled && (host->project->policy.tools & (UINT32_C(1) << index))));
+        (host->project->enabled && (host->project->policy.tools & (UINT64_C(1) << index))));
 }
 yyjson_mut_val *sb_project_tools_list(sb_host *host, yyjson_mut_doc *doc) {
     yyjson_mut_val *result = tools_list(doc,host->project && !host->project->legacy_compatibility);
@@ -107,11 +121,11 @@ yyjson_mut_val *sb_project_tools_list(sb_host *host, yyjson_mut_doc *doc) {
             if (!strncmp(name,"approval_",9)) continue;
             const char *policy_description="Project policy controls this operation. Administrator operations require identity:administrator and a manager-owned shared agent with owner project permission. Keep this identity on task status/output/input/cancel too. Pending replies contain approval_id; the local owner uses the matching ordinary or administrator approval channel. Keep arguments identical; file pages use next_offset and the same approval_id. With current_user file scope, omit workspace_id for an absolute local path. Read-only grants, expected hashes and private backups still apply.";
             char document_description[2048];
-            if (sb_document_tool(name) || sb_transfer_tool(name)) {
+            if (sb_document_tool(name) || sb_transfer_tool(name) || sb_file_manage_tool(name)) {
                 snprintf(document_description,sizeof(document_description),"%s %s",yyjson_mut_get_str(yyjson_mut_obj_get(tool,"description")),policy_description);
             }
             yyjson_mut_obj_remove_str(tool,"description");
-            if (sb_document_tool(name) || sb_transfer_tool(name)) yyjson_mut_obj_add_strcpy(doc,tool,"description",document_description);
+            if (sb_document_tool(name) || sb_transfer_tool(name) || sb_file_manage_tool(name)) yyjson_mut_obj_add_strcpy(doc,tool,"description",document_description);
             else yyjson_mut_obj_add_str(doc,tool,"description",policy_description);
         }
     }
@@ -541,9 +555,114 @@ static bool command_directory_version(sb_root *root, const char *path, char vers
     sb_platform_close(directory); return ok;
 }
 
+typedef struct {
+    sb_workspace account, *workspace;
+    const sb_project_directory *directory;
+    const char *path;
+    char *relative;
+} fs_location;
+static void fs_location_close(fs_location *location) { free(location->relative); sb_platform_root_close(location->account.root); }
+static bool fs_location_open(sb_host *host, const char *id, const char *path, fs_location *location, sb_error *error) {
+    location->path=path; location->directory=sb_project_directory_find(host->project,id);
+    location->workspace=id ? sb_workspace_find(&host->config,id) : NULL;
+    if (!id && host->project->policy.file_scope==SB_FILES_CURRENT_USER) {
+        location->account.root=path ? sb_platform_account_parent(path,&location->relative,error) : NULL;
+        if (!location->account.root) return false;
+        location->path=location->relative; strcpy(location->account.id,"current-user");
+        location->account.read_only=host->project->policy.current_user_read_only; location->workspace=&location->account;
+        for (size_t i=0;i<host->config.workspace_count;++i) {
+            bool inside=sb_platform_target_within(host->config.workspaces[i].root,location->account.root,location->path,error);
+            if (*error->text) return false;
+            if (inside) {
+                location->directory=sb_project_directory_find(host->project,host->config.workspaces[i].id);
+                location->account.read_only=host->config.workspaces[i].read_only; break;
+            }
+        }
+    }
+    if (!location->workspace || !location->path) { sb_fail(error,"Unknown workspace or missing file path."); return false; } return true;
+}
+typedef struct { sb_host *host; const char *actor; } file_manage_context;
+static bool file_manage_backup(void *context,const char *path,uint64_t bytes,const char *backup_id) {
+    file_manage_context *call=context;
+    return sb_audit_append(call->host->audit,"backup_saved",call->actor,NULL,NULL,path,NULL,(size_t)bytes,"fs_delete","delete",NULL,backup_id);
+}
+static yyjson_mut_val *file_manage_call(sb_host *host, const char *actor, const char *name, yyjson_val *args, yyjson_mut_doc *doc) {
+    bool reading=!strcmp(name,"fs_stat"), pair=!strcmp(name,"fs_copy") || !strcmp(name,"fs_move");
+    bool mkdir=!strcmp(name,"fs_mkdir"), directory=mkdir || yyjson_get_bool(yyjson_obj_get(args,"directory"));
+    const char *id=sb_string(yyjson_obj_get(args,"workspace_id")), *path=sb_string(yyjson_obj_get(args,"path"));
+    const char *expected=sb_string(yyjson_obj_get(args,"expected_version"));
+    fs_location locations[2]={0}; sb_fs_plan *plan=NULL; sb_fs_info info={0}; sb_error error={0};
+    yyjson_mut_val *result=NULL; char *parameters=NULL, version[65],target[65],ticket[33]={0};
+    if (!reading) {
+        const char *key=sb_string(yyjson_obj_get(args,"request_key"));
+        if (!key || !*key || strlen(key)>64 || strspn(key,"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-")!=strlen(key) ||
+            (!mkdir && (!expected || strlen(expected)!=64 || strspn(expected,"0123456789abcdef")!=64))) return failure(doc,"Supply a valid request_key and the expected_version returned by fs_stat.");
+    }
+    if (!fs_location_open(host,id,path,&locations[0],&error)) goto failed;
+    if (pair) {
+        const char *destination_id=sb_string(yyjson_obj_get(args,"destination_workspace_id"));
+        if (!fs_location_open(host,destination_id ? destination_id : id,sb_string(yyjson_obj_get(args,"destination_path")),&locations[1],&error)) goto failed;
+    }
+    sb_request_context context={.actor=actor,.project=host->project,.policy_revision=host->project->policy_revision};
+    bool pending=false; char roots[2][50]={{0}};
+    for (unsigned i=0;i<(pair?2u:1u);++i) {
+        fs_location *location=&locations[i];
+        sb_project_operation operation={.tool=name,.directory=location->directory,
+            .current_user_target=location->workspace==&location->account && !location->directory,
+            .identity=host->administrator_host ? SB_ID_ADMINISTRATOR : SB_ID_CURRENT_USER,
+            .administrator_backend_verified=host->administrator_host,.file_source_read=i==0 && !strcmp(name,"fs_copy")};
+        sb_policy_result decision=sb_project_evaluate(&context,&operation);
+        if (decision.decision==SB_DECISION_DENY) { sb_fail(&error,decision.reason); goto failed; }
+        pending|=decision.decision==SB_DECISION_PENDING;
+        if (!sb_platform_root_identity(location->workspace->root,roots[i],&error)) goto failed;
+    }
+    parameters=operation_parameters(name,args);
+    size_t capacity=parameters ? strlen(parameters)+sizeof(roots)+8 : 0;
+    char *tuple=capacity ? malloc(capacity) : NULL;
+    if (!tuple) goto failed;
+    snprintf(tuple,capacity,"%s|%s|%s",roots[0],roots[1],parameters);
+    bool hashed=sb_platform_sha256(tuple,strlen(tuple),target,&error); free(tuple); if (!hashed) goto failed;
+    const char *approval=sb_string(yyjson_obj_get(args,"approval_id"));
+    if (!reading) {
+        result=sb_policy_operation_receipt(host,actor,name,parameters,target,approval,doc);
+        if (result) goto done;
+    }
+    plan=sb_platform_fs_prepare(name,locations[0].workspace->root,locations[0].path,directory,
+        pair ? locations[1].workspace->root : NULL,pair ? locations[1].path : NULL,&info,version,&error);
+    if (!plan) goto failed;
+    if (expected && strcmp(expected,info.version)) { sb_fail(&error,"Physical source changed; inspect it again with fs_stat before using a new request."); goto failed; }
+    if (!reading || pending || approval) {
+        yyjson_mut_val *reply=NULL;
+        if (!sb_policy_operation_begin(host,actor,name,parameters,target,version,approval,pending,0,1,doc,&reply,ticket)) {
+            result=yyjson_mut_obj_get(reply,"isError") ? reply : content_result(doc,reply,true); goto done;
+        }
+    }
+    file_manage_context call={host,actor}; char backup_id[33]={0};
+    bool ok=sb_platform_fs_execute(plan,host->lease,file_manage_backup,&call,backup_id,&error);
+    yyjson_mut_val *data=yyjson_mut_obj(doc);
+    if (ok) {
+        yyjson_mut_obj_add_str(doc,data,"status","completed");
+        yyjson_mut_obj_add_str(doc,data,"type",info.directory ? "directory" : "file");
+        yyjson_mut_obj_add_uint(doc,data,"size",info.size);
+        if (*info.version) yyjson_mut_obj_add_strcpy(doc,data,"version",info.version);
+        yyjson_mut_obj_add_bool(doc,data,"overwrote_existing",false);
+    } else yyjson_mut_obj_add_strcpy(doc,data,"error",*error.text ? error.text : "Native file operation failed.");
+    if (*backup_id) yyjson_mut_obj_add_strcpy(doc,data,"backup_id",backup_id);
+    if (*ticket) yyjson_mut_obj_add_strcpy(doc,data,"approval_id",ticket);
+    yyjson_mut_obj_add_strcpy(doc,data,"project_id",host->project->id);
+    yyjson_mut_obj_add_uint(doc,data,"policy_revision",host->project->policy_revision);
+    result=content_result(doc,data,!ok);
+    if (*ticket && !sb_policy_operation_finish(host->policy,ticket,result)) yyjson_mut_obj_add_str(doc,data,"audit_warning","Result is authoritative; final persistent recording is incomplete.");
+    goto done;
+failed:
+    result=failure(doc,*error.text ? error.text : "Cannot prepare the native file operation.");
+done:
+    sb_platform_fs_close(plan); free(parameters); fs_location_close(&locations[0]); fs_location_close(&locations[1]); return result;
+}
+
 static yyjson_mut_val *project_tool_call(sb_host *host, const char *actor, const char *name, yyjson_val *args, yyjson_mut_doc *doc) {
     if (sb_desktop_tool(name)) return sb_desktop_tools_call(host,actor,name,args,doc);
-    if (!host->project || host->project->legacy_compatibility) return tool_call_inner(host,actor,name,args,doc,NULL,NULL,false);
+    if (!host->project || host->project->legacy_compatibility) return sb_file_manage_tool(name) ? failure(doc,"Native file management requires a normal versioned project.") : tool_call_inner(host,actor,name,args,doc,NULL,NULL,false);
     const tool_definition *definition = NULL;
     for (size_t i=0;i<tool_count();++i) if(!strcmp(name,definitions[i].name)) definition=&definitions[i];
     if (!definition || !project_arguments_valid(host,definition,args)) return failure(doc,"Invalid or unknown tool arguments.");
@@ -559,6 +678,7 @@ static yyjson_mut_val *project_tool_call(sb_host *host, const char *actor, const
         yyjson_doc_free(reply); free(wire); return result;
     }
     if (host->administrator_host && !administrator) return failure(doc,"Administrator identity must be explicitly selected.");
+    if (sb_file_manage_tool(name)) return file_manage_call(host,actor,name,args,doc);
     if(sb_transfer_tool(name)) {
         const char *action=sb_string(yyjson_obj_get(args,"action"));
         static const char *const download_open[]={"action","workspace_id","path","request_key","expected_sha256","ttl_seconds","identity","approval_id"};
@@ -573,7 +693,7 @@ static yyjson_mut_val *project_tool_call(sb_host *host, const char *actor, const
         if(!opening) {
             int index=sb_project_tool_index(name);
             bool cleanup=!strcmp(action,"status") || !strcmp(action,"cancel");
-            if(!cleanup && (!project->enabled || !(project->policy.tools&(UINT32_C(1)<<index))))return failure(doc,"Transfer permission was revoked.");
+            if(!cleanup && (!project->enabled || !(project->policy.tools&(UINT64_C(1)<<index))))return failure(doc,"Transfer permission was revoked.");
             bool failed;yyjson_mut_val *value=sb_transfer_call(host,actor,name,args,doc,NULL,NULL,NULL,&failed);
             return content_result(doc,value,failed);
         }

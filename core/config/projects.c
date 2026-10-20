@@ -60,6 +60,25 @@ done:
     return json;
 }
 
+char *sb_projects_remove(const char *bytes, size_t length, const char *id, sb_error *error) {
+    sb_project_registry registry={0}, candidate={0}; char *json=NULL;
+    yyjson_doc *source=NULL; yyjson_mut_doc *doc=NULL;
+    if (!sb_identifier(id) || !sb_projects_parse(&registry,bytes,length,error)) goto done;
+    if (!sb_project_find(&registry,id)) { sb_fail(error,"Unknown project id."); goto done; }
+    if (registry.project_count==1) { sb_fail(error,"Keep at least one project in the registry."); goto done; }
+    source=yyjson_read(bytes,length,0); doc=yyjson_mut_doc_new(NULL);
+    if (!source || !doc) goto done;
+    yyjson_mut_val *root=yyjson_val_mut_copy(doc,yyjson_doc_get_root(source)); yyjson_mut_doc_set_root(doc,root);
+    yyjson_mut_val *projects=yyjson_mut_obj_get(root,"projects");
+    for (size_t i=0;i<registry.project_count;++i) if (!strcmp(registry.projects[i].id,id)) { yyjson_mut_arr_remove(projects,i); break; }
+    if (!strcmp(registry.default_project_id,id)) yyjson_mut_obj_remove_key(yyjson_mut_obj_get(root,"gateway"),"default_project_id");
+    json=yyjson_mut_write(doc,0,NULL);
+    if (!json || !sb_projects_parse(&candidate,json,strlen(json),error)) { free(json); json=NULL; }
+done:
+    if (!json && !*error->text) sb_fail(error,"Cannot export the project removal.");
+    sb_projects_free(&registry); sb_projects_free(&candidate); yyjson_doc_free(source); yyjson_mut_doc_free(doc); return json;
+}
+
 static bool separator(char c) { return c == '/' || c == '\\'; }
 static unsigned char folded(char c) {
     if (separator(c)) return '/';
@@ -253,8 +272,8 @@ static bool policy_parse(sb_project_policy *policy, yyjson_val *value) {
         size_t idx, max; yyjson_val *item;
         yyjson_arr_foreach(tools, idx, max, item) {
             int index = sb_project_tool_index(sb_string(item));
-            if (index < 0 || (policy->tools & (UINT32_C(1) << index))) return false;
-            policy->tools |= UINT32_C(1) << index;
+            if (index < 0 || (policy->tools & (UINT64_C(1) << index))) return false;
+            policy->tools |= UINT64_C(1) << index;
         }
     }
     return true;
@@ -381,7 +400,7 @@ bool sb_projects_parse(sb_project_registry *registry, const char *bytes, size_t 
     candidate->format_version = (unsigned)number;
     candidate->port = 8765;
     yyjson_val *projects = yyjson_obj_get(root, "projects");
-    if (!yyjson_is_arr(projects) || !yyjson_arr_size(projects) || yyjson_arr_size(projects) > SB_MAX_PROJECTS) goto done;
+    if (!yyjson_is_arr(projects) || yyjson_arr_size(projects) > SB_MAX_PROJECTS) goto done;
     size_t idx, max; yyjson_val *item;
     yyjson_arr_foreach(projects, idx, max, item) {
         sb_project *project = &candidate->projects[candidate->project_count++];

@@ -7,5 +7,7 @@ bool sb_manager_option(const char *option);
 int sb_manager_cli(int argc, char **argv);
 int sb_manager_startup(const char *configuration,const char *data,const char *const *projects,
                       size_t count,void *stop,void *ready,bool service_mode);
+int sb_manager_desktop_startup(const char *configuration,const char *data,const char *const *projects,
+                              size_t count,void *stop,void *ready);
 int sb_project_worker(int argc, wchar_t **argv);
 #endif

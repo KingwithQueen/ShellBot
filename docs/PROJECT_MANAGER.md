@@ -1,5 +1,7 @@
 # 项目管理器与工作进程
 
+dev.20 新增 --project-settings [--projects REGISTRY] 和 --project-remove ID --projects REGISTRY --output NEW。移除只影响新导出的文件，清除对应兼容默认路由，至少保留一个项目；原配置和 Data 不变。参见 [配置窗口](PROJECT_MANAGEMENT_UI.md)和 [M13 交接](HANDOFF_20261020_M13.md)。以下早期“无项目删除”描述只适用于当时版本。
+
 dev.14 M7 提供[原生本机管理窗口](PROJECT_MANAGEMENT_UI.md)、仅本机 management-status 与暂停/恢复。暂停结束该项目普通和管理员任务；明确恢复创建新实例，不重跑历史。窗口不保存凭据或改写配置，关闭窗口保留管理器。
 
 dev.13 M6 增加[有限远程所有者入口和持久历史](REMOTE_APPROVALS.md)。健康停止先发送有界 shutdown，让工作进程刷新终态，再清理本人 Job；异常断线和期限保持明确中断、不自动重放。下文 M2–M5 基础入口保留。

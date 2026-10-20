@@ -6,6 +6,8 @@
 #include "manager_ui.h"
 #include "execution.h"
 #include "startup.h"
+#include "project_settings.h"
+#include "desktop_app.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -13,7 +15,7 @@
 #include <stdarg.h>
 
 enum { UI_REFRESH=1001, UI_START, UI_STOP, UI_PAUSE, UI_RESUME, UI_LOCAL, UI_PUBLIC,
-       UI_DIAGNOSE, UI_COPY, UI_ADMIN_START, UI_ADMIN_STOP, UI_LIST=1100, UI_DETAILS, UI_STATUS, UI_HEADER, UI_PATH, UI_CONTEXT };
+       UI_DIAGNOSE, UI_COPY, UI_ADMIN_START, UI_ADMIN_STOP, UI_SETTINGS, UI_NEW,UI_CONNECTION,UI_TOKEN,UI_OWNER_TOKEN, UI_LIST=1100, UI_DETAILS, UI_STATUS, UI_HEADER, UI_PATH, UI_CONTEXT };
 #define UI_RESULT (WM_APP+1)
 #define UI_TRAY (WM_APP+2)
 #define UI_SHOW 1201
@@ -27,11 +29,12 @@ enum { UI_REFRESH=1001, UI_START, UI_STOP, UI_PAUSE, UI_RESUME, UI_LOCAL, UI_PUB
 typedef struct {
     HWND window;
     char *data, *request, *reply;
-    bool snapshot, diagnostic, logon, enable, admin_logon;
+    bool snapshot, diagnostic, logon, enable, admin_logon, settings;
     sb_error error;
+    sb_desktop_app *app;
 } ui_work;
 typedef struct {
-    HWND window, list, details, status, header, path, context, buttons[11];
+    HWND window, list, details, status, header, path, context, buttons[16];
     HFONT font, heading;
     HANDLE thread;
     char *data;
@@ -42,6 +45,10 @@ typedef struct {
     HANDLE stop, manager_thread;
     const char *profile_path;
     UINT taskbar_created;
+    sb_desktop_app *app;
+    bool modal;
+    int pending_navigation;
+    bool exit_pending;
 } ui_state;
 
 static void logon_request(ui_state *ui,bool enable,bool administrator);
@@ -61,7 +68,7 @@ static void show_resident(ui_state *ui) {
 static void resident_command(ui_state *ui,int id) {
     if(id==UI_SHOW)show_resident(ui);
     else if(id==UI_HIDE){if(ui->tray_added)ShowWindow(ui->window,SW_HIDE);}
-    else if(id==UI_EXIT){SetEvent(ui->stop);DestroyWindow(ui->window);}
+    else if(id==UI_EXIT){if(ui->app){ui->exit_pending=true;sb_desktop_request_exit(ui->app);if(ui->modal){SetWindowTextW(ui->status,L"正在停止全部项目并结束保存操作…");return;}}SetEvent(ui->stop);DestroyWindow(ui->window);}
     else if(id==UI_LOGON_ENABLE || id==UI_LOGON_DISABLE) {
         logon_request(ui,id==UI_LOGON_ENABLE,false);
     } else if(id==UI_ADMIN_LOGON_ENABLE || id==UI_ADMIN_LOGON_DISABLE) {
@@ -71,11 +78,11 @@ static void resident_command(ui_state *ui,int id) {
 static void tray_menu(ui_state *ui) {
     HMENU menu=CreatePopupMenu();if(!menu)return;
     AppendMenuW(menu,MF_STRING,UI_SHOW,L"打开项目管理");AppendMenuW(menu,MF_STRING,UI_HIDE,L"隐藏管理窗口");
-    AppendMenuW(menu,MF_SEPARATOR,0,NULL);AppendMenuW(menu,MF_STRING,UI_LOGON_ENABLE,L"登录时自动启动");
+    if(!ui->app){AppendMenuW(menu,MF_SEPARATOR,0,NULL);AppendMenuW(menu,MF_STRING,UI_LOGON_ENABLE,L"登录时自动启动");
     AppendMenuW(menu,MF_STRING,UI_LOGON_DISABLE,L"关闭登录自动启动");AppendMenuW(menu,MF_SEPARATOR,0,NULL);
     AppendMenuW(menu,MF_STRING|(sb_win_elevated_owner()?0:MF_GRAYED),UI_ADMIN_LOGON_ENABLE,L"登录时以管理员身份自动启动");
-    AppendMenuW(menu,MF_STRING|(sb_win_elevated_owner()?0:MF_GRAYED),UI_ADMIN_LOGON_DISABLE,L"关闭管理员登录自动启动");AppendMenuW(menu,MF_SEPARATOR,0,NULL);
-    AppendMenuW(menu,MF_STRING,UI_EXIT,L"退出 ShellBot（停止本实例）");
+    AppendMenuW(menu,MF_STRING|(sb_win_elevated_owner()?0:MF_GRAYED),UI_ADMIN_LOGON_DISABLE,L"关闭管理员登录自动启动");}AppendMenuW(menu,MF_SEPARATOR,0,NULL);
+    AppendMenuW(menu,MF_STRING,UI_EXIT,ui->app?L"退出 ShellBot（停止全部项目）":L"退出 ShellBot（停止本实例）");
     POINT cursor;GetCursorPos(&cursor);SetForegroundWindow(ui->window);
     int id=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_NONOTIFY|TPM_RIGHTBUTTON,cursor.x,cursor.y,0,ui->window,NULL);
     DestroyMenu(menu);PostMessageW(ui->window,WM_NULL,0,0);if(id)resident_command(ui,id);
@@ -124,7 +131,8 @@ static void update_buttons(ui_state *ui) {
     bool enabled=yyjson_get_bool(yyjson_obj_get(p,"enabled"));
     bool paused=yyjson_get_bool(yyjson_obj_get(p,"paused"));
     bool running=!strcmp(state,"running");
-    for(int i=0;i<11;++i)EnableWindow(ui->buttons[i],!ui->busy);
+    for(int i=0;i<16;++i)if(ui->buttons[i])EnableWindow(ui->buttons[i],!ui->busy);
+    if(ui->app){EnableWindow(ui->buttons[UI_SETTINGS-UI_REFRESH],available);EnableWindow(ui->buttons[UI_TOKEN-UI_REFRESH],available);}
     EnableWindow(ui->buttons[UI_START-UI_REFRESH],available && enabled && !paused && !running);
     EnableWindow(ui->buttons[UI_STOP-UI_REFRESH],available && (running || paused));
     EnableWindow(ui->buttons[UI_PAUSE-UI_REFRESH],available && enabled && !paused);
@@ -148,6 +156,7 @@ static void show_project(ui_state *ui) {
     wchar_t *id=to_wide(str(p,"project_id"));
     if(!text) { free(id); return; }
     append(text,&length,L"%ls  ·  %ls\r\n\r\n",id ? id : L"",state_label(str(p,"state"))); free(id);
+    if(ui->app){wchar_t *name=to_wide(str(p,"display_name")),*directory=to_wide(str(p,"project_directory"));append(text,&length,L"项目名称：%ls\r\n项目存储目录：%ls\r\n随管理界面启动：%ls\r\n关闭窗口收进托盘；从托盘退出后全部项目停止。\r\n\r\n",name?name:L"",directory?directory:L"",yyjson_get_bool(yyjson_obj_get(p,"automatic_start"))?L"是":L"否");free(name);free(directory);}
     if(!strcmp(str(p,"state"),"busy"))append(text,&length,L"该项目正在处理请求，请稍后刷新。\r\n");
     else {
         append(text,&length,L"审批方式：%ls\r\n文件范围：%ls\r\n默认任务身份：%ls\r\n任务执行：%ls\r\n管理员许可：%ls\r\n管理员代理：%ls\r\n策略版本：%llu\r\n\r\n",
@@ -181,7 +190,7 @@ static void render(ui_state *ui) {
     ui->rendering=true; ListView_DeleteAllItems(ui->list);
     yyjson_val *root=yyjson_doc_get_root(ui->snapshot), *projects=yyjson_obj_get(root,"projects"), *p; size_t i,max; int selected=-1;
     yyjson_arr_foreach(projects,i,max,p) {
-        wchar_t *id=to_wide(str(p,"project_id")); LVITEMW row={0}; row.mask=LVIF_TEXT; row.iItem=(int)i; row.pszText=id ? id : L"";
+        wchar_t *id=to_wide(ui->app && *str(p,"display_name") ? str(p,"display_name") : str(p,"project_id")); LVITEMW row={0}; row.mask=LVIF_TEXT; row.iItem=(int)i; row.pszText=id ? id : L"";
         int index=(int)SendMessageW(ui->list,LVM_INSERTITEMW,0,(LPARAM)&row); free(id);
         ListView_SetItemText(ui->list,index,1,(wchar_t *)state_label(str(p,"state")));
         ListView_SetItemText(ui->list,index,2,(wchar_t *)approval_label(str(p,"approval_mode")));
@@ -205,7 +214,7 @@ static DWORD WINAPI exchange(void *context) {
         char *args[]={"WinShellBot",work->admin_logon?(work->enable?"--admin-logon-enable":"--admin-logon-disable"):(work->enable?"--logon-enable":"--logon-disable"),"--startup-profile",work->request};
         work->reply=sb_strdup(sb_startup_cli(4,args)==0?(work->enable?"{\"logon_enabled\":true}":"{\"logon_enabled\":false}"):
             "{\"error\":\"Logon result could not be confirmed. Inspect the current logon status before retrying.\"}");
-    } else work->reply=sb_owner_exchange(work->data,work->request,strlen(work->request),&work->error);
+    } else work->reply=work->app ? sb_desktop_exchange(work->app,work->request,&work->error) : sb_owner_exchange(work->data,work->request,strlen(work->request),&work->error);
     if(!PostMessageW(work->window,UI_RESULT,0,(LPARAM)work))free_work(work);
     return 0;
 }
@@ -229,8 +238,9 @@ static void request(ui_state *ui, const char *command, bool diagnostic) {
         yyjson_mut_obj_add_val(doc,root,"request",yyjson_val_mut_copy(doc,yyjson_doc_get_root(input))); yyjson_doc_free(input);
     }
     if(!strncmp(command,"project-",8))yyjson_mut_obj_add_strcpy(doc,root,"id",ui->selected);
-    work->window=ui->window; work->data=sb_strdup(ui->data); work->request=yyjson_mut_write(doc,0,NULL);
+    work->window=ui->window; work->app=ui->app;work->data=sb_strdup(ui->data); work->request=yyjson_mut_write(doc,0,NULL);
     work->snapshot=!strcmp(command,"management-status"); work->diagnostic=diagnostic; yyjson_mut_doc_free(doc);
+    work->settings=!strcmp(command,"configuration-snapshot");
     if(!work->data || !work->request) { free_work(work); return; }
     ui->thread=CreateThread(NULL,0,exchange,work,0,NULL);
     if(!ui->thread) { free_work(work); SetWindowTextW(ui->status,L"无法创建本机请求线程。"); return; }
@@ -246,8 +256,24 @@ static void copy_text(ui_state *ui, const wchar_t *text) {
     SetWindowTextW(ui->status,L"已复制到剪贴板。");
 }
 static void click(ui_state *ui, int id) {
-    if(ui->busy)return;
+    if(ui->busy){if(ui->app && !ui->modal && (id==UI_NEW || id==UI_SETTINGS || id==UI_CONNECTION))ui->pending_navigation=id;return;}
+    if(ui->app && (id==UI_NEW || id==UI_SETTINGS || id==UI_CONNECTION)) {
+        if(id==UI_SETTINGS && !*ui->selected)return;
+        ui->busy=true;ui->modal=true;update_buttons(ui);
+        bool saved=id==UI_CONNECTION ? sb_desktop_connection_dialog(ui->window,ui->app) : sb_desktop_project_dialog(ui->window,ui->app,id==UI_NEW ? NULL : ui->selected);
+        ui->modal=false;ui->busy=false;
+        if(ui->exit_pending){DestroyWindow(ui->window);return;}
+        if(saved)SetWindowTextW(ui->status,L"项目设置已保存；列表已同步。");
+        update_buttons(ui);request(ui,"management-status",false);return;
+    }
+    if(ui->app && (id==UI_TOKEN || id==UI_OWNER_TOKEN)) {
+        sb_desktop_draft draft={0};sb_error error={0};const char *token=id==UI_OWNER_TOKEN ? sb_desktop_owner_token(ui->app) : NULL;
+        if(!token && sb_desktop_draft_load(ui->app,ui->selected,&draft,&error))token=draft.token;
+        wchar_t *value=token ? to_wide(token) : NULL;if(value)copy_text(ui,value);free(value);sb_desktop_draft_free(&draft);
+        SetWindowTextW(ui->status,id==UI_OWNER_TOKEN?L"已复制所有者审批令牌，用于 /owner；请妥善保管。":L"已复制所选项目的 MCP 令牌，客户端认证选择 Bearer。");return;
+    }
     if(id==UI_REFRESH) { request(ui,"management-status",false); return; }
+    if(id==UI_SETTINGS) { request(ui,"configuration-snapshot",false); return; }
     if(id==UI_ADMIN_START || id==UI_ADMIN_STOP) {
         if(id==UI_ADMIN_START && MessageBoxW(ui->window,L"启动共享管理员代理需要 Windows 授权。只有已允许的项目可使用它。继续启动？",L"启动管理员代理",MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2)!=IDYES)return;
         if(id==UI_ADMIN_STOP && MessageBoxW(ui->window,L"停止代理会结束所有项目的活动管理员任务。继续停止？",L"停止管理员代理",MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2)!=IDYES)return;
@@ -279,7 +305,7 @@ static void fonts(ui_state *ui) {
     ui->heading=CreateFontW(-px(ui,24),0,0,0,FW_SEMIBOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,DEFAULT_QUALITY,DEFAULT_PITCH,L"Segoe UI");
     HWND windows[]={ui->list,ui->details,ui->status,ui->path,ui->context};
     for(size_t i=0;i<sizeof(windows)/sizeof(windows[0]);++i)if(windows[i])SendMessageW(windows[i],WM_SETFONT,(WPARAM)ui->font,TRUE);
-    for(int i=0;i<11;++i)if(ui->buttons[i])SendMessageW(ui->buttons[i],WM_SETFONT,(WPARAM)ui->font,TRUE);
+    for(int i=0;i<16;++i)if(ui->buttons[i])SendMessageW(ui->buttons[i],WM_SETFONT,(WPARAM)ui->font,TRUE);
     if(ui->header)SendMessageW(ui->header,WM_SETFONT,(WPARAM)ui->heading,TRUE);
     if(previous)DeleteObject(previous); if(previous_heading)DeleteObject(previous_heading);
 }
@@ -287,10 +313,12 @@ static void layout(ui_state *ui) {
     RECT rect; GetClientRect(ui->window,&rect); int w=rect.right,h=rect.bottom,m=px(ui,20),gap=px(ui,10),button=px(ui,116),bh=px(ui,32);
     MoveWindow(ui->header,m,m,w-2*m,px(ui,32),TRUE);
     MoveWindow(ui->path,m,px(ui,56),w-2*m,px(ui,26),TRUE);
-    for(int i=0;i<7;++i)MoveWindow(ui->buttons[i],m+i*(button+gap),px(ui,96),button,bh,TRUE);
-    for(int i=7;i<11;++i)MoveWindow(ui->buttons[i],m+(i-7)*(button+gap),px(ui,138),button,bh,TRUE);
-    MoveWindow(ui->context,m,px(ui,184),w-2*m,px(ui,28),TRUE);
-    int top=px(ui,220),bottom=px(ui,56),left=(w-2*m-gap)*48/100;
+    if(ui->app){const int order[]={UI_NEW,UI_SETTINGS,UI_START,UI_STOP,UI_PAUSE,UI_RESUME,UI_REFRESH,UI_CONNECTION,UI_LOCAL,UI_PUBLIC,UI_TOKEN,UI_OWNER_TOKEN,UI_DIAGNOSE,UI_COPY,UI_ADMIN_START,UI_ADMIN_STOP};
+        for(int i=0;i<16;++i)MoveWindow(ui->buttons[order[i]-UI_REFRESH],m+(i%7)*(button+gap),px(ui,96+(i/7)*42),button,bh,TRUE);
+    }else{for(int i=0;i<7;++i)MoveWindow(ui->buttons[i],m+i*(button+gap),px(ui,96),button,bh,TRUE);
+        for(int i=7;i<12;++i)MoveWindow(ui->buttons[i],m+(i-7)*(button+gap),px(ui,138),button,bh,TRUE);}
+    MoveWindow(ui->context,m,px(ui,ui->app?226:184),w-2*m,px(ui,28),TRUE);
+    int top=px(ui,ui->app?262:220),bottom=px(ui,56),left=(w-2*m-gap)*48/100;
     MoveWindow(ui->list,m,top,left,h-top-bottom,TRUE);
     MoveWindow(ui->details,m+left+gap,top,w-2*m-left-gap,h-top-bottom,TRUE);
     MoveWindow(ui->status,m,h-px(ui,40),w-2*m,px(ui,28),TRUE);
@@ -311,8 +339,8 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LP
         fonts(ui);
         ui->header=control(ui,0,L"STATIC",L"ShellBot  项目管理",0,UI_HEADER); SendMessageW(ui->header,WM_SETFONT,(WPARAM)ui->heading,TRUE);
         ui->path=control(ui,0,L"EDIT",L"",ES_READONLY|ES_AUTOHSCROLL,UI_PATH); set_utf8(ui->path,ui->data);
-        const wchar_t *labels[]={L"刷新",L"启动项目",L"停止项目",L"暂停项目",L"恢复项目",L"复制本机地址",L"复制公网地址",L"查看诊断",L"复制诊断",L"启动管理员",L"停止管理员"};
-        for(int i=0;i<11;++i)ui->buttons[i]=control(ui,0,L"BUTTON",labels[i],WS_TABSTOP|BS_PUSHBUTTON,UI_REFRESH+i);
+        const wchar_t *labels[]={L"刷新",L"启动项目",L"停止项目",L"暂停项目",L"恢复项目",L"复制本机地址",L"复制公网地址",L"查看诊断",L"复制诊断",L"启动管理员",L"停止管理员",L"项目设置…",L"新建项目…",L"连接设置…",L"复制项目令牌",L"复制审批令牌"};
+        for(int i=0;i<(ui->app?16:12);++i)ui->buttons[i]=control(ui,0,L"BUTTON",!ui->app && i==11?L"项目配置…":labels[i],WS_TABSTOP|BS_PUSHBUTTON,UI_REFRESH+i);
         ui->context=control(ui,0,L"STATIC",L"连接本机管理器…",0,UI_CONTEXT);
         ui->list=control(ui,WS_EX_CLIENTEDGE,WC_LISTVIEWW,L"",WS_TABSTOP|LVS_REPORT|LVS_SINGLESEL|LVS_SHOWSELALWAYS,UI_LIST);
         ListView_SetExtendedListViewStyle(ui->list,LVS_EX_FULLROWSELECT|LVS_EX_DOUBLEBUFFER);
@@ -330,11 +358,14 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LP
         if(ui->resident && wparam==1){if(lparam==WM_LBUTTONUP || lparam==WM_LBUTTONDBLCLK)show_resident(ui);else if(lparam==WM_RBUTTONUP)tray_menu(ui);}return 0;
     case WM_TIMER:
         if(ui->resident){
-            if(WaitForSingleObject(ui->manager_thread,0)!=WAIT_TIMEOUT){DestroyWindow(window);return 0;}
+            if(ui->app && !ui->modal && WaitForSingleObject(ui->stop,0)==WAIT_OBJECT_0){DestroyWindow(window);return 0;}
+            if(!ui->app && WaitForSingleObject(ui->manager_thread,0)!=WAIT_TIMEOUT){DestroyWindow(window);return 0;}
             if(!ui->tray_added){tray(ui,NIM_ADD);SetPropW(window,L"ShellBotTrayRegistered",ui->tray_added?(HANDLE)1:NULL);}
+            if(ui->app && !ui->busy && !ui->modal)request(ui,"management-status",false);
         }return 0;
     case WM_CLOSE:
-        if(ui->resident && ui->tray_added){ShowWindow(window,SW_HIDE);return 0;}break;
+        if(ui->resident && ui->tray_added){ShowWindow(window,SW_HIDE);return 0;}
+        if(ui->app){SetWindowTextW(ui->status,L"系统托盘暂不可用，窗口保持打开；请等待托盘恢复后右键退出。");return 0;}break;
     case WM_QUERYENDSESSION:return TRUE;
     case WM_ENDSESSION:
         if(ui->resident && wparam){SetEvent(ui->stop);DestroyWindow(window);}return 0;
@@ -355,38 +386,46 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LP
             ui->diagnostic=true; set_utf8(ui->details,reply ? work->reply : work->error.text);
             SetWindowTextW(ui->status,L"请求未完成。请核对诊断与当前状态，再决定后续操作。");
             if(work->snapshot) { yyjson_doc_free(ui->snapshot); ui->snapshot=NULL; *ui->selected=0; ListView_DeleteAllItems(ui->list); SetWindowTextW(ui->context,L"未连接管理器。请先启动对应管理器，再刷新。 "); }
+        } else if(work->settings) {
+            yyjson_val *configuration=yyjson_obj_get(root,"configuration");
+            char *json=configuration ? yyjson_val_write(configuration,0,NULL) : NULL;
+            if(json)sb_project_settings(ui->window,NULL,json); free(json);
         } else if(work->logon) {
             SetWindowTextW(ui->status,work->enable?L"已启用此配置的登录自动启动。":L"已关闭此配置的登录自动启动；本次仍继续运行。");
         } else if(work->snapshot) {
             yyjson_doc_free(ui->snapshot); ui->snapshot=reply; reply=NULL; render(ui);
-            SetWindowTextW(ui->status,L"状态已刷新。地址不含凭据；暂停状态仅在当前管理器有效。");
+            const char *notice=str(yyjson_doc_get_root(ui->snapshot),"runtime_notice");
+            if(ui->app && *notice)set_utf8(ui->status,notice);
+            else SetWindowTextW(ui->status,ui->app?L"状态已刷新。关闭窗口收进托盘；从托盘退出会停止全部项目。":L"状态已刷新。地址不含凭据；暂停状态仅在当前管理器有效。");
         } else if(work->diagnostic) {
             char *json=yyjson_val_write(root,YYJSON_WRITE_PRETTY,NULL); set_utf8(ui->details,json); free(json); ui->diagnostic=true;
             SetWindowTextW(ui->status,L"已查询实际运行能力；诊断可复制。");
         }
-        bool refresh=!work->snapshot && !work->diagnostic && !work->logon && reply && !*error;
+        bool refresh=!work->snapshot && !work->diagnostic && !work->logon && !work->settings && reply && !*error;
         yyjson_doc_free(reply); free_work(work); update_buttons(ui);
-        if(refresh)request(ui,"management-status",false);
+        if(ui->pending_navigation){int id=ui->pending_navigation;ui->pending_navigation=0;click(ui,id);}
+        else if(refresh)request(ui,"management-status",false);
         return 0;
     }
+    case WM_APP+19:show_resident(ui);return 0;
     case WM_SIZE: if(ui->list)layout(ui); return 0;
     case WM_GETMINMAXINFO: ((MINMAXINFO *)lparam)->ptMinTrackSize=(POINT){px(ui,1020),px(ui,660)}; return 0;
     case WM_DPICHANGED: {
         RECT *rect=(RECT *)lparam; SetWindowPos(window,NULL,rect->left,rect->top,rect->right-rect->left,rect->bottom-rect->top,SWP_NOZORDER|SWP_NOACTIVATE);
         fonts(ui); layout(ui); return 0;
     }
-    case WM_DESTROY: if(ui->resident){KillTimer(window,1);tray(ui,NIM_DELETE);RemovePropW(window,L"ShellBotTrayRegistered");SetEvent(ui->stop);}PostQuitMessage(0); return 0;
+    case WM_DESTROY: if(ui->resident){KillTimer(window,1);tray(ui,NIM_DELETE);RemovePropW(window,L"ShellBotTrayRegistered");SetEvent(ui->stop);if(ui->app)sb_desktop_request_exit(ui->app);}PostQuitMessage(0); return 0;
     default: return DefWindowProcW(window,message,wparam,lparam);
     }
     return DefWindowProcW(window,message,wparam,lparam);
 }
-static int run_ui(const char *data_dir,HANDLE stop,HANDLE manager_thread,const char *profile_path) {
+static int run_ui(const char *data_dir,HANDLE stop,HANDLE manager_thread,const char *profile_path,sb_desktop_app *app) {
     HANDLE token=NULL; TOKEN_ELEVATION elevation={0}; DWORD size=0;
     bool allowed=OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&token) && sb_win_owner_token_allowed(token) &&
         GetTokenInformation(token,TokenElevation,&elevation,sizeof(elevation),&size) && (!elevation.TokenIsElevated || sb_win_elevated_owner());
     if(token)CloseHandle(token);
     if(!allowed) { fputs("ShellBot: Management window requires a valid interactive owner token.\n",stderr); return 2; }
-    ui_state ui={0};ui.resident=stop!=NULL;ui.stop=stop;ui.manager_thread=manager_thread;ui.profile_path=profile_path;
+    ui_state ui={0};ui.resident=stop!=NULL;ui.stop=stop;ui.manager_thread=manager_thread;ui.profile_path=profile_path;ui.app=app;
     ui.taskbar_created=RegisterWindowMessageW(L"TaskbarCreated");ui.data=sb_strdup(data_dir); if(!ui.data)return 2;
     SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     INITCOMMONCONTROLSEX controls={sizeof(controls),ICC_LISTVIEW_CLASSES}; InitCommonControlsEx(&controls);
@@ -399,17 +438,19 @@ static int run_ui(const char *data_dir,HANDLE stop,HANDLE manager_thread,const c
     if(area.bottom-area.top>0 && height>area.bottom-area.top-40)height=area.bottom-area.top-40;
     HWND window=CreateWindowExW(0,klass.lpszClassName,L"ShellBot 项目管理",WS_OVERLAPPEDWINDOW,CW_USEDEFAULT,CW_USEDEFAULT,width,height,NULL,NULL,klass.hInstance,&ui);
     if(!window) { free(ui.data); return 2; }
+    if(app)SetPropW(window,sb_desktop_instance_key(app),(HANDLE)1);
     /* Detach only our GUI process; never hide the caller's terminal window. */
     FreeConsole(); STARTUPINFOW startup={0}; startup.cb=sizeof(startup); GetStartupInfoW(&startup);
     if(ui.resident){tray(&ui,NIM_ADD);SetPropW(window,L"ShellBotTrayRegistered",ui.tray_added?(HANDLE)1:NULL);SetTimer(window,1,2000,NULL);}
-    ShowWindow(window,ui.resident ? (ui.tray_added ? SW_HIDE : SW_SHOWNORMAL) : startup.dwFlags&STARTF_USESHOWWINDOW ? startup.wShowWindow : SW_SHOWNORMAL); UpdateWindow(window);
+    ShowWindow(window,app?SW_SHOWNORMAL:ui.resident ? (ui.tray_added ? SW_HIDE : SW_SHOWNORMAL) : startup.dwFlags&STARTF_USESHOWWINDOW ? startup.wShowWindow : SW_SHOWNORMAL); UpdateWindow(window);
     MSG message; while(GetMessageW(&message,NULL,0,0)>0) { if(!IsDialogMessageW(window,&message)) { TranslateMessage(&message); DispatchMessageW(&message); } }
     /* Work items own their data independently; closing the GUI never stops or
        retries a manager operation. Process exit releases any outstanding item. */
-    if(ui.thread)CloseHandle(ui.thread);
+    if(ui.thread){if(app && WaitForSingleObject(ui.thread,30000)!=WAIT_OBJECT_0)ExitProcess(3);CloseHandle(ui.thread);}
     yyjson_doc_free(ui.snapshot); DeleteObject(ui.font); DeleteObject(ui.heading); free(ui.data); return 0;
 }
-int sb_manager_ui(const char *data_dir) {return run_ui(data_dir,NULL,NULL,NULL);}
+int sb_manager_ui(const char *data_dir) {return run_ui(data_dir,NULL,NULL,NULL,NULL);}
 int sb_manager_resident_ui(const char *data_dir,HANDLE stop,HANDLE manager_thread,const char *profile_path) {
-    return run_ui(data_dir,stop,manager_thread,profile_path);
+    return run_ui(data_dir,stop,manager_thread,profile_path,NULL);
 }
+int sb_manager_desktop_ui(sb_desktop_app *app) {return run_ui(sb_desktop_data(app),sb_desktop_stop(app),NULL,NULL,app);}

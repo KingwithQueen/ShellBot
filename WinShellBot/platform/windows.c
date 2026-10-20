@@ -746,18 +746,24 @@ static bool create_bytes(sb_create *plan, const char *text, size_t length, sb_fi
     ok=ok && FlushFileBuffers(file);
     size_t rename_size = sizeof(rename_info) + wcslen(plan->leaf) * sizeof(wchar_t);
     rename_info *rename = ok ? calloc(1, rename_size) : NULL;
+    NTSTATUS rename_status=(NTSTATUS)0;
     if (rename) {
-        rename->replace = FALSE; rename->directory = plan->parent->handle;
+        /* The temporary file already resides in this pinned parent. A simple
+           name with a NULL RootDirectory renames inside that same directory;
+           it does not resolve an absolute path or follow another parent. */
+        rename->replace = FALSE; rename->directory = NULL;
         rename->length = (ULONG)(wcslen(plan->leaf) * sizeof(wchar_t));
         memcpy(rename->name, plan->leaf, rename->length);
-        ok = set(file, &io, rename, (ULONG)rename_size, (FILE_INFORMATION_CLASS)10) >= 0;
+        rename_status=set(file, &io, rename, (ULONG)rename_size, (FILE_INFORMATION_CLASS)10);
+        ok = rename_status >= 0;
     } else ok = false;
     free(rename);
     if (!ok) {
         /* Delete only our newly created temporary file, through its own handle. */
         FILE_DISPOSITION_INFO disposition = {TRUE};
         SetFileInformationByHandle(file, FileDispositionInfo, &disposition, sizeof(disposition));
-        sb_fail(error, "Create-only write failed. The destination may already exist or access was denied.");
+        if (rename_status<0) snprintf(error->text,sizeof(error->text),"Create-only publish failed (NTSTATUS 0x%08lx). The original destination was not overwritten.",(unsigned long)rename_status);
+        else if (!*error->text) snprintf(error->text,sizeof(error->text),"Create-only write failed (Windows %lu); destination retained.",GetLastError());
     }
     CloseHandle(file);
     return ok;
@@ -857,4 +863,132 @@ bool sb_platform_modify_text(sb_modify *plan, const char *text, size_t length, s
     sb_fail(error, restored ? "Write failed; original bytes were restored and the private backup was retained." :
         "Write and rollback failed; restore original bytes from the reported private backup.");
     return false;
+}
+
+/* Native file management keeps the source and both parent objects pinned from
+   snapshot to commit. No shell, reparse leaf, overwrite or name-based deletion. */
+struct sb_fs_plan {
+    sb_create *source, *destination;
+    sb_file file;
+    sb_fs_info info;
+    unsigned operation;
+};
+typedef NTSTATUS (NTAPI *fs_create_fn)(PHANDLE,ACCESS_MASK,POBJECT_ATTRIBUTES,PIO_STATUS_BLOCK,
+    PLARGE_INTEGER,ULONG,ULONG,ULONG,ULONG,PVOID,ULONG);
+static NTSTATUS fs_open_relative(HANDLE parent, const wchar_t *leaf, ACCESS_MASK access,
+    ULONG disposition, ULONG options, HANDLE *handle) {
+    HMODULE module=GetModuleHandleW(L"ntdll.dll");
+    FARPROC address=module ? GetProcAddress(module,"NtCreateFile") : NULL; fs_create_fn create=NULL;
+    memcpy(&create,&address,sizeof(create));
+    UNICODE_STRING name={0}; name.Buffer=(wchar_t *)leaf;
+    name.Length=(USHORT)(wcslen(leaf)*sizeof(wchar_t)); name.MaximumLength=name.Length;
+    OBJECT_ATTRIBUTES attributes={0}; attributes.Length=sizeof(attributes); attributes.RootDirectory=parent; attributes.ObjectName=&name;
+    IO_STATUS_BLOCK io={0};
+    return create ? create(handle,access|SYNCHRONIZE,&attributes,&io,NULL,FILE_ATTRIBUTE_NORMAL,
+        FILE_SHARE_READ,disposition,options|0x00200020,NULL,0) : (NTSTATUS)-1;
+}
+void sb_platform_fs_close(sb_fs_plan *plan) {
+    if (!plan) return;
+    if (plan->file.handle && plan->file.handle!=INVALID_HANDLE_VALUE) CloseHandle(plan->file.handle);
+    free(plan->file.path); sb_platform_create_close(plan->source); sb_platform_create_close(plan->destination); free(plan);
+}
+sb_fs_plan *sb_platform_fs_prepare(const char *operation, sb_root *source, const char *path,
+    bool directory, sb_root *destination, const char *destination_path, sb_fs_info *info,
+    char version[65], sb_error *error) {
+    sb_fs_plan *plan=calloc(1,sizeof(*plan)); if (!plan) return NULL;
+    plan->operation=!strcmp(operation,"fs_stat") ? 0 : !strcmp(operation,"fs_mkdir") ? 1 :
+        !strcmp(operation,"fs_copy") ? 2 : !strcmp(operation,"fs_move") ? 3 : 4;
+    plan->info.directory=directory;
+    if (plan->operation==1) plan->destination=sb_platform_prepare_create(source,path,error);
+    else {
+        plan->source=sb_platform_prepare_create(source,path,error);
+        ACCESS_MASK access=FILE_READ_ATTRIBUTES;
+        if (plan->operation==2 || (plan->operation==4 && !directory)) access|=GENERIC_READ;
+        if (plan->operation>=3) access|=DELETE;
+        if (!plan->source || fs_open_relative(plan->source->parent->handle,plan->source->leaf,access,1,
+            directory ? 0x1 : 0x40,&plan->file.handle)<0) goto failed;
+        plan->file.path=final_path(plan->file.handle);
+        wchar_t *expected=wide(plan->source->target); BY_HANDLE_FILE_INFORMATION basic={0};
+        bool valid=expected && plan->file.path && !wcscmp(expected,plan->file.path) &&
+            GetFileType(plan->file.handle)==FILE_TYPE_DISK && GetFileInformationByHandle(plan->file.handle,&basic) &&
+            !(basic.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT) && (directory || basic.nNumberOfLinks==1);
+        free(expected); if (!valid) goto failed;
+        plan->info.size=plan->file.size=((uint64_t)basic.nFileSizeHigh<<32)|basic.nFileSizeLow;
+        if ((plan->operation==2 || plan->operation==4) && !directory && plan->file.size>SB_TRANSFER_LIMIT) {
+            sb_fail(error,"Copy/deletion backup is limited to 64 MiB per file."); goto failed;
+        }
+        if (!sb_platform_file_version(&plan->file,plan->info.version,error)) goto failed;
+        if (plan->operation==2 || plan->operation==3) plan->destination=sb_platform_prepare_create(destination,destination_path,error);
+    }
+    if ((plan->operation==1 || plan->operation==2 || plan->operation==3) && !plan->destination) goto failed;
+    if (plan->operation==2 && directory) { sb_fail(error,"fs_copy copies files; directory trees require explicit per-file operations."); goto failed; }
+    if (plan->operation==3) {
+        FILE_ID_INFO source_id={0},destination_id={0};
+        if (!GetFileInformationByHandleEx(plan->file.handle,FileIdInfo,&source_id,sizeof(source_id)) ||
+            !GetFileInformationByHandleEx(plan->destination->parent->handle,FileIdInfo,&destination_id,sizeof(destination_id)) ||
+            source_id.VolumeSerialNumber!=destination_id.VolumeSerialNumber) {
+            sb_fail(error,"Native move requires the same volume; explicitly copy then delete a file across volumes."); goto failed;
+        }
+    }
+    char parent_version[65]="",tuple[256];
+    if (plan->destination && !sb_platform_create_version(plan->destination,parent_version,error)) goto failed;
+    snprintf(tuple,sizeof(tuple),"%s|%s",plan->info.version,parent_version);
+    if (!sb_platform_sha256(tuple,strlen(tuple),version,error)) goto failed;
+    *info=plan->info; return plan;
+failed:
+    if (!*error->text) sb_fail(error,"Cannot pin a regular single-link source and its authorized parents. Check type, permissions and concurrent use.");
+    sb_platform_fs_close(plan); return NULL;
+}
+static bool fs_backup(sb_fs_plan *plan, sb_lease *lease, char backup_id[33], sb_error *error) {
+    if (!lease) return false;
+    AcquireSRWLockExclusive(&lease->backup_lock); bool available=lease->backups<64;
+    if (available) ++lease->backups; ReleaseSRWLockExclusive(&lease->backup_lock);
+    if (!available) { sb_fail(error,"This instance reached the 64-backup budget."); return false; }
+    unsigned char random[16]; if (!sb_platform_random(random,sizeof(random),error)) return false;
+    for (size_t i=0;i<sizeof(random);++i) snprintf(backup_id+i*2,3,"%02x",random[i]);
+    char filename[64]; snprintf(filename,sizeof(filename),"deleted-%s.bin",backup_id);
+    sb_journal *backup=sb_platform_journal_open(lease,filename,error);
+    unsigned char *buffer=malloc(SB_TRANSFER_CHUNK); bool ok=backup && buffer; uint64_t offset=0;
+    /* journal_append flushes every block and gives the backup a private DACL. */
+    while (ok && offset<plan->file.size) {
+        size_t got=0; ok=sb_platform_read(&plan->file,offset,buffer,SB_TRANSFER_CHUNK,&got,error) && got &&
+            sb_platform_journal_append(backup,(char *)buffer,got,error); offset+=got;
+    }
+    if (ok && !plan->file.size) ok=sb_platform_journal_append(backup,"",0,error);
+    free(buffer); sb_platform_journal_close(backup);
+    if (!ok && !*error->text) sb_fail(error,"Cannot flush deletion backup; source retained."); return ok;
+}
+bool sb_platform_fs_execute(sb_fs_plan *plan, sb_lease *lease, sb_fs_backup_receipt receipt,
+    void *context, char backup_id[33], sb_error *error) {
+    *backup_id=0; bool ok=false;
+    if (!plan->operation) return true;
+    if (plan->operation==1) {
+        HANDLE handle=NULL;
+        ok=fs_open_relative(plan->destination->parent->handle,plan->destination->leaf,
+            FILE_LIST_DIRECTORY|FILE_READ_ATTRIBUTES,2,0x1,&handle)>=0;
+        if (ok) CloseHandle(handle);
+    } else if (plan->operation==2) ok=sb_platform_create_file(plan->destination,&plan->file,error);
+    else if (plan->operation==3) {
+        size_t length=wcslen(plan->destination->leaf)*sizeof(wchar_t),size=sizeof(FILE_RENAME_INFO)+length;
+        FILE_RENAME_INFO *rename=calloc(1,size);
+        if (rename) {
+            rename->ReplaceIfExists=FALSE;
+            rename->RootDirectory=!strcmp(plan->source->identity,plan->destination->identity) ? NULL : plan->destination->parent->handle;
+            rename->FileNameLength=(DWORD)length; memcpy(rename->FileName,plan->destination->leaf,length);
+            typedef NTSTATUS (NTAPI *rename_fn)(HANDLE,PIO_STATUS_BLOCK,PVOID,ULONG,FILE_INFORMATION_CLASS);
+            HMODULE module=GetModuleHandleW(L"ntdll.dll"); FARPROC address=module ? GetProcAddress(module,"NtSetInformationFile") : NULL;
+            rename_fn set=NULL; memcpy(&set,&address,sizeof(set)); IO_STATUS_BLOCK io={0};
+            NTSTATUS status=set ? set(plan->file.handle,&io,rename,(ULONG)size,(FILE_INFORMATION_CLASS)10) : (NTSTATUS)-1;
+            ok=status>=0;
+            if (!ok) snprintf(error->text,sizeof(error->text),"Anchored native move failed (NTSTATUS 0x%08lx); destination was not overwritten.",(unsigned long)status);
+        }
+        free(rename);
+    } else {
+        ok=plan->info.directory || fs_backup(plan,lease,backup_id,error);
+        if (ok && *backup_id) ok=receipt && receipt(context,plan->source->target,plan->file.size,backup_id);
+        FILE_DISPOSITION_INFO disposition={TRUE};
+        if (ok) ok=SetFileInformationByHandle(plan->file.handle,FileDispositionInfo,&disposition,sizeof(disposition))!=FALSE;
+    }
+    if (!ok && !*error->text) sb_fail(error,"Native operation refused: destination exists, directory is nonempty, or Windows denied access. No existing destination was overwritten.");
+    return ok;
 }

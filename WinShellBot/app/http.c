@@ -26,43 +26,7 @@ static BOOL WINAPI stop_handler(DWORD event) {
     return FALSE;
 }
 
-static int reply_typed(struct mg_connection *connection, int status, const char *body, size_t size, const char *extra, const char *type) {
-    /* Complete a bounded incoming body before closing an error response on
-       Windows. Unread socket data may otherwise discard the outgoing reply. */
-    const struct mg_request_info *info = mg_get_request_info(connection);
-    if (info->content_length >= 0 && info->content_length <= 2 * SB_REQUEST_LIMIT &&
-        !mg_get_header(connection, "Transfer-Encoding")) {
-        char discard[4096];
-        size_t drained = 0;
-        uint64_t deadline = sb_platform_millis() + 5000;
-        int got;
-        while (drained < 2 * SB_REQUEST_LIMIT && sb_platform_millis() < deadline &&
-            (got = mg_read(connection, discard, sizeof(discard))) > 0) drained += (size_t)got;
-    }
-    const char *reason = status == 200 ? "OK" : status == 202 ? "Accepted" : status == 400 ? "Bad Request" :
-        status == 401 ? "Unauthorized" : status == 403 ? "Forbidden" : status == 404 ? "Not Found" :
-        status == 405 ? "Method Not Allowed" : status == 406 ? "Not Acceptable" :
-        status == 411 ? "Length Required" : status == 413 ? "Content Too Large" : status == 415 ? "Unsupported Media Type" :
-        status == 429 ? "Too Many Requests" : status == 503 ? "Service Unavailable" : "Internal Server Error";
-    char header[1024];
-    int header_size = snprintf(header, sizeof(header), "HTTP/1.1 %d %s\r\nContent-Type: %s; charset=utf-8\r\nContent-Length: %zu\r\n"
-        "Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n%s\r\n", status, reason, type, size, extra ? extra : "");
-    if (header_size < 0 || (size_t)header_size >= sizeof(header) || size > SB_RESPONSE_LIMIT) return 500;
-    char *frame = malloc((size_t)header_size + size);
-    if (!frame) return 500;
-    memcpy(frame, header, (size_t)header_size);
-    if (body && size) memcpy(frame + header_size, body, size);
-    mg_write(connection, frame, (size_t)header_size + size);
-    free(frame);
-    return status;
-}
-static int reply(struct mg_connection *connection, int status, const char *body, size_t size, const char *extra) {
-    return reply_typed(connection,status,body,size,extra,"application/json");
-}
-
-static int reject(struct mg_connection *connection, int status, const char *message, const char *extra) {
-    return reply(connection, status, message, strlen(message), extra);
-}
+#include "http_response.h"
 
 static bool authorized(struct mg_connection *connection, const http_state *state) {
     const char *authorization = mg_get_header(connection, "Authorization");

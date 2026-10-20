@@ -799,6 +799,9 @@ mg_get_response_info(const struct mg_connection *);
     >0  number of bytes written on success */
 CIVETWEB_API int mg_write(struct mg_connection *, const void *buf, size_t len);
 
+/* ShellBot local extension: finish this response, then close gracefully. */
+CIVETWEB_API void mg_disable_keep_alive(struct mg_connection *);
+
 
 /* Send data to a websocket client wrapped in a websocket frame.  Uses
    mg_lock_connection to ensure that the transmission is not interrupted,

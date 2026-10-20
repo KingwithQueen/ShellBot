@@ -18,4 +18,5 @@
   </ItemDefinitionGroup>
   <ItemGroup><ClCompile Include="app\launcher.c" /></ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Target Name="CopyDesktopEntry" AfterTargets="Build"><Copy SourceFiles="$(OutDir)ShellBot-Launcher.exe" DestinationFiles="$(OutDir)ShellBot.exe" /></Target>
 </Project>
