@@ -16,7 +16,7 @@
     <Link><SubSystem>Windows</SubSystem><AdditionalDependencies>Shell32.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
     <Manifest><AdditionalManifestFiles>$(MSBuildProjectDirectory)\app\shellbot.manifest;%(AdditionalManifestFiles)</AdditionalManifestFiles></Manifest>
   </ItemDefinitionGroup>
-  <ItemGroup><ClCompile Include="app\launcher.c" /></ItemGroup>
+  <ItemGroup><ClCompile Include="app\launcher.c" /><ResourceCompile Include="app\version.rc"><PreprocessorDefinitions>SB_LAUNCHER;%(PreprocessorDefinitions)</PreprocessorDefinitions></ResourceCompile></ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <Target Name="CopyDesktopEntry" AfterTargets="Build"><Copy SourceFiles="$(OutDir)ShellBot-Launcher.exe" DestinationFiles="$(OutDir)ShellBot.exe" /></Target>
 </Project>

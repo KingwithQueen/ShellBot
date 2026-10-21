@@ -1,186 +1,54 @@
-# dev.28 管理界面排版预览
+# ShellBot 1.0.0
 
-新增“项目优先”排版：顶部保留连接、授权和数据位置入口，新建/刷新靠近项目列表，启停/设置靠近所选项目；管理员与审批令牌在工具菜单中。白底详情、项目名称标题和底部数据路径让信息层次更清楚。“视图”菜单可切回 dev.27 经典排版，切换不修改项目配置或重启工作进程。说明与验证范围见 [排版预览](docs/LAYOUT_PREVIEW_20261021.md)。旧候选保留，未提交或推送。
+面向 Windows 的原生 C17 / Win32 MCP 主机。双击 **ShellBot.exe**，在管理界面创建项目、设置权限、连接客户端并管理运行状态。
 
-# dev.27 原生 Win32 管理界面（历史）
+这是第一个正式版，采用项目优先排版：左侧选择项目，右侧查看详情与启停，顶部设置连接、授权和数据位置。可从“视图”菜单切换经典布局；自动刷新保留阅读位置和诊断内容。
 
-管理窗口采用系统菜单、分组操作栏、项目列表与详情布局，作为后续正式版界面的实现基础。修复延迟诊断覆盖其他项目、刷新失败丢失阅读内容、确认框期间刷新竞态及弹窗控件恢复问题；统一原生弹窗的 DPI 和字体处理。OAuth 轮询保留可用按钮、所选连接和阅读位置。操作与验证边界见 [使用说明](docs/USER_GUIDE.md)、[界面审查](docs/UI_REVIEW_20261021.md)及 [M20 交接](docs/HANDOFF_20261021_NATIVE_UI.md)。当前仍为开发候选，未提交或推送。
+## 开始使用
 
-# dev.26 长期客户端授权（历史）
+1. 完整解压 Windows x64 发布包到可写的非 C 盘目录，保留全部组件和许可证。
+2. 双击 **ShellBot.exe**，点击“新建项目…”，选择工作目录并设置所需权限。
+3. 在“连接设置…”填写本机监听端口和已有 HTTPS 公共地址。程序只监听 `127.0.0.1`；隧道和域名使用已有配置。
+4. 在 MCP 客户端添加项目公网地址并选择 OAuth。在 ShellBot 的“客户端授权…”中核对申请，再允许连接。
 
-管理界面增加“长期授权，直到手动撤销”，首次确认后由客户端自动续期。重启与修改项目权限保持连接，每次操作按当前权限检查；删除后同名重建项目不能继承旧连接。访问令牌仍为 15 分钟，续期凭据仍严格轮换并检测重用；旧限时授权不自动升级。修正续期 scope 顺序校验，增加不含凭据的失效原因。当前回归、候选包和真实客户端待验状态见 [M19 交接](docs/HANDOFF_20261021_PERSISTENT_AUTH.md)。旧包、基线和报告保留，未提交或推送。
+关闭窗口会收进托盘；从“文件”或托盘菜单退出会停止全部项目。详细操作见 [使用说明](docs/USER_GUIDE.md)，本版变化与验证范围见 [1.0.0 发布说明](docs/RELEASE_NOTES_1.0.0.md)。
 
-# dev.25 授权与界面刷新修正（历史）
+## 数据与升级
 
-后台刷新改为按内容变化更新，不周期性切换按钮状态或重建项目列表。未改动保存、显示名称和自动启动选项不推进权限版本；真实权限与目录变化仍要求重新授权。OAuth 续期保留旧访问凭据原有效期，刷新凭据重用仍撤销连接。新增固定验收客户端用于 AdGuard 按程序排除，保留用户所需 localhost 过滤；当前网络结果、旧失败及候选状态见 [M18 交接](docs/HANDOFF_20261021_AUTH_REFRESH.md)。真实客户端 issuer 问题尚未判定解决。
+默认数据保存在程序旁的 `Data`。可以通过“数据位置…”迁移到其他非 C 盘目录；复制和逐文件校验成功后才保存新位置，原目录由用户确认后清理。`ShellBot.storage.json` 保存自选位置，应与程序一起保留。凭据由当前 Windows 账户 DPAPI 加密。
 
-# dev.24 HTTP EOF 更新
+升级时先从托盘退出旧版，备份 Data 和位置设置，再替换同一固定程序目录中的发布文件。保留原数据、位置设置和 Windows 账户。1.0.0 沿用 dev.26–dev.28 的 OAuth v3 存储，既有长期授权继续使用；旧限时连接不会自动升级。不要用发布包覆盖或删除 Data。
 
-关闭流程改为先发送结束标记，再有界排空；早期错误不再等待未发送的请求正文，接受队列保持有界。已确认本机 AdGuard localhost 过滤会导致独立原生探针及旧、新程序发生半关闭异常，当前回归基于 AdGuard 服务运行、用户关闭 localhost 过滤的条件。该设置可能影响经本地代理的网页过滤，长期按应用排除的方案需另行验证。参见 [M17 交接](docs/HANDOFF_20261021_HTTP_EOF.md)和[使用说明](docs/USER_GUIDE.md)。新包只在完整 EOF 与既有回归全部通过后生成，真实 MCP 客户端仍由用户验收。
+## 主要能力
 
-# dev.23 便携存储更新
-
-默认数据改为程序旁的 Data，管理界面“数据位置…”支持先复制与 SHA-256 校验、保存新位置、退出后手动清理旧目录。自身配置、凭据、项目数据及 Runtime 缓存/临时目录拒绝 C 盘，不再使用 LocalAppData 或用户文档目录；明确授权的 C 盘文件操作继续按项目策略执行。整目录搬动可更新内部路径。当前准确回归、打包与外部待验状态见最新交接和包内收据。
-
-# ShellBot
-
-2026-10-21 / dev.22：增加管理界面集成的 OAuth 2.1 连接。复用现有 HTTPS 公网地址，客户端选择 OAuth 并自动登记，在“客户端授权…”核对申请后允许连接；支持自动续期、撤销、项目隔离及当前账户加密保存。原有 Bearer 客户端仍可用，37 个 MCP 工具和项目权限规则保持。安装与验收步骤见 [使用说明](docs/USER_GUIDE.md)。真实客户端由用户在新包上单独验收。
-
-2026-10-20 / dev.21：M14 改为统一的 Windows 管理界面。完整解压后双击 **ShellBot.exe**；在界面中新建、设置和启停项目，连接设置中填写本机端口与可选公共地址。程序自动生成并加密保存凭据，项目目录可在界面中迁移，关闭窗口收进托盘，右键退出后停止全部项目。日常使用不需要命令脚本或终端。使用步骤见 [使用说明](docs/USER_GUIDE.md)，开发和验证记录见 [最新交接](docs/HANDOFF_20261020_M13.md)。
-
-ShellBot 是使用 C17 开发的电脑 MCP 主机。模型服务负责推理，ShellBot 负责本机工具、目录权限、所有者审批和后续任务执行。受控电脑运行程序即可提供工具，不需要安装 ChatGPT 桌面客户端、Node.js 或 Python 运行环境。
-
-Windows 工程 WinShellBot 优先面向 Windows 10/11 x64。通用 C 核心与 Windows 接口分离，便于以后移植 Linux 和 macOS；Windows 7 以后单独编译和验证。
-
-后续开发按已确认的多项目和独立权限方案推进，见 [开发计划](docs/DEVELOPMENT_PLAN.md)及 [项目权限与执行身份](docs/EXECUTION_PERMISSIONS.md)。dev.13 接通 M6 审批与持久历史，dev.14 提供 [M7 原生项目管理窗口与独立候选包](docs/PROJECT_MANAGEMENT_UI.md)。独立系统、另一设备与真实 MCP 客户端仍待验收。
-
-首次使用：双击 ShellBot.exe → 新建项目 → 选择项目存储目录 → 创建项目。默认随管理界面启动项目；“复制本机地址 / 复制公网地址”和“复制项目令牌”用于客户端接入。项目名称支持中文，地址标识在创建后固定，修改名称或存储位置不会改变客户端地址和凭据。底层继续提供 37 个 MCP 工具，实际可用能力由项目权限决定。
-
-## 当前实现
-
-`0.1.0-dev.19` 历史基线新增 [M12 常驻与自动启动](docs/STARTUP.md)，同时提供服务和托盘模式，是开发版本。支持已提升管理器复用管理员权限，以及由 Windows 管理的最高权限登录计划任务；普通工作进程和原审批规则保留。按用户确认，自启以实际登记及回读设置验收，不要求重启测试。原 dev.14 冻结候选包不包含 M8–M12，证据见 [人工验收记录](docs/MANUAL_ACCEPTANCE_20261012.md)。程序只监听本机端口，域名与 cloudflared 隧道由已有环境完成，不要求域名检查；OAuth 与隧道管理暂缓。已实现：
-
-| 能力 | 当前行为 |
+| 能力 | 说明 |
 | --- | --- |
-| MCP 接入 | stdio，以及回环地址上的 Streamable HTTP JSON 响应 |
-| host_info / host_capabilities | 系统、版本、运行时长、实际工具、目录标识和限制 |
-| fs_list | 授权目录内的文件列表与分页 |
-| fs_read | UTF-8、UTF-16 LE/BE 读取、BOM 识别和 Unicode 分页；完整读取返回原始字节 SHA-256 |
-| fs_search | 文件名或 UTF-8/UTF-16 内容的字面量搜索，可选递归，内容结果包含行号与有界片段 |
-| image_view | 完整解码 PNG/JPEG；可按长边保持比例缩小，较大源自动转为有界 PNG；返回实际尺寸与源/输出摘要 |
-| document_info / document_read / document_preview | PDF 页面信息、文本与页面 PNG；DOCX 正文、XLSX 工作表存储值、PPTX 幻灯片文本及明确标注的内容预览；旧 Office 格式提示转换 |
-| artifact_download / artifact_upload | 新格式项目的二进制分块下载与上传；单文件 64 MiB，块 32 KiB；上传核对大小及 SHA-256 后创建新文件、禁止覆盖；范围、只读、审批和后端归属独立核验 |
-| 常驻与启动配置 | 私有 DPAPI 凭据和项目快照、选定项目启动、托盘窗口与后台任务；普通 Run 或最高权限登录任务；独立虚拟账户的自动延迟启动 Windows 服务，实际回读系统设置 |
-| fs_write / fs_patch | 默认创建；覆盖和替换保留原始哈希、独占打开与私有备份；UTF-8 原文与结果均限 64 KiB；新项目按独立审批模式执行 |
-| 本机审批 | 查看完整请求、批准、拒绝、撤销、过期、绑定参数、并发重试与重启失效 |
-| 审批和写入审计 | 私有 JSONL 记录状态、执行结果和备份编号，跨重启保留，日志故障时阻止新批准和写入 |
-| 目录配置 | 最多 16 个显式目录，每个目录拥有独立 workspace_id，默认只读 |
-| M1 项目配置与策略 | format_version:1 多项目配置校验、三审批模式统一判断、身份与管理员许可分离、旧配置显式备份迁移；以 --manager 显式启动项目 |
-| M2 项目管理器 | 本机创建、配置、启停；独立普通工作进程、Data、任务、幂等记录、审批和备份；配额与本人 Job 清理 |
-| M3 项目 MCP 网关 | 一个回环端口、/projects/ID/mcp、逐项目 bearer、显式默认项目 /mcp、地址生成、有界并发和进程通信超时 |
-| M4 项目审批与受限任务 | 六个文件工具、命令启动和输入统一审批；原队列查看/批准/拒绝/撤销；有界分页和结果重试；LPAC 实际身份与权限验证后开放声明程序 |
-| M5 共享管理员代理 | 普通管理器由所有者异步启动 UAC；已提升管理器复用已有权限；逐项目可信注册、许可与撤销；显式 identity:administrator 文件与任务，独立审批和归属清理 |
-| M6 远程审批与恢复 | 独立所有者凭据与有限页面/API；客户端 URL 提示；本人审批查询/取消；有界私有请求/任务历史；重启中断及完整生命周期审计 |
-| M8 Windows 桌面工具 | 默认关闭的独立观察/输入/剪贴板权限；短期会话独占控制、PNG 截图、窗口与物理坐标输入；人工输入暂停、紧急热键和仅本机恢复 |
-| 运行保护 | 数据目录实例锁、请求和结果大小上限；HTTP 令牌、Host/Origin 检查 |
-| 已有代理接入 | 默认接受本机代理的合法 Host/Origin 且要求 bearer；外部地址配置作为可选限制保留 |
-| 后台命令任务 | task_start、task_status、task_output、task_input、task_cancel；显式启用 user/administrator 后提供进程、输出、输入、超时和取消 |
-| 执行权限基础层 | 三档配置、真实身份与提升状态查询、受限所有者调用拒绝；管理员代理同账户启动、复用与退出已在 Server 2025 验收；启动 UAC 一次由用户观察确认，跨账户提权未覆盖 |
+| 项目管理 | 原生窗口、项目独立凭据与工作进程、启停与暂停、目录迁移、托盘生命周期 |
+| 连接认证 | OAuth 发现、公共 DCR、授权码/S256 PKCE、轮换续期、长期或限时授权、手动撤销 |
+| 文件 | 列表、读取、搜索、创建、基于摘要的修改、复制、移动、删除、独立审批与审计 |
+| 命令任务 | 普通、受限及管理员身份，后台输入输出、取消与超时；按项目明确授权 |
+| 图像与文档 | 图像解码、缩放；PDF 阅读与渲染；DOCX / XLSX / PPTX 结构化阅读及内容预览 |
+| 桌面与传输 | 独立授权的 Windows 桌面操作，产物下载及校验后创建文件的上传 |
 
-文件工具检查实际打开的文件或目录句柄对应的最终路径，拒绝越界联接、符号链接、父目录跳转和 NTFS 数据流路径。目录工具路径须为相对路径；新项目只有显式授予 current_user 文件范围后，才可省略 workspace_id 使用绝对本地盘符路径，配置目录只读属性仍生效。文件名搜索跳过重解析目录。没有配置目录时不自动授权当前目录或整台电脑。
+共实现 37 个工具，各项目只暴露其策略允许的工具。文件范围、审批方式、执行身份和管理员许可独立设置。受限执行只开放声明的运行文件；普通或管理员命令具有相应账户权限。Office 预览不复现原页面排版，扫描文档不自动 OCR。
 
-本版支持 MCP `2025-03-26`、`2025-06-18`、`2025-11-25` 的初始化与工具子集，并支持 `2026-07-28` 的逐请求元数据、发现、工具调用和请求头校验。声明 URL elicitation 能力的新版客户端可收到 input_required；客户端接受提示仍须实际所有者批准，其他客户端使用 pending/approval_url。HTTP 不建立协议会话，GET `/mcp` 返回 405，未开放 SSE 或标准 MCP tasks 扩展。见 [M6 协议与边界](docs/REMOTE_APPROVALS.md)。
+更多说明：[文件管理](docs/FILE_MANAGEMENT.md)、[权限与身份](docs/EXECUTION_PERMISSIONS.md)、[命令任务](docs/COMMAND_TASKS.md)、[远程审批](docs/REMOTE_APPROVALS.md)、[桌面控制](docs/DESKTOP_CONTROL.md)、[文档阅读](docs/DOCUMENT_READING.md)、[产物传输](docs/ARTIFACT_TRANSFER.md)。
 
-旧单实例 HTTP 使用一个 bearer 身份；项目网关中每个项目使用独立 bearer，路由和凭据共同固定项目。默认不需要填写域名，仍验证 Host/Origin 格式和令牌；可选 public_url 启用域名限制并生成公共地址。实际客户端工具使用与本机自检分别记录。
+## 构建与发布
 
-覆盖与局部修改采用锁定原文件并预先保存私有备份，返回 atomic_save:false，支持冲突拒绝和结果重试，不承诺崩溃原子性，见 [文本修改说明](docs/FILE_EDIT.md)。命令行为见 [命令任务说明](docs/COMMAND_TASKS.md)。M4 受限后端只开放声明的程序与只读运行文件，禁用网络、Win32k 桌面调用和子进程；不保证通用解释器、GUI 或所有构建工具可运行。M6 加载私有历史并标记重启中断，不恢复执行许可或自动重跑。M10 不执行宏、公式或文档外部引用，不提供 OCR；Office 预览不复现原始排版。
-
-未版本化的单实例运行配置仍使用 dev.7 的 controlled、user、administrator；原 controlled 命令保持不可用，原 user/administrator 预授权行为保留。项目配置将审批、文件范围、身份与管理员许可分开，通过 --manager 启动，加 --http 开启项目网关；--config 保持旧入口。LPAC 和共享管理员仅用于正常新格式项目，管理员许可不兼容受限/目录隔离项目；旧管理员迁移不会自动接入共享代理。见 [项目配置说明](docs/PROJECT_CONFIGURATION.md)及 [项目权限与执行身份](docs/EXECUTION_PERMISSIONS.md)。
-
-## 构建与验证
-
-使用 Visual Studio 的 C++ 桌面开发工具及 Windows SDK。现有工程已设置 `.c`、`/std:c17`、`/utf-8`，自有代码开启四级警告并将警告视为错误；Release 使用静态运行库。当前开发机使用 VS 2026 v145 和 Windows SDK 10.0.26100.0。[微软 C17 工具链要求](https://learn.microsoft.com/en-us/cpp/overview/install-c17-support?view=msvc-170)
-
-在仓库目录运行：
+安装 Visual Studio C++ 桌面开发工具及 Windows SDK，在仓库目录运行：
 
 ```powershell
 .\scripts\build.ps1 -Configuration Debug
 .\scripts\build.ps1 -Configuration Release
 ```
 
-默认构建只生成产品，包含受限任务后端需要的 `ShellBot-SandboxProbe.exe`，并将固定版本 `pdfium.dll` 复制到程序旁。PDF 功能需要这份同架构 DLL；Office 使用 Windows 内置 OPC / XmlLite，不需要安装 Office。依赖来源和完整许可见 [third_party](third_party/README.md)。测试源码、夹具、运行脚本及测试/诊断打包脚本保留在开发机本地，已排除出 Git；新的源码检出不包含这些文件。拥有本地测试副本时，可运行：
+自有代码使用 C17、四级警告及警告视为错误，Release 使用静态运行库。默认构建同时生成 GUI 入口、主程序、SandboxProbe 并复制固定 PDFium 依赖。当前正式包为 Windows x64；未将其他系统或架构列为已验收支持。
 
-```powershell
-.\scripts\build.ps1 -Configuration Release -WithTests
-python .\tests\smoke.py --exe .\out\x64\Release\WinShellBot.exe
-# 或者保存包含可执行文件校验值的验证报告：
-.\scripts\test.ps1 -Configuration Release
-# 分别验证核心功能，明确排除仍在调查的关闭连接诊断：
-.\scripts\test.ps1 -Configuration Release -SkipCloseProbe
-# 同时回归图像、PDF / Office 和产物传输，不请求 UAC：
-.\scripts\test.ps1 -Configuration Release -SkipCloseProbe -Images -Documents -Transfers
-# 常驻与服务策略常规回归；需要暂时排除登录登记时：
-.\scripts\test.ps1 -Configuration Release -SkipCloseProbe -Images -Documents -Transfers -Startup -SkipLogonRegistration
-# 核心报告必须匹配当前 Release 程序才能生成测试包：
-# M7 独立候选包要求当前源码、M1–M7 与实际窗口/UAC 收据。
-.\scripts\package-candidate.ps1
-# 旧 package-test.ps1 保留 dev.7 原生专项门槛。
-```
+本机测试源与历史证据保留在被 Git 忽略的 `tests`、`build`、`out`、`dist` 中。恢复本机测试副本后可用 `-WithTests` 构建原生夹具；本轮收据位于 `build/release-1.0.0`。发布包与当前报告通过 `scripts/package-release.ps1` 绑定版本、程序、源码及测试摘要。历史候选和原始失败报告仍保留。
 
-也可以在 Visual Studio 中打开 `ShellBot.slnx` 构建。产物位于 `out/x64/Debug/WinShellBot.exe` 或 `out/x64/Release/WinShellBot.exe`。Python 仅用于开发验证，不属于发行程序的运行依赖。候选打包仍需与当前源码和程序一致的验收收据；使用说明和仓库维护改变了源码清单，原 M7 冻结候选包及其收据继续保留，新源码快照需重新验收后才能打包。
+本地自动化与真实客户端、实际 UAC、物理多屏 DPI、独立 Windows 环境、长期运行分别验收，准确范围见发布说明与包内验证摘要。
 
-验证程序启动实际进程和 HTTP 监听，覆盖多目录、中文路径、Unicode 分页、图像字节、目录联接逃逸、审批、禁止覆盖、畸形请求、令牌、并发和停止。dev.7 已在 Windows 11 build 26300 验证普通及管理员任务；改用 C 测试辅助程序后，用户确认没有新杀毒告警，UAC 仅启动代理时一次。测试包包含辅助程序及源码，产品不依赖它。当前机器上的构建与调用结果见[实现与验证记录](docs/IMPLEMENTATION_STATUS.md)。开发机主动关闭 HTTP 连接时仍有连接重置，完整套件因此未通过；核心套件与该诊断分别记录，不隐藏失败。
+## 许可
 
-2026 年 10 月 6 日，Windows Server 2025 上 dev.2 的原脚本复测核心通过、关闭连接 0/100 失败；新增 HTTP-only 诊断整体通过，关闭连接和 fresh keep-alive 对照各 0/100 失败。此前同机出现过 2/100 关闭失败，本次通过不代表根因已修复。dev.2 的反馈来自控制台，该版本的完整 report.json 尚未回传。开发机仍可复现连接重置，Win10/11、公网与真实模型客户端保留待验收，见[实现与验证记录](docs/IMPLEMENTATION_STATUS.md)和 [Server 2025 测试步骤](docs/SERVER_2025_TEST.md)。
-
-随后已读取 dev.3 的两份完整报告：Server 2025 Datacenter build 26100，程序 SHA-256 与交付包一致，两轮各通过 152 项核心和基本 HTTP 检查，新增审计 ACL、内容脱敏和重启保留均通过。close 合计 1/200 失败，唯一失败为响应头收到 0 字节时发生 10054；fresh keep-alive 为 0/200 失败。dev.3 的上述本机功能已获得独立机器证据，偶发连接重置与实际客户端调用仍待验证；公网 OAuth 已按最新决定暂缓。
-
-dev.4 的 Server 2025 完整报告已核验：160 项核心和基本 HTTP 检查通过，关闭连接与 fresh keep-alive 各 0/100 失败，程序 SHA-256 匹配交付包。新增内容搜索、外部域名配置和请求头校验已通过独立机器基础验证；这一轮通过不证明偶发重置已修复，也不包含真实隧道调用。已有域名可使用本地保留的 tests/Test-ShellBot-Endpoint.ps1，说明见 [外部访问配置](docs/EXTERNAL_ACCESS.md)。
-
-2026 年 10 月 7 日，dev.5 在 Server 2025 Datacenter build 26100 上的 195 项核心与基本 HTTP 检查全部通过，程序 SHA-256 匹配交付包。覆盖、局部替换、完整摘要、私有原文备份及备份 ACL，以及无需填写域名的代理请求头检查获得独立机器证据。close 为 1/100 失败、fresh keep-alive 为 0/100，整体 needs_investigation；连接问题仍待修复，命令任务和实际客户端工具使用仍待完成。
-
-## 本机试用
-
-支持启动本机 MCP 子进程的客户端可以使用以下命令和参数；目录必须预先存在：
-
-```text
-command: E:\Program\ShellBot\out\x64\Release\WinShellBot.exe
-args: --stdio --root C:\ShellBotWorkspace
-```
-
-`--root` 为目录设置标识 `workspace`，始终只读。多个目录请复制并修改 [config/shellbot.example.json](config/shellbot.example.json)，然后使用 `--config 配置文件路径`。配置目录必须使用绝对路径；`--root` 和 `--config` 不能同时使用。root 的 `read_only` 默认 `true`；设为 `false` 只允许提出创建请求，仍需本机所有者批准具体目标和内容。
-
-M1 新格式可用 `WinShellBot.exe --validate-projects 配置文件` 校验，样例为 [config/projects.example.json](config/projects.example.json)。`--migrate-config` 会生成新配置和原始字节备份，不修改旧 Data；具体参数及当前不可用的组合见 [项目配置说明](docs/PROJECT_CONFIGURATION.md)。新格式尚不作为上述 --config 的运行输入。
-
-项目 MCP 使用 `--manager --http --projects 注册配置 --manager-data-dir 独立目录` 启动，再通过 `--project-start ID` 显式启用项目。每个启用项目必须在其 token_env 中提供不同的有效令牌；地址为 `http://127.0.0.1:8765/projects/ID/mcp`，`--project-links ID` 返回本机和可选公共地址。旧 `/mcp` 仅在 gateway.default_project_id 显式绑定时提供。完整步骤与限制见 [项目网关](docs/PROJECT_GATEWAY.md)。
-
-HTTP 本机开发示例：
-
-```powershell
-$env:SHELLBOT_TOKEN = & .\out\x64\Release\WinShellBot.exe --generate-token
-.\out\x64\Release\WinShellBot.exe --http --root C:\ShellBotWorkspace --port 8765
-```
-
-入口为 `http://127.0.0.1:8765/mcp`。客户端使用 `Authorization: Bearer <令牌>`、`Content-Type: application/json`、`Accept: application/json, text/event-stream`；初始化后的请求使用协商的 `MCP-Protocol-Version`。每次 POST 一个 JSON-RPC 消息；通知返回 202，工具请求返回 JSON。`/healthz` 也需要令牌。HTTP 默认保持连接，空闲连接有超时；Ctrl+C 或 Ctrl+Break 停止监听。当前只接收有 Content-Length 的请求，不接收 chunked 请求。
-
-令牌从环境读取，不接受 URL 令牌，不打印凭据。默认运行目录为当前用户的 `%LOCALAPPDATA%/ShellBot`，可用 `--data-dir 绝对路径` 指定独立目录。同一数据目录只能由一个实例占用。诊断走 stderr；stdio 模式 stdout 只输出协议消息。
-
-如果环境已经提供隧道，在配置的 http.public_url 中填写 bot.example.com，或启动时加上 --public-url bot.example.com。裸域名默认 HTTPS，客户端地址为 https://bot.example.com/mcp；本机仍监听 127.0.0.1，现有 bearer 与本机审批继续使用。程序不会启动或管理隧道，详见[已有隧道与域名配置](docs/EXTERNAL_ACCESS.md)。
-
-2026 年版本的请求不走 initialize；每次在 `params._meta` 中提供 `io.modelcontextprotocol/protocolVersion: "2026-07-28"` 与对象类型的 `io.modelcontextprotocol/clientCapabilities`。HTTP 还须提供一致的 `MCP-Protocol-Version`、`Mcp-Method`，调用工具时提供 `Mcp-Name`。stdio 同一连接不能混用新旧协议方式。
-
-审批通过同账户的受限本地命名管道管理，MCP 不提供批准工具。使用 `--list-approvals`、`--inspect ID`、`--approve ID`、`--deny ID`、`--revoke ID`，并指定与主机相同的 `--data-dir`；`--stop` 停止 HTTP 主机。`fs_write` 提交 `workspace_id/path/text` 后返回待审批 ID；查看、批准后，以相同参数加上 `approval_id` 重试。参数摘要包含规范目标、父目录的卷及 128 位文件标识、内容 SHA-256 和字节数；批准只被原子消费一次。
-
-旧单实例入口默认审批期限 300 秒，可配置 `approval_ttl_seconds: 1..600`，最多 64 条内存记录，重启许可失效；正常项目另保留 M6 私有历史和任务键。创建操作通过已验证父目录句柄写入并刷新临时文件，再禁止覆盖地提交；异常中断的临时文件不自动按名清理。同账户程序属于管理信任范围，user/administrator 为预先授予的账户级信任模式。
-
-审批与创建事件保存为数据目录下的 `audit-实例编号.jsonl`，当前账户和 SYSTEM 可以访问。正文及令牌不写入日志，每条事件刷新落盘。配置 `audit_max_bytes` 默认每实例 8 MiB，故障或达到预算后阻止新批准及写入；如果文件已提交而结果记录失败，保留完成状态并返回 audit_warning，重试不再次执行。旧日志保留，旧审批仍不恢复，没有崩溃任务恢复，详见[审计行为与限制](docs/AUDIT.md)。
-
-文本默认每次最多读取 64 KiB；后续页面使用结果的 `next_offset` 和 `encoding`。不确定编码和二进制内容返回错误，不默默替换字符。图像源不超过 16 MiB、16,777,216 像素，输出不超过 2 MiB；完整解码后可用 max_dimension:128–4096 缩小，原文件不修改，见 [图像说明](docs/IMAGE_VIEW.md)。搜索最多检查 1000 个条目、递归 8 层，在操作之间检查 2 秒预算；网络磁盘等单次系统调用仍可能阻塞，时间检查不等于硬超时。
-
-fs_search 的 mode 默认 filename；设为 content 可以搜索 UTF-8/UTF-16 文本，返回行号、UTF-8 字节列号和最多 1024 字节的命中片段。默认读取每文件前 256 KiB、总计 4 MiB；查询不完整时明确返回 truncated 和扫描计数，二进制/无效编码被检测到后跳过，不遍历重解析目录。详见[文本内容搜索](docs/CONTENT_SEARCH.md)。
-
-## 后续架构
-
-dev.19 提供当前账户托盘和独立虚拟账户 Windows 服务两种模式。服务限定本地配置目录、无桌面/管理员权限及受限命令，普通登录账户不从本机管道接管服务 SID；审批沿用独立所有者页面。启动配置存放完整加密快照，配置或凭据改变须明确切换新快照，不自动重放副作用任务。服务示例为 [service.example.json](config/service.example.json)，使用与验收边界见 [常驻说明](docs/STARTUP.md)。默认构建同时生成原生 GUI 产品组件 ShellBot-Launcher.exe，用于无控制台登录启动；保留其文件名和位置。新的候选打包器尚需适配此组件和阶段验收，本轮未生成新包。
-
-已确认采用普通权限管理器、每项目独立工作进程和 /projects/{project_id}/mcp 链接；各项目独立凭据、多个工作目录、任务与审计。审批提供 always、workspace_auto、never 三种模式，目录外访问与管理员使用许可独立设置。共享管理员代理只服务已获所有者授权的项目，一个项目获准不使其他项目拥有管理员权限；cwd 不是命令沙箱，受限执行通过验证前保持不可用。
-
-当前假定外部访问环境已经准备好，程序监听本地端口，域名由外部代理完成；public_url 是可选限制和地址报告功能。现有 bearer、目录权限与所有者审批继续使用，不要求域名检查。M8 提供普通会话桌面工具，M10 提供文档阅读，M11 提供受控产物传输。传输由客户端组装或发送 Base64 块，没有匿名下载 URL 或自动客户端附件接入；旧 --config 和 legacy_config 不开放传输。管理员传输专项待用户方便时人工验证；其他平台按后续阶段推进。
-
-| 位置 | 内容 |
-| --- | --- |
-| core/ | 通用配置、协议、工具和 Unicode 处理，无 Windows 头文件 |
-| WinShellBot/app/ | Windows 命令行、stdio/HTTP 接入及程序生命周期 |
-| WinShellBot/platform/ | Windows 路径、文件、系统信息、随机数及实例锁 |
-| third_party/ | 固定原生组件版本、来源校验和许可 |
-| config/ / scripts/ | 配置样例、产品构建和候选打包脚本；测试脚本在本地保留并忽略 |
-| docs/ARCHITECTURE.md | 总体架构与最终功能方向 |
-| docs/PHASE_1_PLAN.md | 第一阶段既有里程碑和剩余验收 |
-| docs/DEVELOPMENT_PLAN.md | 当前多项目与权限迭代顺序、交付条件 |
-| docs/EXECUTION_PERMISSIONS.md | 文件范围、审批、执行身份与逐项目管理员授权 |
-
-运行数据、凭据、Visual Studio 缓存、测试和构建产物不纳入版本控制。开发和验证使用独立目录，不迁移其他项目的运行数据。
-
-许可采用 [MIT 模板](LICENSE.txt)，版权年份和主体需在首次正式发行前补全；第三方组件保留各自许可，见[依赖记录](third_party/README.md)。
-
-旧版本包、基线与原始报告继续保留。M9 已由用户提交和同步，当前 main 的 HEAD 为 `c3191a8`，与 origin/main 本地引用一致，未重新查询远端。M10 为未提交、未推送的本地更改。回退基线为 build/baseline-dev16-m10-20261011；原 dev.14 冻结候选包保持不变。当前验收范围与剩余项目以 [实现记录](docs/IMPLEMENTATION_STATUS.md)和 [M10 交接](docs/HANDOFF_20261011_M10.md)为准，旧版本结果只适用于对应程序摘要。现有候选打包脚本仍校验 M7 收据，尚未适配 M8–M10 及 PDFium DLL/许可，不用于当前版本打包。
+Copyright (c) 2026 姬敬。项目使用 [MIT 许可证](LICENSE.txt)；[第三方组件](third_party/README.md)保留各自许可，发布包的 `licenses` 目录包含完整声明。

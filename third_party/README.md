@@ -13,9 +13,9 @@ ShellBot 自有代码使用 C17。yyjson / CivetWeb 源文件直接编译进程�
 
 来源：分别下载 `https://codeload.github.com/ibireme/yyjson/zip/refs/tags/0.13.0` 和 `https://codeload.github.com/civetweb/civetweb/zip/refs/tags/v1.16`。保留 yyjson 的 src/yyjson.c、src/yyjson.h、LICENSE，以及 CivetWeb 的 src/civetweb.c、src/*.inl、include/civetweb.h 和 LICENSE.md；yyjson 源文件未修改；CivetWeb 本地补丁见上方说明。
 
-CivetWeb 编译关闭 TLS、CGI、WebSocket、自动文件映射及文件系统访问。ShellBot 在路由回调中处理所有请求，文件工具使用独立的平台权限接口。当前 HTTP 只监听回环地址；远程 HTTPS 及 OAuth 接入仍在后续计划内。
+CivetWeb 编译关闭 TLS、CGI、WebSocket、自动文件映射及文件系统访问。ShellBot 在路由回调中处理所有请求，文件工具使用独立的平台权限接口。当前 HTTP 只监听回环地址；外部 HTTPS 由用户已有的反向代理或隧道提供；OAuth 连接认证已在原生管理界面集成。
 
-Release 使用静态 MSVC 运行库。首次发行前需要复核这些固定版本的适用性、漏洞修复与组件许可，并保留对应发布记录。
+Release 使用静态 MSVC 运行库。1.0.0 沿用此处固定依赖，并在发布包内保留完整许可和来源记录。
 
 PDFium DLL 来自 bblanchon/pdfium-binaries 的固定 chromium/8086 发布；发布者独立于上游 Google/Foxit，本仓库未自行构建 PDFium。归档 SHA-256 与发布元数据一致后，保留 DLL、两个公开头文件、VERSION、x64 构建参数及完整 17 项上游/依赖许可；来源、字节数及两架构摘要见 [provenance.json](pdfium/provenance.json)。未声称完成发布签名/构建证明核验。上游核心为 BSD，包含的 FreeType、HarfBuzz、ICU、LCMS、JPEG 等各有许可，不能只分发外层 MIT。
 

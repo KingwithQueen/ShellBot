@@ -14,6 +14,6 @@
     <Link><SubSystem>Console</SubSystem><AdditionalDependencies>Advapi32.lib;Ws2_32.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
     <Manifest><AdditionalManifestFiles>$(MSBuildProjectDirectory)\app\shellbot.manifest;%(AdditionalManifestFiles)</AdditionalManifestFiles></Manifest>
   </ItemDefinitionGroup>
-  <ItemGroup><ClCompile Include="app\sandbox_probe.c" /></ItemGroup>
+  <ItemGroup><ClCompile Include="app\sandbox_probe.c" /><ResourceCompile Include="app\version.rc"><PreprocessorDefinitions>SB_SANDBOX_PROBE;%(PreprocessorDefinitions)</PreprocessorDefinitions></ResourceCompile></ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

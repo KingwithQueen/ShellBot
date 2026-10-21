@@ -231,6 +231,8 @@
       <PreprocessorDefinitions>NO_SSL;NO_CGI;NO_WEBSOCKET;NO_FILES;NO_FILESYSTEMS;MG_EXTERNAL_FUNCTION_mg_cry_internal_impl;MG_EXTERNAL_FUNCTION_log_access;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>$(MSBuildProjectDirectory)\app;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
+    <ResourceCompile Include="app\version.rc" />
+    <ClInclude Include="..\core\include\sb_version.h" />
     <ClInclude Include="..\core\include\sb.h" />
     <ClInclude Include="..\core\include\sb_projects.h" />
     <ClInclude Include="platform\execution.h" />

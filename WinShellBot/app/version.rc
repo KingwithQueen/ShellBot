@@ -1,0 +1,46 @@
+#pragma code_page(65001)
+#include <winver.h>
+#include "../../core/include/sb_version.h"
+
+#if defined(SB_LAUNCHER)
+#define SB_FILE_NAME "ShellBot.exe"
+#define SB_FILE_DESCRIPTION "ShellBot desktop launcher"
+#elif defined(SB_SANDBOX_PROBE)
+#define SB_FILE_NAME "ShellBot-SandboxProbe.exe"
+#define SB_FILE_DESCRIPTION "ShellBot restricted execution probe"
+#else
+#define SB_FILE_NAME "WinShellBot.exe"
+#define SB_FILE_DESCRIPTION "ShellBot native Windows project manager and MCP host"
+#endif
+
+1 VERSIONINFO
+ FILEVERSION SB_VERSION_RESOURCE
+ PRODUCTVERSION SB_VERSION_RESOURCE
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+#ifdef _DEBUG
+ FILEFLAGS VS_FF_DEBUG
+#else
+ FILEFLAGS 0
+#endif
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE 0
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "FileDescription", SB_FILE_DESCRIPTION
+            VALUE "FileVersion", SB_VERSION
+            VALUE "InternalName", SB_FILE_NAME
+            VALUE "LegalCopyright", SB_COPYRIGHT
+            VALUE "OriginalFilename", SB_FILE_NAME
+            VALUE "ProductName", "ShellBot"
+            VALUE "ProductVersion", SB_VERSION
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END
