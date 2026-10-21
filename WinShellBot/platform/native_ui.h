@@ -4,6 +4,7 @@
 #include <commctrl.h>
 #include <wchar.h>
 #include <stdbool.h>
+#include "app_icon.h"
 
 /* Shared metrics for native forms. Window content and fonts must move together
    when Windows changes the DPI; replacing a font alone clips existing fields. */

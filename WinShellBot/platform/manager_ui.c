@@ -8,6 +8,8 @@
 #include "startup.h"
 #include "project_settings.h"
 #include "desktop_app.h"
+#include "app_icon.h"
+#include "desktop.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -27,6 +29,9 @@ enum { UI_REFRESH=1001, UI_START, UI_STOP, UI_PAUSE, UI_RESUME, UI_LOCAL, UI_PUB
 #define UI_LOGON_DISABLE 1205
 #define UI_ADMIN_LOGON_ENABLE 1206
 #define UI_ADMIN_LOGON_DISABLE 1207
+#define UI_DESKTOP_PAUSE 1310
+#define UI_DESKTOP_RESUME 1311
+#define UI_TRAY_PROJECT_FIRST 1400
 #define UI_TEXT_CAP 65536u
 #define UI_SELECTION (WM_APP+3)
 typedef struct {
@@ -37,6 +42,7 @@ typedef struct {
     sb_desktop_app *app;
     char project[64];
     unsigned selection_generation;
+    int desktop_action;
 } ui_work;
 typedef struct {
     HWND window, list, details, status, header, path, context, project_label, detail_label, divider, path_label, buttons[18];
@@ -63,17 +69,20 @@ typedef struct {
     unsigned oauth_pending;
     unsigned selection_generation;
     bool stale,notice_visible;
+    uint64_t desktop_resume_after;
+    DWORD desktop_resume_input;
     ui_work *work;
 } ui_state;
 
 static void logon_request(ui_state *ui,bool enable,bool administrator);
 static void layout(ui_state *ui);
+static HMENU desktop_tray_menu(ui_state *ui,char projects[SB_MAX_PROJECTS][64],size_t *count);
 static bool project_action(int id){return (id>=UI_START&&id<=UI_COPY)||id==UI_SETTINGS||id==UI_TOKEN;}
 
 static bool tray(ui_state *ui,DWORD action) {
     NOTIFYICONDATAW icon={0};icon.cbSize=sizeof(icon);icon.hWnd=ui->window;icon.uID=1;
     icon.uFlags=NIF_MESSAGE|NIF_ICON|NIF_TIP;icon.uCallbackMessage=UI_TRAY;
-    icon.hIcon=LoadIconW(NULL,IDI_APPLICATION);wcscpy(icon.szTip,L"ShellBot · 后台运行；单击打开管理");
+    icon.hIcon=sb_app_icon();wcscpy(icon.szTip,L"ShellBot · 后台运行；单击打开管理");
     bool ok=Shell_NotifyIconW(action,&icon)!=FALSE;
     if(action==NIM_ADD && !ok)ok=Shell_NotifyIconW(NIM_MODIFY,&icon)!=FALSE;
     if(action==NIM_ADD)ui->tray_added=ok;else if(action==NIM_DELETE)ui->tray_added=false;return ok;
@@ -95,6 +104,9 @@ static void resident_command(ui_state *ui,int id) {
 static void tray_menu(ui_state *ui) {
     HMENU menu=CreatePopupMenu();if(!menu)return;
     AppendMenuW(menu,MF_STRING,UI_SHOW,L"打开项目管理");AppendMenuW(menu,MF_STRING,UI_HIDE,L"隐藏管理窗口");
+    char projects[SB_MAX_PROJECTS][64]={{0}};size_t project_count=0;
+    HMENU desktop=desktop_tray_menu(ui,projects,&project_count);
+    if(desktop){AppendMenuW(menu,MF_SEPARATOR,0,NULL);AppendMenuW(menu,MF_POPUP,(UINT_PTR)desktop,L"桌面控制（本会话）");}
     if(!ui->app){AppendMenuW(menu,MF_SEPARATOR,0,NULL);AppendMenuW(menu,MF_STRING,UI_LOGON_ENABLE,L"登录时自动启动");
     AppendMenuW(menu,MF_STRING,UI_LOGON_DISABLE,L"关闭登录自动启动");AppendMenuW(menu,MF_SEPARATOR,0,NULL);
     AppendMenuW(menu,MF_STRING|(sb_win_elevated_owner()?0:MF_GRAYED),UI_ADMIN_LOGON_ENABLE,L"登录时以管理员身份自动启动");
@@ -102,7 +114,17 @@ static void tray_menu(ui_state *ui) {
     AppendMenuW(menu,MF_STRING,UI_EXIT,ui->app?L"退出 ShellBot（停止全部项目）":L"退出 ShellBot（停止本实例）");
     POINT cursor;GetCursorPos(&cursor);SetForegroundWindow(ui->window);
     int id=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_NONOTIFY|TPM_RIGHTBUTTON,cursor.x,cursor.y,0,ui->window,NULL);
-    DestroyMenu(menu);PostMessageW(ui->window,WM_NULL,0,0);if(id)resident_command(ui,id);
+    DestroyMenu(menu);PostMessageW(ui->window,WM_NULL,0,0);
+    if(id>=UI_TRAY_PROJECT_FIRST && id<UI_TRAY_PROJECT_FIRST+(int)project_count){
+        const char *project=projects[id-UI_TRAY_PROJECT_FIRST];show_resident(ui);
+        for(size_t i=0;i<ui->row_count;++i)if(!strcmp(ui->row_ids[i],project)){
+            ListView_SetItemState(ui->list,-1,0,LVIS_SELECTED|LVIS_FOCUSED);
+            ListView_SetItemState(ui->list,(int)i,LVIS_SELECTED|LVIS_FOCUSED,LVIS_SELECTED|LVIS_FOCUSED);
+            ListView_EnsureVisible(ui->list,(int)i,FALSE);PostMessageW(ui->window,UI_SELECTION,0,0);return;
+        }
+        SetWindowTextW(ui->status,L"该项目已不在当前列表中，已打开管理窗口。");
+    }else if(id==UI_DESKTOP_PAUSE || id==UI_DESKTOP_RESUME)PostMessageW(ui->window,WM_COMMAND,(WPARAM)id,0);
+    else if(id)resident_command(ui,id);
 }
 
 static wchar_t *to_wide(const char *text) {
@@ -126,6 +148,36 @@ static const wchar_t *state_label(const char *state) {
     return !strcmp(state,"running") ? L"运行中" : !strcmp(state,"paused") ? L"已暂停" :
         !strcmp(state,"stopped") ? L"已停止" : !strcmp(state,"busy") ? L"处理中" :
         !strcmp(state,"cleanup_required") ? L"需要恢复清理" : L"运行失败";
+}
+static HMENU desktop_tray_menu(ui_state *ui,char projects[SB_MAX_PROJECTS][64],size_t *count) {
+    HMENU menu=CreatePopupMenu();if(!menu)return NULL;
+    char *wire=sb_win_desktop_owner("desktop-status",NULL);
+    yyjson_doc *reply=wire?yyjson_read(wire,strlen(wire),0):NULL;
+    yyjson_val *root=yyjson_doc_get_root(reply),*data=yyjson_obj_get(root,"structuredContent");
+    bool known=reply && !yyjson_get_bool(yyjson_obj_get(root,"isError")) && yyjson_is_bool(yyjson_obj_get(data,"paused"));
+    bool paused=yyjson_get_bool(yyjson_obj_get(data,"paused")),leased=yyjson_get_bool(yyjson_obj_get(data,"leased"));
+    const wchar_t *status=!known?L"状态暂不可用":ui->desktop_resume_after?L"正在等待恢复（新输入会取消）":paused?L"状态：已暂停":leased?L"状态：未暂停，控制租约使用中":L"状态：未暂停，当前空闲";
+    AppendMenuW(menu,MF_STRING|MF_GRAYED,0,status);
+    AppendMenuW(menu,MF_STRING|MF_GRAYED,0,L"范围：本次登录会话的全部 ShellBot 项目");
+    UINT disabled=!known || ui->modal || ui->exit_pending?MF_GRAYED:0;
+    AppendMenuW(menu,MF_STRING|disabled,UI_DESKTOP_PAUSE,L"暂停全部桌面操作");
+    AppendMenuW(menu,MF_STRING|disabled|(!paused || ui->desktop_resume_after?MF_GRAYED:0),UI_DESKTOP_RESUME,L"恢复桌面操作…");
+    AppendMenuW(menu,MF_SEPARATOR,0,NULL);
+    bool uncertain=ui->stale || !ui->snapshot;
+    yyjson_val *array=yyjson_obj_get(yyjson_doc_get_root(ui->snapshot),"projects"),*project;size_t i,max;
+    yyjson_arr_foreach(array,i,max,project){
+        if(!strcmp(str(project,"state"),"busy") && !yyjson_is_bool(yyjson_obj_get(project,"desktop_enabled")))uncertain=true;
+        if(*count>=SB_MAX_PROJECTS || !yyjson_get_bool(yyjson_obj_get(project,"desktop_enabled")))continue;
+        const char *id=str(project,"project_id"),*name=*str(project,"display_name")?str(project,"display_name"):id;
+        wchar_t *wide=to_wide(name),escaped[520]={0},label[600];size_t length=0;
+        for(const wchar_t *p=wide?wide:L"";*p && length+2<520;++p){if(*p==L'&')escaped[length++]=L'&';escaped[length++]=*p;}
+        swprintf(label,600,L"查看项目：%ls（%ls）",escaped,state_label(str(project,"state")));free(wide);
+        snprintf(projects[*count],64,"%s",id);
+        AppendMenuW(menu,MF_STRING,UI_TRAY_PROJECT_FIRST+(UINT)*count,label);++*count;
+    }
+    if(uncertain)AppendMenuW(menu,MF_STRING|MF_GRAYED,0,L"部分项目状态正在更新，请稍后重新打开菜单");
+    else if(!*count)AppendMenuW(menu,MF_STRING|MF_GRAYED,0,L"没有启用桌面控制的项目");
+    yyjson_doc_free(reply);free(wire);return menu;
 }
 static const wchar_t *approval_label(const char *mode) {
     return !strcmp(mode,"always") ? L"每次审批" : !strcmp(mode,"workspace_auto") ? L"工作目录自动" :
@@ -340,6 +392,7 @@ static void request(ui_state *ui, const char *command, bool diagnostic, bool bac
     work->background=background;
     snprintf(work->project,sizeof(work->project),"%s",ui->selected);work->selection_generation=ui->selection_generation;
     work->settings=!strcmp(command,"configuration-snapshot");
+    work->desktop_action=!strcmp(command,"desktop-pause")?1:!strcmp(command,"desktop-resume")?2:0;
     if(!work->data || !work->request) { free_work(work); return; }
     ui->work=work;ui->thread=CreateThread(NULL,0,exchange,work,0,NULL);
     if(!ui->thread) { ui->work=NULL;free_work(work); SetWindowTextW(ui->status,L"无法创建本机请求线程。"); return; }
@@ -364,13 +417,23 @@ static bool confirm(ui_state *ui,const wchar_t *message,const wchar_t *title,UIN
     update_buttons(ui);return result==IDYES;
 }
 static void click(ui_state *ui, int id) {
+    if(id==UI_DESKTOP_PAUSE){ui->desktop_resume_after=0;KillTimer(ui->window,2);}
     if(id==UI_VIEW_PROJECTS||id==UI_VIEW_CLASSIC){if(!ui->modal){
         DWORD start=0,end=0;SendMessageW(ui->details,EM_GETSEL,(WPARAM)&start,(LPARAM)&end);LRESULT first=SendMessageW(ui->details,EM_GETFIRSTVISIBLELINE,0,0);
         ui->compact=id==UI_VIEW_PROJECTS;layout(ui);
         SendMessageW(ui->details,EM_SETSEL,start,end);SendMessageW(ui->details,EM_LINESCROLL,0,first-SendMessageW(ui->details,EM_GETFIRSTVISIBLELINE,0,0));
     }return;}
-    if(ui->busy){if(!ui->modal && (ui->background || (ui->app && (id==UI_NEW || id==UI_SETTINGS || id==UI_CONNECTION || id==UI_OAUTH || id==UI_STORAGE)))){ui->pending_navigation=id;snprintf(ui->pending_project,sizeof(ui->pending_project),"%s",ui->selected);}return;}
+    if(ui->busy){if(!ui->modal && (ui->background || id==UI_DESKTOP_PAUSE || id==UI_DESKTOP_RESUME || (ui->app && (id==UI_NEW || id==UI_SETTINGS || id==UI_CONNECTION || id==UI_OAUTH || id==UI_STORAGE)))){ui->pending_navigation=id;snprintf(ui->pending_project,sizeof(ui->pending_project),"%s",ui->selected);}return;}
     if(ui->modal || ui->exit_pending)return;
+    if(id==UI_DESKTOP_PAUSE){request(ui,"desktop-pause",false,false);return;}
+    if(id==UI_DESKTOP_RESUME){
+        if(!confirm(ui,L"恢复本次登录会话中全部 ShellBot 项目的桌面操作？\r\n旧观察将失效，任务不会自动重跑。",L"恢复桌面控制",MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2))return;
+        LASTINPUTINFO input={sizeof(input),0};
+        if(!GetLastInputInfo(&input)){set_text(ui->status,L"无法确认本机输入状态，未恢复桌面操作。");return;}
+        ui->desktop_resume_input=input.dwTime;ui->desktop_resume_after=sb_platform_millis()+500;
+        if(!SetTimer(ui->window,2,100,NULL)){ui->desktop_resume_after=0;set_text(ui->status,L"无法等待安全恢复，桌面操作未恢复。");return;}
+        set_text(ui->status,L"将在 500 毫秒后恢复桌面操作；新的人工输入会取消恢复。");return;
+    }
     if(id==UI_ABOUT){wchar_t info[256];swprintf(info,256,L"ShellBot %hs\r\n原生 Windows 项目管理\r\n\r\n关闭窗口收进托盘；从“文件”或托盘菜单退出会停止全部项目。",SB_VERSION);ui->modal=true;MessageBoxW(ui->window,info,L"关于 ShellBot",MB_OK|MB_ICONINFORMATION);ui->modal=false;if(ui->exit_pending)DestroyWindow(ui->window);return;}
     if(id>=UI_REFRESH && id<=UI_STORAGE && ui->buttons[id-UI_REFRESH] && !IsWindowEnabled(ui->buttons[id-UI_REFRESH]))return;
     if(ui->app && id==UI_OAUTH){ui->busy=true;ui->modal=true;update_buttons(ui);sb_desktop_oauth_dialog(ui->window,ui->app);ui->modal=false;ui->busy=false;if(ui->exit_pending){DestroyWindow(ui->window);return;}request(ui,"management-status",false,false);return;}
@@ -607,6 +670,15 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LP
     case UI_TRAY:
         if(ui->resident && wparam==1){if(lparam==WM_LBUTTONUP || lparam==WM_LBUTTONDBLCLK)show_resident(ui);else if(lparam==NIN_BALLOONUSERCLICK){show_resident(ui);PostMessageW(window,WM_COMMAND,UI_OAUTH,0);}else if(lparam==WM_RBUTTONUP)tray_menu(ui);}return 0;
     case WM_TIMER:
+        if(wparam==2){
+            LASTINPUTINFO input={sizeof(input),0};
+            if(!ui->desktop_resume_after || ui->exit_pending){ui->desktop_resume_after=0;KillTimer(window,2);return 0;}
+            if(!GetLastInputInfo(&input) || input.dwTime!=ui->desktop_resume_input){
+                ui->desktop_resume_after=0;KillTimer(window,2);set_text(ui->status,L"检测到新的本机输入，已取消恢复桌面操作。");return 0;
+            }
+            if(sb_platform_millis()>=ui->desktop_resume_after && !ui->busy && !ui->modal){ui->desktop_resume_after=0;KillTimer(window,2);request(ui,"desktop-resume",false,false);}
+            return 0;
+        }
         if(ui->resident){
             if(ui->app && !ui->modal && WaitForSingleObject(ui->stop,0)==WAIT_OBJECT_0){DestroyWindow(window);return 0;}
             if(!ui->app && WaitForSingleObject(ui->manager_thread,0)!=WAIT_TIMEOUT){DestroyWindow(window);return 0;}
@@ -636,7 +708,10 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LP
         CloseHandle(ui->thread); ui->thread=NULL;ui->work=NULL;ui->busy=false;ui->background=false;
         yyjson_doc *reply=work->reply ? yyjson_read(work->reply,strlen(work->reply),0) : NULL;
         yyjson_val *root=yyjson_doc_get_root(reply); const char *error=str(root,"error");
+        yyjson_val *desktop=yyjson_obj_get(root,"structuredContent");
+        if(work->desktop_action && yyjson_get_bool(yyjson_obj_get(root,"isError")))error=*str(desktop,"error")?str(desktop,"error"):"Desktop control request failed.";
         bool valid=!work->snapshot || valid_snapshot(root);
+        if(work->desktop_action)valid=yyjson_is_bool(yyjson_obj_get(desktop,"paused")) && yyjson_get_bool(yyjson_obj_get(desktop,"paused"))==(work->desktop_action==1);
         if(!reply || *error || !valid) {
             if(work->snapshot){
                 ui->stale=true;
@@ -645,6 +720,8 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LP
             }else{
                 wchar_t *failure=to_wide(*error?error:work->error.text);set_text(ui->status,failure&&*failure?failure:L"请求未完成，请刷新后核对当前状态。");free(failure);
             }
+        } else if(work->desktop_action) {
+            set_text(ui->status,work->desktop_action==1?L"已暂停本会话全部项目的桌面操作；文件和命令任务继续运行。":L"已恢复桌面操作；旧观察已失效，不会自动重跑动作。");
         } else if(work->settings) {
             yyjson_val *configuration=yyjson_obj_get(root,"configuration");
             char *json=configuration ? yyjson_val_write(configuration,0,NULL) : NULL;
@@ -664,7 +741,7 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LP
                 SetWindowTextW(ui->status,L"已查询实际运行能力；诊断可复制。");
             }else set_text(ui->status,L"诊断已完成；所选项目已改变，保留当前项目详情。");
         }
-        bool refresh=!work->snapshot && !work->diagnostic && !work->logon && !work->settings && reply && !*error;
+        bool refresh=!work->snapshot && !work->diagnostic && !work->logon && !work->settings && !work->desktop_action && reply && !*error;
         yyjson_doc_free(reply); free_work(work); update_buttons(ui);
         if(ui->exit_pending){DestroyWindow(window);return 0;}
         if(ui->pending_navigation){int id=ui->pending_navigation;ui->pending_navigation=0;if(!project_action(id)||!strcmp(ui->pending_project,ui->selected))click(ui,id);else set_text(ui->status,L"所选项目已改变，请在当前项目上重新选择操作。");}
@@ -683,7 +760,7 @@ static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LP
         RECT *rect=(RECT *)lparam;fonts(ui);SetWindowPos(window,NULL,rect->left,rect->top,rect->right-rect->left,rect->bottom-rect->top,SWP_NOZORDER|SWP_NOACTIVATE);layout(ui);return 0;
     }
     case WM_SETTINGCHANGE:fonts(ui);layout(ui);InvalidateRect(window,NULL,TRUE);return 0;
-    case WM_DESTROY:KillTimer(window,1);if(ui->resident){tray(ui,NIM_DELETE);RemovePropW(window,L"ShellBotTrayRegistered");SetEvent(ui->stop);if(ui->app)sb_desktop_request_exit(ui->app);}PostQuitMessage(0); return 0;
+    case WM_DESTROY:KillTimer(window,1);KillTimer(window,2);ui->desktop_resume_after=0;if(ui->resident){tray(ui,NIM_DELETE);RemovePropW(window,L"ShellBotTrayRegistered");SetEvent(ui->stop);if(ui->app)sb_desktop_request_exit(ui->app);}PostQuitMessage(0); return 0;
     default: return DefWindowProcW(window,message,wparam,lparam);
     }
     return DefWindowProcW(window,message,wparam,lparam);
@@ -699,7 +776,7 @@ static int run_ui(const char *data_dir,HANDLE stop,HANDLE manager_thread,const c
     SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     INITCOMMONCONTROLSEX controls={sizeof(controls),ICC_LISTVIEW_CLASSES}; InitCommonControlsEx(&controls);
     WNDCLASSW klass={0}; klass.lpfnWndProc=window_proc; klass.hInstance=GetModuleHandleW(NULL); klass.hCursor=LoadCursorW(NULL,IDC_ARROW);
-    klass.hbrBackground=(HBRUSH)(COLOR_BTNFACE+1);klass.hIcon=LoadIconW(NULL,IDI_APPLICATION); klass.lpszClassName=L"ShellBotManagerWindow";
+    klass.hbrBackground=(HBRUSH)(COLOR_BTNFACE+1);klass.hIcon=sb_app_icon(); klass.lpszClassName=L"ShellBotManagerWindow";
     if(!RegisterClassW(&klass) && GetLastError()!=ERROR_CLASS_ALREADY_EXISTS) { free(ui.data); return 2; }
     RECT area={0}; SystemParametersInfoW(SPI_GETWORKAREA,0,&area,0);
     int dpi=(int)GetDpiForSystem(),width=MulDiv(1160,dpi,96),height=MulDiv(800,dpi,96);

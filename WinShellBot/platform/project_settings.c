@@ -108,7 +108,7 @@ static LRESULT CALLBACK modal_proc(HWND window,UINT message,WPARAM wp,LPARAM lp)
 }
 static bool show_modal(modal *m) {
     WNDCLASSW wc={0}; wc.lpfnWndProc=modal_proc; wc.hInstance=GetModuleHandleW(NULL); wc.lpszClassName=L"ShellBotSettingsDialog";
-    wc.hCursor=LoadCursorW(NULL,IDC_ARROW); wc.hbrBackground=(HBRUSH)(COLOR_BTNFACE+1); RegisterClassW(&wc);
+    wc.hIcon=sb_app_icon();wc.hCursor=LoadCursorW(NULL,IDC_ARROW); wc.hbrBackground=(HBRUSH)(COLOR_BTNFACE+1); RegisterClassW(&wc);
     RECT r={0,0,px(m->owner,m->json ? 804 : 624),px(m->owner,m->json ? 588 : 254)};
     AdjustWindowRectExForDpi(&r,WS_CAPTION|WS_SYSMENU,FALSE,WS_EX_DLGMODALFRAME,sb_native_dpi(m->owner));
     RECT owner={0};GetWindowRect(m->owner,&owner);
@@ -535,7 +535,7 @@ static int run_settings(HWND owner,const char *path,const char *snapshot,char **
     SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     INITCOMMONCONTROLSEX controls={sizeof(controls),ICC_LISTVIEW_CLASSES|ICC_TAB_CLASSES}; InitCommonControlsEx(&controls); OleInitialize(NULL);
     WNDCLASSW wc={0}; wc.lpfnWndProc=settings_proc; wc.hInstance=GetModuleHandleW(NULL); wc.lpszClassName=L"ShellBotProjectSettings";
-    wc.hCursor=LoadCursorW(NULL,IDC_ARROW); wc.hbrBackground=(HBRUSH)(COLOR_BTNFACE+1); RegisterClassW(&wc);
+    wc.hIcon=sb_app_icon();wc.hCursor=LoadCursorW(NULL,IDC_ARROW); wc.hbrBackground=(HBRUSH)(COLOR_BTNFACE+1); RegisterClassW(&wc);
     UINT dpi=sb_native_dpi(owner);RECT r={0,0,MulDiv(1120,(int)dpi,96),MulDiv(746,(int)dpi,96)};
     AdjustWindowRectExForDpi(&r,WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX,FALSE,0,dpi);
     RECT position={0};GetWindowRect(owner,&position);

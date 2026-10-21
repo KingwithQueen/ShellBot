@@ -232,6 +232,8 @@
       <AdditionalIncludeDirectories>$(MSBuildProjectDirectory)\app;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <ResourceCompile Include="app\version.rc" />
+    <ClInclude Include="app\resources.h" />
+    <ClInclude Include="platform\app_icon.h" />
     <ClInclude Include="..\core\include\sb_version.h" />
     <ClInclude Include="..\core\include\sb.h" />
     <ClInclude Include="..\core\include\sb_projects.h" />

@@ -165,7 +165,7 @@ static LRESULT CALLBACK procedure(HWND window,UINT message,WPARAM wp,LPARAM lp) 
     }
 }
 static bool show(dialog *d) {
-    WNDCLASSW wc={0};wc.lpfnWndProc=procedure;wc.hInstance=GetModuleHandleW(NULL);wc.lpszClassName=L"ShellBotDesktopProjectDialog";wc.hCursor=LoadCursorW(NULL,IDC_ARROW);wc.hbrBackground=(HBRUSH)(COLOR_BTNFACE+1);RegisterClassW(&wc);
+    WNDCLASSW wc={0};wc.lpfnWndProc=procedure;wc.hInstance=GetModuleHandleW(NULL);wc.lpszClassName=L"ShellBotDesktopProjectDialog";wc.hIcon=sb_app_icon();wc.hCursor=LoadCursorW(NULL,IDC_ARROW);wc.hbrBackground=(HBRUSH)(COLOR_BTNFACE+1);RegisterClassW(&wc);
     RECT r={0,0,scale(d->owner,748),scale(d->owner,d->storage ? 412 : d->connection ? 338 : 616)};AdjustWindowRectExForDpi(&r,WS_CAPTION|WS_SYSMENU,FALSE,WS_EX_DLGMODALFRAME,sb_native_dpi(d->owner));
     RECT owner={0};GetWindowRect(d->owner,&owner);int x=d->owner?owner.left:CW_USEDEFAULT,y=d->owner?owner.top:CW_USEDEFAULT;
     HWND h=CreateWindowExW(WS_EX_DLGMODALFRAME,wc.lpszClassName,d->storage ? L"ShellBot 数据位置" : d->connection ? L"ShellBot 连接设置" : d->original_id ? L"项目设置" : L"新建项目",WS_CAPTION|WS_SYSMENU|WS_CLIPCHILDREN,x,y,r.right-r.left,r.bottom-r.top,d->owner,NULL,wc.hInstance,d);

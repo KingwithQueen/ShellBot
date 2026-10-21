@@ -109,7 +109,7 @@ START_PENDING / RUNNING / STOP_PENDING / STOPPED 分别报告，停止/系统关
 
 服务若启用 restricted 命令，还须在 execution.runtime_files 列出准确程序，并为服务账户授予工作目录、相邻 ShellBot-SandboxProbe.exe 和这些程序的 ACL 初始化与恢复权限。仅普通“修改”权限不足以调整 DACL。建议使用专用服务程序副本和专用目录，按这些准确对象授权；不能授予整盘或无关开发目录。未满足条件时命令后端保持关闭，文件工具仍遵守原策略。
 
-所有者审批使用该服务端口的 /owner 页面及捕获的独立所有者凭据。普通登录账户的原本机管理管道不跨服务 SID 接管服务管理器，--manage 用于普通实例；服务生命周期使用 SCM 命令。若同机还需要桌面功能，使用独立托盘项目与登录会话。
+所有者审批使用该服务端口的 /owner 页面及捕获的独立所有者凭据。普通登录账户的原本机管理管道不跨服务 SID 接管服务管理器，--manage 用于普通实例；服务生命周期使用 SCM 命令。若同机还需要桌面功能，使用普通登录会话中的独立管理实例，桌面项目统一由该管理程序的托盘控制。
 
 ```powershell
 & $bot --service-stop --startup-profile 'D:/ShellBotProfiles/service.json'

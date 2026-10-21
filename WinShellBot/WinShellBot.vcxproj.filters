@@ -61,6 +61,8 @@
     <ClCompile Include="..\third_party\yyjson\yyjson.c"><Filter>源文件</Filter></ClCompile>
     <ClCompile Include="..\third_party\civetweb\src\civetweb.c"><Filter>源文件</Filter></ClCompile>
     <ResourceCompile Include="app\version.rc"><Filter>资源文件</Filter></ResourceCompile>
+    <ClInclude Include="app\resources.h"><Filter>头文件</Filter></ClInclude>
+    <ClInclude Include="platform\app_icon.h"><Filter>头文件</Filter></ClInclude>
     <ClInclude Include="..\core\include\sb_version.h"><Filter>头文件</Filter></ClInclude>
     <ClInclude Include="..\core\include\sb.h"><Filter>头文件</Filter></ClInclude>
     <ClInclude Include="..\core\include\sb_projects.h"><Filter>头文件</Filter></ClInclude>

@@ -27,7 +27,7 @@
     ],
     "encoding": "32-bit RGBA PNG frames",
     "windows_decode": "32x32",
-    "sha256": "84D90FEB817102E78323B2AAFC09F69F0C3C155B68A4CBC015D78159FA6BE82F"
+    "sha256": "C75952D0FDADF99A49D9230DF291A9F98DB1084C97EE145FD41CBD8DC009E5D3"
   },
-  "integration": "Design deliverables only; application sources and existing packages unchanged."
+  "integration": "Embedded resource ID 101 in ShellBot.exe, WinShellBot.exe and ShellBot-SandboxProbe.exe; shared runtime icon for manager, native forms and desktop controller/tray; version 1.0.0."
 }

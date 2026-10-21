@@ -1,6 +1,9 @@
 #pragma code_page(65001)
 #include <winver.h>
 #include "../../core/include/sb_version.h"
+#include "resources.h"
+
+IDI_SHELLBOT ICON "../../assets/branding/shellbot-v1/shellbot.ico"
 
 #if defined(SB_LAUNCHER)
 #define SB_FILE_NAME "ShellBot.exe"

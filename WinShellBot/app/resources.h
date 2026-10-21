@@ -1,0 +1,6 @@
+#ifndef SHELLBOT_RESOURCES_H
+#define SHELLBOT_RESOURCES_H
+
+#define IDI_SHELLBOT 101
+
+#endif

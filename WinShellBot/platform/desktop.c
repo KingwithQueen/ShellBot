@@ -8,6 +8,7 @@
 #include <wincodec.h>
 #include <objbase.h>
 #include "desktop.h"
+#include "app_icon.h"
 #include "execution.h"
 #include <limits.h>
 #include <stdio.h>
@@ -16,7 +17,6 @@
 #include <wchar.h>
 
 #define DESKTOP_JOB (WM_APP+51)
-#define DESKTOP_TRAY (WM_APP+52)
 #define OBSERVATIONS 8
 #define WINDOWS_LIMIT 128
 #define MONITORS_LIMIT 16
@@ -39,11 +39,10 @@ struct sb_desktop {
     volatile LONG *epoch;
     HWND window; HHOOK keyboard,mouse; HANDLE foreground_hook;
     volatile LONG available,input_epoch,physical_inputs,foreign_inputs,truncated_inputs; DWORD session;
-    ULONG_PTR input_tag; bool leased,tray,was_paused,hotkey;
-    UINT taskbar_created; uint64_t tray_retry_after;
+    ULONG_PTR input_tag; bool leased,was_paused,hotkey;
     char lease_id[33],actor[64]; uint64_t deadline;
     unsigned next_observation,emergency_stops; observation observations[OBSERVATIONS];
-    wchar_t sid[192]; DWORD integrity; uint64_t resume_after; volatile LONG local_input;
+    wchar_t sid[192]; DWORD integrity;
 };
 static sb_desktop *hook_context;
 struct sb_win_desktop_session { HANDLE mutex,pause,mapping; volatile LONG *epoch; };
@@ -166,8 +165,7 @@ static void release_lease(sb_desktop *desktop) {
     desktop->leased=false; *desktop->lease_id=*desktop->actor=0; desktop->deadline=0; invalidate(desktop);
 }
 static void pause_local(sb_desktop *desktop) {
-    InterlockedIncrement(desktop->epoch); InterlockedExchange(&desktop->local_input,1); SetEvent(desktop->pause);
-    desktop->resume_after=0;
+    InterlockedIncrement(desktop->epoch); SetEvent(desktop->pause);
 }
 static LRESULT CALLBACK keyboard_hook(int code,WPARAM kind,LPARAM parameter) {
     if (code>=0 && hook_context) {
@@ -668,31 +666,13 @@ static void process_job(sb_desktop *desktop,desktop_job *job) {
     }
     SetEvent(job->done); job_release(job);
 }
-static void tray_register(sb_desktop *desktop) {
-    NOTIFYICONDATAW icon={0}; icon.cbSize=sizeof(icon); icon.hWnd=desktop->window; icon.uID=1; icon.uFlags=NIF_ICON|NIF_MESSAGE|NIF_TIP;
-    icon.uCallbackMessage=DESKTOP_TRAY; icon.hIcon=LoadIconW(NULL,IDI_APPLICATION);
-    wchar_t *project=wide(desktop->host->project->id);
-    swprintf(icon.szTip,128,L"ShellBot 桌面：%ls；Ctrl+Alt+F%u 停止",project?project:L"",desktop->policy.emergency_function_key); free(project);
-    desktop->tray=Shell_NotifyIconW(NIM_ADD,&icon)!=0;
-    if(!desktop->tray)desktop->tray=Shell_NotifyIconW(NIM_MODIFY,&icon)!=0;
-    SetPropW(desktop->window,L"ShellBotDesktopTrayRegistered",desktop->tray?(HANDLE)1:NULL);
-    desktop->tray_retry_after=sb_platform_millis()+2000;
-}
-static void tray_delete(sb_desktop *desktop) {
-    if (desktop->tray) { NOTIFYICONDATAW icon={0}; icon.cbSize=sizeof(icon); icon.hWnd=desktop->window; icon.uID=1; Shell_NotifyIconW(NIM_DELETE,&icon); desktop->tray=false; }
-    RemovePropW(desktop->window,L"ShellBotDesktopTrayRegistered");
-}
 static LRESULT CALLBACK desktop_window(HWND window,UINT message,WPARAM wparam,LPARAM lparam) {
     sb_desktop *desktop=(sb_desktop *)GetWindowLongPtrW(window,GWLP_USERDATA);
     if (message==WM_NCCREATE) { desktop=((CREATESTRUCTW *)lparam)->lpCreateParams; desktop->window=window; SetWindowLongPtrW(window,GWLP_USERDATA,(LONG_PTR)desktop); }
     if (!desktop) return DefWindowProcW(window,message,wparam,lparam);
-    if(desktop->taskbar_created && message==desktop->taskbar_created) {
-        desktop->tray=false;tray_register(desktop);return 0;
-    }
     if (message==DESKTOP_JOB) { process_job(desktop,(desktop_job *)lparam); return 0; }
     if (message==WM_HOTKEY && wparam==1) { ++desktop->emergency_stops; pause_local(desktop); return 0; }
     if (message==WM_TIMER) {
-        if(!desktop->tray && sb_platform_millis()>=desktop->tray_retry_after)tray_register(desktop);
         bool available=interactive(desktop); InterlockedExchange(&desktop->available,available?1:0);
         if (desktop->leased && (!available || sb_platform_millis()>=desktop->deadline)) {
             sb_audit_operation(desktop->host->audit,available?"desktop_lease_expired":"desktop_session_unavailable",desktop->actor,
@@ -703,26 +683,9 @@ static LRESULT CALLBACK desktop_window(HWND window,UINT message,WPARAM wparam,LP
             invalidate(desktop); desktop->was_paused=paused;
             sb_audit_operation(desktop->host->audit,paused?"desktop_paused":"desktop_resumed","local-owner-or-input",desktop->host->project->id,"ordinary","desktop_lease",NULL);
         }
-        if (InterlockedExchange(&desktop->local_input,0)) desktop->resume_after=0;
-        if (desktop->resume_after && sb_platform_millis()>=desktop->resume_after) {
-            desktop->resume_after=0;
-            if (sb_audit_operation(desktop->host->audit,"desktop_resume_requested","local-tray",desktop->host->project->id,"ordinary","desktop_lease",NULL)) {
-                InterlockedIncrement(desktop->epoch); ResetEvent(desktop->pause); invalidate(desktop);
-            }
-        }
         return 0;
     }
-    if (message==DESKTOP_TRAY && (lparam==WM_RBUTTONUP || lparam==WM_LBUTTONUP)) {
-        SetForegroundWindow(window); HMENU menu=CreatePopupMenu(); POINT point; GetCursorPos(&point);
-        AppendMenuW(menu,MF_STRING,1,L"暂停本会话全部 ShellBot 桌面操作"); AppendMenuW(menu,MF_STRING,2,L"恢复（不会自动重跑动作）");
-        UINT command=(UINT)TrackPopupMenu(menu,TPM_RETURNCMD|TPM_NONOTIFY,point.x,point.y,0,window,NULL); DestroyMenu(menu);
-        if (command==1) pause_local(desktop);
-        if (command==2 && MessageBoxW(window,L"恢复本会话的 ShellBot 桌面操作？旧观察将失效，任务不会自动重跑。",L"恢复桌面控制",MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2)==IDYES) {
-            InterlockedExchange(&desktop->local_input,0); desktop->resume_after=sb_platform_millis()+500;
-        }
-        PostMessageW(window,WM_NULL,0,0); return 0;
-    }
-    if (message==WM_CLOSE) { release_lease(desktop); tray_delete(desktop); DestroyWindow(window); return 0; }
+    if (message==WM_CLOSE) { release_lease(desktop); DestroyWindow(window); return 0; }
     if (message==WM_DESTROY) { PostQuitMessage(0); return 0; }
     return DefWindowProcW(window,message,wparam,lparam);
 }
@@ -730,14 +693,13 @@ static DWORD WINAPI desktop_thread(void *parameter) {
     sb_desktop *desktop=parameter; hook_context=desktop;
     HRESULT initialized=CoInitializeEx(NULL,COINIT_APARTMENTTHREADED);
     SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-    desktop->taskbar_created=RegisterWindowMessageW(L"TaskbarCreated");
-    WNDCLASSW cls={0}; cls.lpfnWndProc=desktop_window; cls.hInstance=GetModuleHandleW(NULL); cls.lpszClassName=L"ShellBotDesktopController.v1";
+    WNDCLASSW cls={0}; cls.lpfnWndProc=desktop_window; cls.hInstance=GetModuleHandleW(NULL); cls.hIcon=sb_app_icon(); cls.lpszClassName=L"ShellBotDesktopController.v1";
     if (!RegisterClassW(&cls) && GetLastError()!=ERROR_CLASS_ALREADY_EXISTS) { SetEvent(desktop->ready); goto done; }
     desktop->window=CreateWindowExW(WS_EX_TOOLWINDOW,cls.lpszClassName,L"ShellBot 桌面控制",WS_OVERLAPPED,0,0,0,0,NULL,NULL,cls.hInstance,desktop);
     if (!desktop->window) { SetEvent(desktop->ready); goto done; }
     SetTimer(desktop->window,1,100,NULL); InterlockedExchange(&desktop->available,interactive(desktop)?1:0);
     desktop->was_paused=WaitForSingleObject(desktop->pause,0)==WAIT_OBJECT_0;
-    tray_register(desktop); SetEvent(desktop->ready);
+    SetEvent(desktop->ready);
     MSG message; while (GetMessageW(&message,NULL,0,0)>0) { TranslateMessage(&message); DispatchMessageW(&message); }
 done:
     InterlockedExchange(&desktop->available,0); hook_context=NULL;
