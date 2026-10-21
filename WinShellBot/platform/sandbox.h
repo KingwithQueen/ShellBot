@@ -6,6 +6,7 @@
 typedef struct sb_win_sandbox sb_win_sandbox;
 sb_win_sandbox *sb_win_sandbox_new(sb_host *host, const char *instance, sb_error *error);
 bool sb_win_sandbox_attributes(sb_win_sandbox *sandbox, LPPROC_THREAD_ATTRIBUTE_LIST attributes);
+bool sb_win_sandbox_launch(sb_win_sandbox *sandbox,const wchar_t *image,wchar_t *line,bool inherit,DWORD flags,void *environment,const wchar_t *directory,STARTUPINFOW *startup,PROCESS_INFORMATION *process);
 bool sb_win_sandbox_token(sb_win_sandbox *sandbox, HANDLE process);
 bool sb_win_sandbox_program(sb_win_sandbox *sandbox, const wchar_t *path);
 void sb_win_sandbox_free(sb_win_sandbox *sandbox);

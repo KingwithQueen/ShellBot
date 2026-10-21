@@ -112,24 +112,6 @@ static bool quote(wchar_t *line, size_t *used, const wchar_t *arg) {
     }
     line[(*used)++] = L'"'; line[*used] = 0; return true;
 }
-static wchar_t *environment(const char *token_env) {
-    static const wchar_t *names[] = {L"ALLUSERSPROFILE",L"APPDATA",L"COMPUTERNAME",L"ComSpec",L"HOMEDRIVE",L"HOMEPATH",L"LOCALAPPDATA",L"PATH",L"PATHEXT",L"ProgramData",L"ProgramFiles",L"ProgramFiles(x86)",L"SystemDrive",L"SystemRoot",L"TEMP",L"TMP",L"USERDOMAIN",L"USERNAME",L"USERPROFILE",L"windir"};
-    wchar_t *excluded = to_wide(token_env), *block = calloc(32768, sizeof(wchar_t)); size_t used = 0;
-    if (!block) { free(excluded); return NULL; }
-    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
-        if (excluded && !_wcsicmp(names[i], excluded)) continue;
-        DWORD size = GetEnvironmentVariableW(names[i], NULL, 0);
-        if (!size) continue;
-        size_t name_length = wcslen(names[i]);
-        if ((size_t)size + name_length + 2 > 32768 - used) { free(block); free(excluded); return NULL; }
-        memcpy(block + used, names[i], name_length * sizeof(wchar_t)); used += name_length; block[used++] = L'=';
-        DWORD got = GetEnvironmentVariableW(names[i], block + used, size);
-        if (!got || got >= size) { free(block); free(excluded); return NULL; }
-        used += got + 1;
-    }
-    /* calloc supplies the second terminating NUL, including an empty environment. */
-    free(excluded); return block;
-}
 static DWORD WINAPI read_output(void *parameter) {
     reader_context context = *(reader_context *)parameter; free(parameter);
     task *item = context.item; unsigned stream = context.stream; unsigned char chunk[4096]; DWORD got;
@@ -313,7 +295,9 @@ static char *start(sb_win_tasks *tasks, yyjson_val *args) {
         ReleaseSRWLockExclusive(&old->lock);
     }
     if (slot >= tasks->limits.task_records || active >= tasks->limits.active_tasks) return fail("Task record or active process budget reached; records are never silently evicted.");
-    wchar_t *exe = to_wide(executable), *directory = to_wide(cwd), *line = calloc(32768,sizeof(wchar_t)), *env = environment(token_env); size_t used = 0;
+    const char *runtime=sb_string(yyjson_obj_get(args,"runtime_directory"));sb_error runtime_error={0};char *fallback=runtime?NULL:sb_platform_default_data_dir(&runtime_error);
+    const char *exclude[]={token_env};wchar_t *env=runtime || fallback ? sb_platform_child_environment(runtime?runtime:fallback,exclude,1,&runtime_error):NULL;free(fallback);
+    wchar_t *exe = to_wide(executable), *directory = to_wide(cwd), *line = calloc(32768,sizeof(wchar_t)); size_t used = 0;
     bool valid = absolute_exe(exe) && directory && line && env && (!tasks->sandbox || sb_win_sandbox_program(tasks->sandbox,exe)) && quote(line,&used,exe);
     size_t idx,max; yyjson_val *argument;
     yyjson_arr_foreach(argv,idx,max,argument) { wchar_t *wide = to_wide(sb_string(argument)); valid = valid && wide && quote(line,&used,wide); free(wide); }
@@ -332,7 +316,7 @@ static char *start(sb_win_tasks *tasks, yyjson_val *args) {
     item->job=CreateJobObjectW(NULL,NULL); item->input_event=CreateEventW(NULL,FALSE,FALSE,NULL);
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits={0}; limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE|JOB_OBJECT_LIMIT_ACTIVE_PROCESS; limits.BasicLimitInformation.ActiveProcessLimit=tasks->sandbox?1:64;
     ok=ok && item->job && item->input_event && SetInformationJobObject(item->job,JobObjectExtendedLimitInformation,&limits,sizeof(limits));
-    DWORD attribute_count=tasks->sandbox?5:1;
+    DWORD attribute_count=tasks->sandbox?4:1;
     SIZE_T attribute_size=0; InitializeProcThreadAttributeList(NULL,attribute_count,0,&attribute_size);
     LPPROC_THREAD_ATTRIBUTE_LIST attributes=attribute_size?malloc(attribute_size):NULL;
     bool initialized=attributes && InitializeProcThreadAttributeList(attributes,attribute_count,0,&attribute_size);
@@ -342,7 +326,8 @@ static char *start(sb_win_tasks *tasks, yyjson_val *args) {
     STARTUPINFOEXW startup={0}; startup.StartupInfo.cb=sizeof(startup); startup.StartupInfo.dwFlags=STARTF_USESTDHANDLES; startup.StartupInfo.hStdInput=child_input; startup.StartupInfo.hStdOutput=child_output[0]; startup.StartupInfo.hStdError=child_output[1]; startup.lpAttributeList=attributes;
     PROCESS_INFORMATION process={0};
     unsigned phase=1;
-    ok=ok && CreateProcessW(exe,line,NULL,NULL,TRUE,CREATE_SUSPENDED|(tasks->sandbox?DETACHED_PROCESS:CREATE_NO_WINDOW)|CREATE_UNICODE_ENVIRONMENT|EXTENDED_STARTUPINFO_PRESENT,env,directory,&startup.StartupInfo,&process);
+    DWORD flags=CREATE_SUSPENDED|(tasks->sandbox?DETACHED_PROCESS:CREATE_NO_WINDOW)|CREATE_UNICODE_ENVIRONMENT|EXTENDED_STARTUPINFO_PRESENT;
+    ok=ok && (tasks->sandbox?sb_win_sandbox_launch(tasks->sandbox,exe,line,true,flags,env,directory,&startup.StartupInfo,&process):CreateProcessW(exe,line,NULL,NULL,TRUE,flags,env,directory,&startup.StartupInfo,&process));
     if(process.hProcess) { item->process=process.hProcess; item->pid=process.dwProcessId; }
     if(ok){phase=2;ok=AssignProcessToJobObject(item->job,item->process)!=FALSE;}
     if(ok && tasks->sandbox){phase=3;ok=sb_win_sandbox_token(tasks->sandbox,item->process);}

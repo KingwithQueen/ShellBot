@@ -6,22 +6,24 @@
 #include "sb_projects.h"
 #include "project_settings.h"
 #include "execution.h"
+#include "desktop_app.h"
+#include "native_ui.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
 
 enum { C_OPEN=4001,C_NEW,C_ADD,C_REMOVE,C_JSON,C_SAVE,C_DIR_ADD,C_DIR_EDIT,C_DIR_REMOVE,
-    C_PROJECTS=4200,C_OUTPUT,C_STATUS,C_TABS,C_SOURCE,C_DIRECTORIES,C_TOOLS,C_PROJECT_HINT,C_DIRECTORY_HINT };
+    C_PROJECTS=4200,C_OUTPUT,C_STATUS,C_TABS,C_SOURCE,C_DIRECTORIES,C_TOOLS,C_PROJECT_HINT,C_DIRECTORY_HINT,C_OUTPUT_LABEL };
 enum { F_ID,F_TOKEN,F_DATA,F_CWD,F_ENABLED,F_APPROVAL,F_SCOPE,F_READONLY,F_EXECUTION,F_IDENTITY,F_ADMIN,
     F_DESKTOP,F_CONTROL,F_CLIPREAD,F_CLIPWRITE,F_LEASE,F_HOTKEY,F_RUNTIME,F_PORT,F_PUBLIC,F_OWNER,F_DEFAULT,F_COUNT };
 typedef struct {
     HWND window,owner,projects,tabs,directories,tools,source,output,status,fields[F_COUNT],labels[F_COUNT];
     HWND buttons[9]; HFONT font; yyjson_mut_doc *doc; char *original; int selected,page;
     bool loading,dirty,closed,embedded;
-    char *result;
+    char *result;UINT dpi;
 } settings;
-typedef struct { HWND window,owner,edit,id,workspace,readonly; HFONT font; bool done,accepted,json; char *text,*name; bool is_workspace,read_only; } modal;
+typedef struct { HWND window,owner,edit,id,workspace,readonly; HFONT font; bool done,accepted,json; char *text,*name; bool is_workspace,read_only;UINT dpi; } modal;
 static wchar_t *wtext(const char *s) {
     int n=s ? MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,s,-1,NULL,0) : 0;
     wchar_t *w=n ? calloc((size_t)n,sizeof(*w)) : NULL;
@@ -63,7 +65,9 @@ static LRESULT CALLBACK modal_proc(HWND window,UINT message,WPARAM wp,LPARAM lp)
     modal *m=(modal *)GetWindowLongPtrW(window,GWLP_USERDATA);
     if (message==WM_NCCREATE) { m=((CREATESTRUCTW *)lp)->lpCreateParams; m->window=window; SetWindowLongPtrW(window,GWLP_USERDATA,(LONG_PTR)m); }
     if (!m) return DefWindowProcW(window,message,wp,lp);
+    if(message==DM_GETDEFID)return MAKELRESULT(IDOK,DC_HASDEFID);
     if (message==WM_CREATE) {
+        m->font=sb_native_font(window);m->dpi=sb_native_dpi(window);
         if (m->json) {
             m->edit=child(window,m->font,L"EDIT",L"",WS_TABSTOP|ES_MULTILINE|ES_AUTOVSCROLL|ES_AUTOHSCROLL|WS_VSCROLL|WS_HSCROLL,4300,16,16,770,510);
             SendMessageW(m->edit,EM_SETLIMITTEXT,SB_TEXT_LIMIT,0); put(m->edit,m->text);
@@ -98,19 +102,21 @@ static LRESULT CALLBACK modal_proc(HWND window,UINT message,WPARAM wp,LPARAM lp)
         }
         if (LOWORD(wp)==IDCANCEL) { DestroyWindow(window); return 0; }
     }
+    if(message==WM_DPICHANGED){sb_native_dpi_changed(window,&m->font,&m->dpi,wp,lp);return 0;}
     if (message==WM_DESTROY) { m->done=true; return 0; }
     return DefWindowProcW(window,message,wp,lp);
 }
 static bool show_modal(modal *m) {
     WNDCLASSW wc={0}; wc.lpfnWndProc=modal_proc; wc.hInstance=GetModuleHandleW(NULL); wc.lpszClassName=L"ShellBotSettingsDialog";
-    wc.hCursor=LoadCursorW(NULL,IDC_ARROW); wc.hbrBackground=(HBRUSH)(COLOR_WINDOW+1); RegisterClassW(&wc);
+    wc.hCursor=LoadCursorW(NULL,IDC_ARROW); wc.hbrBackground=(HBRUSH)(COLOR_BTNFACE+1); RegisterClassW(&wc);
     RECT r={0,0,px(m->owner,m->json ? 804 : 624),px(m->owner,m->json ? 588 : 254)};
-    AdjustWindowRectEx(&r,WS_CAPTION|WS_SYSMENU,FALSE,WS_EX_DLGMODALFRAME);
-    HWND h=CreateWindowExW(WS_EX_DLGMODALFRAME,wc.lpszClassName,m->json ? L"项目高级配置" : L"目录权限",WS_CAPTION|WS_SYSMENU,
-        CW_USEDEFAULT,CW_USEDEFAULT,r.right-r.left,r.bottom-r.top,m->owner,NULL,wc.hInstance,m);
+    AdjustWindowRectExForDpi(&r,WS_CAPTION|WS_SYSMENU,FALSE,WS_EX_DLGMODALFRAME,sb_native_dpi(m->owner));
+    RECT owner={0};GetWindowRect(m->owner,&owner);
+    HWND h=CreateWindowExW(WS_EX_DLGMODALFRAME,wc.lpszClassName,m->json ? L"项目高级配置" : L"目录权限",WS_CAPTION|WS_SYSMENU|WS_CLIPCHILDREN,
+        owner.left,owner.top,r.right-r.left,r.bottom-r.top,m->owner,NULL,wc.hInstance,m);
     if (!h) return false; EnableWindow(m->owner,FALSE); ShowWindow(h,SW_SHOW); SetFocus(m->edit);
-    MSG msg; while (!m->done && GetMessageW(&msg,NULL,0,0)>0) if (!IsDialogMessageW(h,&msg)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
-    EnableWindow(m->owner,TRUE); SetActiveWindow(m->owner); return m->accepted;
+    sb_native_modal_loop(h,&m->done);
+    EnableWindow(m->owner,TRUE); SetActiveWindow(m->owner);DeleteObject(m->font);m->font=NULL;return m->accepted;
 }
 static yyjson_mut_val *project(settings *s) { return s->selected<0 ? NULL : yyjson_mut_arr_get(yyjson_mut_obj_get(yyjson_mut_doc_get_root(s->doc),"projects"),(size_t)s->selected); }
 static void combo(HWND h,const wchar_t *const *labels,size_t count) { for (size_t i=0;i<count;++i) SendMessageW(h,CB_ADDSTRING,0,(LPARAM)labels[i]); }
@@ -264,7 +270,7 @@ static bool validate_form(settings *s) {
         if (!sb_identifier(str(p,"id"))) return form_error(s,i,0,F_ID,"项目标识只能使用 1～63 个英文字母、数字、下划线或连字符，例如 ShellBotTest。它用于 MCP 地址，不能包含中文或空格。");
         if (yyjson_mut_obj_get(p,"legacy_config")) continue;
         if (!sb_identifier(str(p,"token_env"))) return form_error(s,i,0,F_TOKEN,"令牌环境变量名称只能使用 1～63 个英文字母、数字、下划线或连字符；这里填写变量名称，不填写令牌值。");
-        if (!sb_project_path_valid(str(p,"data_dir"))) return form_error(s,i,0,F_DATA,"独立数据目录必须是有效的 Windows 绝对路径；路径可以包含中文。");
+        sb_error location={0};if (!sb_project_path_valid(str(p,"data_dir")) || !sb_platform_storage_path(str(p,"data_dir"),&location)) return form_error(s,i,0,F_DATA,"独立数据目录必须是非 C 盘本地绝对路径；路径可以包含中文。");
         const char *cwd=str(p,"default_workspace_id"); bool found=!*cwd;
         for (unsigned kind=0;kind<2;++kind) {
             yyjson_mut_val *dirs=yyjson_mut_obj_get(p,kind ? "extra_directories" : "workspaces");
@@ -396,7 +402,14 @@ static void command(settings *s,int id) {
     if (id==C_OPEN || id==C_NEW) {
         if (s->dirty && MessageBoxW(s->window,L"放弃尚未保存的更改？",L"项目配置",MB_YESNO|MB_DEFBUTTON2)!=IDYES) return;
         if (id==C_NEW) {
-            replace_document(s,"{\"format_version\":1,\"projects\":[{\"id\":\"project-a\",\"data_dir\":\"C:/ShellBotData/project-a\",\"token_env\":\"SHELLBOT_PROJECT_A_TOKEN\",\"workspaces\":[],\"policy\":{\"approval_mode\":\"always\",\"tools\":[\"host_info\",\"host_capabilities\",\"fs_list\",\"fs_read\",\"fs_search\",\"image_view\"]}}]}");
+            sb_error location={0};char *base=sb_platform_default_data_dir(&location);
+            if(!base)base=sb_desktop_choose_storage("",location.text);if(!base)return;
+            char *data=sb_desktop_join(base,"Projects\\project-a");free(base);
+            yyjson_doc *parsed=yyjson_read("{\"format_version\":1,\"projects\":[{\"id\":\"project-a\",\"data_dir\":\"\",\"token_env\":\"SHELLBOT_PROJECT_A_TOKEN\",\"workspaces\":[],\"policy\":{\"approval_mode\":\"always\",\"tools\":[\"host_info\",\"host_capabilities\",\"fs_list\",\"fs_read\",\"fs_search\",\"image_view\"]}}]}",strlen("{\"format_version\":1,\"projects\":[{\"id\":\"project-a\",\"data_dir\":\"\",\"token_env\":\"SHELLBOT_PROJECT_A_TOKEN\",\"workspaces\":[],\"policy\":{\"approval_mode\":\"always\",\"tools\":[\"host_info\",\"host_capabilities\",\"fs_list\",\"fs_read\",\"fs_search\",\"image_view\"]}}]}"),0);yyjson_mut_doc *draft=parsed?yyjson_doc_mut_copy(parsed,NULL):NULL;yyjson_doc_free(parsed);
+            yyjson_mut_val *entry=draft?yyjson_mut_arr_get(yyjson_mut_obj_get(yyjson_mut_doc_get_root(draft),"projects"),0):NULL;
+            if(entry && data){yyjson_mut_obj_remove_key(entry,"data_dir");yyjson_mut_obj_add_strcpy(draft,entry,"data_dir",data);}
+            char *json=entry && data?yyjson_mut_write(draft,0,NULL):NULL;bool replaced=json && replace_document(s,json);
+            free(json);free(data);yyjson_mut_doc_free(draft);if(!replaced)return;
             SetWindowTextW(s->source,L"新配置"); SetWindowTextW(s->output,L""); s->dirty=true;
         } else {
             wchar_t path[SB_PATH_CAP]=L""; if (!file_dialog(s->window,false,path)) return;
@@ -445,8 +458,9 @@ static LRESULT CALLBACK settings_proc(HWND window,UINT message,WPARAM wp,LPARAM 
     if (message==WM_NCCREATE) { s=((CREATESTRUCTW *)lp)->lpCreateParams; s->window=window; SetWindowLongPtrW(window,GWLP_USERDATA,(LONG_PTR)s); }
     if (!s) return DefWindowProcW(window,message,wp,lp);
     switch (message) {
+    case DM_GETDEFID:return MAKELRESULT(C_SAVE,DC_HASDEFID);
     case WM_CREATE: {
-        s->font=CreateFontW(-px(window,15),0,0,0,FW_NORMAL,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,L"Segoe UI");
+        s->font=sb_native_font(window);s->dpi=sb_native_dpi(window);
         const wchar_t *buttons[]={L"打开配置…",L"新配置",L"添加项目",L"移除项目",L"高级配置…",L"保存新配置…"};
         for (int i=0;i<6;++i) s->buttons[i]=child(window,s->font,L"BUTTON",buttons[i],WS_TABSTOP,C_OPEN+i,18+i*154,16,144,32);
         s->source=child(window,s->font,L"EDIT",L"",ES_READONLY|ES_AUTOHSCROLL,C_SOURCE,18,60,1082,28);
@@ -480,10 +494,12 @@ static LRESULT CALLBACK settings_proc(HWND window,UINT message,WPARAM wp,LPARAM 
         s->labels[F_RUNTIME]=child(window,s->font,L"STATIC",L"受限任务只读运行文件（每行一个）",0,0,612,164,460,28);
         s->fields[F_RUNTIME]=child(window,s->font,L"EDIT",L"",WS_TABSTOP|ES_MULTILINE|ES_AUTOVSCROLL|WS_VSCROLL|WS_HSCROLL,4100+F_RUNTIME,612,204,466,390);
         const wchar_t *globals[]={L"本机端口",L"公共地址（可选）",L"所有者令牌环境变量",L"兼容默认项目（可选）"}; for (int i=0;i<4;++i) field(s,F_PORT+i,globals[i],258,166+i*60,false,false,580);
-        child(window,s->font,L"STATIC",L"保存到新文件",0,0,18,640,180,28); s->output=child(window,s->font,L"EDIT",L"",WS_TABSTOP|ES_AUTOHSCROLL,C_OUTPUT,202,636,898,30);
+        child(window,s->font,L"STATIC",L"保存到新文件",0,C_OUTPUT_LABEL,18,640,180,28); s->output=child(window,s->font,L"EDIT",L"",WS_TABSTOP|ES_AUTOHSCROLL,C_OUTPUT,202,636,898,30);
         s->status=child(window,s->font,L"STATIC",L"保存会校验完整配置并保留原文备份；应用新配置需要明确重启管理器。",0,C_STATUS,18,690,1082,40); return 0;
     }
     case WM_COMMAND:
+        if(LOWORD(wp)==IDCANCEL){SendMessageW(window,WM_CLOSE,0,0);return 0;}
+        if(LOWORD(wp)==IDOK){command(s,C_SAVE);return 0;}
         if (LOWORD(wp)==C_PROJECTS && HIWORD(wp)==LBN_SELCHANGE) {
             int selected=(int)SendMessageW(s->projects,LB_GETCURSEL,0,0);
             if (commit(s)) { s->selected=selected; list_projects(s); load_project(s); } else SendMessageW(s->projects,LB_SETCURSEL,(WPARAM)s->selected,0); return 0;
@@ -502,6 +518,7 @@ static LRESULT CALLBACK settings_proc(HWND window,UINT message,WPARAM wp,LPARAM 
         if (!s->loading && header->idFrom==C_TOOLS && header->code==LVN_ITEMCHANGED) s->dirty=true;
         return 0;
     }
+    case WM_DPICHANGED:sb_native_dpi_changed(window,&s->font,&s->dpi,wp,lp);return 0;
     case WM_CLOSE:
         if (s->dirty && MessageBoxW(window,L"关闭并放弃尚未保存的更改？",L"项目配置",MB_YESNO|MB_DEFBUTTON2)!=IDYES) return 0;
         DestroyWindow(window); return 0;
@@ -518,11 +535,12 @@ static int run_settings(HWND owner,const char *path,const char *snapshot,char **
     SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     INITCOMMONCONTROLSEX controls={sizeof(controls),ICC_LISTVIEW_CLASSES|ICC_TAB_CLASSES}; InitCommonControlsEx(&controls); OleInitialize(NULL);
     WNDCLASSW wc={0}; wc.lpfnWndProc=settings_proc; wc.hInstance=GetModuleHandleW(NULL); wc.lpszClassName=L"ShellBotProjectSettings";
-    wc.hCursor=LoadCursorW(NULL,IDC_ARROW); wc.hbrBackground=(HBRUSH)(COLOR_WINDOW+1); RegisterClassW(&wc);
-    RECT r={0,0,MulDiv(1120,(int)GetDpiForSystem(),96),MulDiv(746,(int)GetDpiForSystem(),96)};
-    AdjustWindowRectEx(&r,WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX,FALSE,0);
-    HWND h=CreateWindowExW(0,wc.lpszClassName,L"ShellBot 项目配置",WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX,
-        CW_USEDEFAULT,CW_USEDEFAULT,r.right-r.left,r.bottom-r.top,owner,NULL,wc.hInstance,&s);
+    wc.hCursor=LoadCursorW(NULL,IDC_ARROW); wc.hbrBackground=(HBRUSH)(COLOR_BTNFACE+1); RegisterClassW(&wc);
+    UINT dpi=sb_native_dpi(owner);RECT r={0,0,MulDiv(1120,(int)dpi,96),MulDiv(746,(int)dpi,96)};
+    AdjustWindowRectExForDpi(&r,WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX,FALSE,0,dpi);
+    RECT position={0};GetWindowRect(owner,&position);
+    HWND h=CreateWindowExW(0,wc.lpszClassName,L"ShellBot 项目配置",WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX|WS_CLIPCHILDREN,
+        owner?position.left:CW_USEDEFAULT,owner?position.top:CW_USEDEFAULT,r.right-r.left,r.bottom-r.top,owner,NULL,wc.hInstance,&s);
     if (!h) { OleUninitialize(); return 2; }
     if (owner) EnableWindow(owner,FALSE); else FreeConsole();
     bool loaded=false; sb_error error={0}; size_t length=0; char *bytes=path ? sb_platform_load_config(path,&length,&error) : NULL;
@@ -534,13 +552,15 @@ static int run_settings(HWND owner,const char *path,const char *snapshot,char **
         TabCtrl_DeleteItem(s.tabs,4);
         for (int i=F_PORT;i<=F_DEFAULT;++i) { ShowWindow(s.fields[i],SW_HIDE);ShowWindow(s.labels[i],SW_HIDE); }
         for (int i=0;i<4;++i) ShowWindow(s.buttons[i],SW_HIDE);
-        SetWindowTextW(s.buttons[5],L"应用到项目"); ShowWindow(s.source,SW_HIDE); ShowWindow(s.output,SW_HIDE);
+        SetWindowTextW(s.buttons[5],L"应用到项目"); ShowWindow(s.source,SW_HIDE); ShowWindow(s.output,SW_HIDE);ShowWindow(GetDlgItem(h,C_OUTPUT_LABEL),SW_HIDE);
+        SetWindowPos(s.buttons[4],NULL,px(h,18),px(h,16),px(h,144),px(h,32),SWP_NOZORDER|SWP_NOACTIVATE);
+        SetWindowPos(s.buttons[5],NULL,px(h,180),px(h,16),px(h,144),px(h,32),SWP_NOZORDER|SWP_NOACTIVATE);
         SendMessageW(s.fields[F_ID],EM_SETREADONLY,TRUE,0);SendMessageW(s.fields[F_TOKEN],EM_SETREADONLY,TRUE,0);SendMessageW(s.fields[F_DATA],EM_SETREADONLY,TRUE,0);
         SetWindowTextW(s.labels[F_TOKEN],L"内部凭据引用（自动）");
         SetWindowTextW(s.status,L"应用后返回项目弹窗；项目存储目录在项目弹窗中修改。配置由管理界面保存。");
     }
     free(bytes); ShowWindow(h,SW_SHOW); UpdateWindow(h);
-    MSG msg; while (!s.closed && GetMessageW(&msg,NULL,0,0)>0) if (!IsDialogMessageW(h,&msg)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
+    sb_native_modal_loop(h,&s.closed);
     if (owner) { EnableWindow(owner,TRUE); SetActiveWindow(owner); }
     if (result) *result=s.result; else free(s.result);
     yyjson_mut_doc_free(s.doc); free(s.original); DeleteObject(s.font); OleUninitialize(); return 0;

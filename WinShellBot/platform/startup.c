@@ -72,6 +72,7 @@ static PSECURITY_DESCRIPTOR private_descriptor(void) {
     if(sid)LocalFree(sid);free(user);if(token)CloseHandle(token);return out;
 }
 static bool create_profile(const char *path,const char *text,sb_error *error) {
+    if(!sb_platform_storage_path(path,error))return false;
     wchar_t *name=wide(path);PSECURITY_DESCRIPTOR descriptor=private_descriptor();
     SECURITY_ATTRIBUTES attributes={sizeof(attributes),descriptor,FALSE};
     HANDLE file=name && descriptor ? CreateFileW(name,GENERIC_WRITE|DELETE,0,&attributes,CREATE_NEW,

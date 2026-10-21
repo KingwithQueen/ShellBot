@@ -6,7 +6,7 @@
 #include <stdint.h>
 #include "yyjson.h"
 
-#define SB_VERSION "0.1.0-dev.21"
+#define SB_VERSION "0.1.0-dev.28"
 #define SB_TRANSFER_LIMIT (64u * 1024u * 1024u)
 #define SB_TRANSFER_CHUNK 32768u
 #define SB_MAX_ROOTS 16
@@ -191,6 +191,10 @@ bool sb_platform_list(sb_file *directory, size_t offset, size_t limit,
                       sb_entry **entries, size_t *count, bool *more, sb_error *error);
 void sb_platform_entries_free(sb_entry *entries, size_t count);
 char *sb_platform_default_data_dir(sb_error *error);
+char *sb_platform_program_directory(sb_error *error);
+bool sb_platform_storage_path(const char *path, sb_error *error);
+bool sb_platform_prepare_runtime(const char *directory, sb_error *error);
+wchar_t *sb_platform_child_environment(const char *directory,const char *const *excluded,size_t count,sb_error *error);
 sb_lease *sb_platform_lease(const char *directory, sb_error *error);
 sb_lease *sb_platform_lease_bound(const char *directory, const char *identity, sb_error *error);
 void sb_platform_lease_close(sb_lease *lease);
@@ -332,6 +336,11 @@ char *sb_dispatch(sb_host *host, sb_protocol *protocol, const char *request,
 int sb_stdio_run(sb_host *host);
 int sb_http_run(sb_host *host, sb_error *error);
 typedef struct sb_http_server sb_http_server;
+typedef struct {
+    const char *method,*path,*query,*content_type,*authorization,*cookie,*origin;
+    const char *body; size_t length;
+} sb_http_request;
+typedef struct { int status; char *body,*headers; const char *content_type; } sb_http_response;
 /* open authenticates and reserves a fixed project before reading its body.
    close always releases that reservation, including HTTP validation failures. */
 typedef struct {
@@ -342,6 +351,8 @@ typedef struct {
     bool (*owner_enabled)(void *context);
     bool (*owner_authorized)(void *context, const char *authorization);
     char *(*owner_call)(void *context, const char *request, size_t length, int *status);
+    bool (*auxiliary)(void *context,const sb_http_request *request,sb_http_response *response);
+    char *(*challenge)(void *context,const char *path);
 } sb_http_routes;
 sb_http_server *sb_http_start(const sb_config *config, const sb_http_routes *routes, void *context, sb_error *error);
 bool sb_http_stopping(void);

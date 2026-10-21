@@ -48,6 +48,7 @@ yyjson_mut_val *sb_tasks_call(sb_host *host,const char *actor,const char *name,y
         yyjson_mut_obj_add_strcpy(request,parameters,"request_key",key);
         yyjson_mut_obj_add_strcpy(request,parameters,"request_sha256",request_hash);
         yyjson_mut_obj_add_strcpy(request,parameters,"token_env",host->config.token_env);
+        yyjson_mut_obj_add_strcpy(request,parameters,"runtime_directory",host->config.data_dir);
         event_key=key;
     } else {
         const char *id=sb_string(yyjson_obj_get(args,"task_id"));

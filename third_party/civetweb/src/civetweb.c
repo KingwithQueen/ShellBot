@@ -17747,12 +17747,6 @@ set_tcp_nodelay(const struct socket *so, int nodelay_on)
 static void
 close_socket_gracefully(struct mg_connection *conn)
 {
-#if defined(_WIN32)
-	char buf[MG_BUF_LEN];
-	int n;
-	DWORD receive_timeout = 1000;
-	ULONGLONG drain_deadline;
-#endif
 	struct linger linger;
 	int error_code = 0;
 	int linger_timeout = -2;
@@ -17762,36 +17756,31 @@ close_socket_gracefully(struct mg_connection *conn)
 		return;
 	}
 
-	/* http://msdn.microsoft.com/en-us/library/ms739165(v=vs.85).aspx:
-	 * "Note that enabling a nonzero timeout on a nonblocking socket
-	 * is not recommended.", so set it to blocking now */
-	set_blocking_mode(conn->client.sock);
-
-	/* On Windows, allow a bounded peer drain before sending FIN below. */
-#if !defined(_WIN32)
+	/* Publish end-of-response before waiting for a peer which may itself
+	 * be waiting for EOF. Do not use SO_RCVTIMEO: a timed-out blocking recv
+	 * leaves a Winsock connection in an indeterminate state. */
 	shutdown(conn->client.sock, SHUTDOWN_WR);
-#endif
-
 #if defined(_WIN32)
-	/* Read and discard pending incoming data. If we do not do that and
-	 * close
-	 * the socket, the data in the send buffer may be discarded. This
-	 * behaviour is seen on Windows, when client keeps sending data
-	 * when server decides to close the connection; then when client
-	 * does recv() it gets no data back. */
-	/* ShellBot: give a peer consuming a length-delimited response a bounded
-	 * opportunity to close before sending our FIN. Keep the total drain
-	 * bounded even if the peer continues sending data. */
-	drain_deadline = GetTickCount64() + 1000;
-	if (setsockopt(conn->client.sock, SOL_SOCKET, SO_RCVTIMEO,
-	               (const char *)&receive_timeout, sizeof(receive_timeout)) == 0) {
-		do {
+	if (set_non_blocking_mode(conn->client.sock) == 0) {
+		ULONGLONG deadline = GetTickCount64() + 1000;
+		char buf[MG_BUF_LEN];
+		while (GetTickCount64() < deadline
+		       && STOP_FLAG_IS_ZERO(&conn->phys_ctx->stop_flag)) {
+			struct mg_pollfd pfd;
+			int ready, n;
+			pfd.fd = conn->client.sock;
+			pfd.events = POLLIN;
+			ready = mg_poll(&pfd, 1, 50, &conn->phys_ctx->stop_flag);
+			if (ready < 0) break;
+			if (!ready) continue;
 			n = recv(conn->client.sock, buf, sizeof(buf), 0);
-		} while (n > 0 && GetTickCount64() < drain_deadline
-		         && STOP_FLAG_IS_ZERO(&conn->phys_ctx->stop_flag));
+			if (n == 0) break;
+			if (n < 0 && WSAGetLastError() != WSAEWOULDBLOCK) break;
+		}
 	}
-	shutdown(conn->client.sock, SHUTDOWN_WR);
 #endif
+	/* Nonzero linger is valid only for blocking sockets. */
+	set_blocking_mode(conn->client.sock);
 
 	if (conn->dom_ctx->config[LINGER_TIMEOUT]) {
 		linger_timeout = atoi(conn->dom_ctx->config[LINGER_TIMEOUT]);

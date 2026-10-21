@@ -150,7 +150,7 @@ static int handle(struct mg_connection *connection) {
     const struct mg_request_info *info = mg_get_request_info(connection);
     http_state *state = info->user_data;
     const sb_config *config = state->config;
-    static const char *const critical[] = {"Authorization", "Host", "Origin", "Content-Length", "Transfer-Encoding", "Content-Type", "Accept", "MCP-Protocol-Version", "Mcp-Method", "Mcp-Name"};
+    static const char *const critical[] = {"Authorization", "Host", "Origin", "Content-Length", "Transfer-Encoding", "Content-Type", "Accept", "MCP-Protocol-Version", "Mcp-Method", "Mcp-Name", "Cookie"};
     for (size_t i = 0; i < sizeof(critical) / sizeof(critical[0]); ++i) {
         unsigned count = 0;
         for (int j = 0; j < info->num_headers; ++j) if (!_stricmp(info->http_headers[j].name, critical[i])) ++count;
@@ -170,6 +170,21 @@ static int handle(struct mg_connection *connection) {
     bool origin_valid = !received_origin || !strcmp(received_origin, origin) || !strcmp(received_origin, local_origin) ||
         (constrained ? external_origin(config, received_origin) : valid_proxy_origin(received_origin));
     if (!host_valid || !origin_valid) return reject(connection, 403, "{\"error\":\"Invalid Host or Origin.\"}", NULL);
+    if(state->routes.auxiliary && (!strncmp(info->local_uri,"/oauth/",7) || !strncmp(info->local_uri,"/.well-known/",13))) {
+        if(!info->request_uri || !info->local_uri_raw || strcmp(info->request_uri,info->local_uri_raw) || strcmp(info->local_uri_raw,info->local_uri))
+            return reject(connection,400,"{\"error\":\"Noncanonical OAuth path.\"}",NULL);
+        if(mg_get_header(connection,"Transfer-Encoding") || info->content_length>8192)
+            return reject(connection,413,"{\"error\":\"OAuth requests are limited to 8 KiB.\"}",NULL);
+        char body[8193]={0};size_t wanted=info->content_length>0?(size_t)info->content_length:0,read=0;
+        while(read<wanted){int got=mg_read(connection,body+read,wanted-read);if(got<=0)break;read+=(size_t)got;}
+        if(read!=wanted || memchr(body,0,read))return reject(connection,400,"{\"error\":\"Incomplete OAuth request.\"}",NULL);
+        sb_http_request request={info->request_method,info->local_uri,info->query_string,mg_get_header(connection,"Content-Type"),mg_get_header(connection,"Authorization"),mg_get_header(connection,"Cookie"),received_origin,body,read};sb_http_response response={0};
+        if(!state->routes.auxiliary(state->user,&request,&response))return reject(connection,404,"{\"error\":\"OAuth route unavailable.\"}",NULL);
+        const char *security="Referrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'\r\nX-Frame-Options: DENY\r\n";
+        char extra[2048];snprintf(extra,sizeof(extra),"%s%s",security,response.headers?response.headers:"");
+        int result=reply_typed(connection,response.status?response.status:503,response.body,response.body?strlen(response.body):0,extra,response.content_type?response.content_type:"application/json");
+        if(response.body){SecureZeroMemory(response.body,strlen(response.body));free(response.body);}free(response.headers);SecureZeroMemory(body,sizeof(body));return result;
+    }
     void *binding = NULL; bool health = false;
     if (state->routes.open) {
         /* decode_url=no preserves percent escapes; reject rewritten/absolute
@@ -186,7 +201,8 @@ static int handle(struct mg_connection *connection) {
                 status == 404 ? "{\"error\":\"Project route not found.\"}" :
                 status == 429 ? "{\"error\":\"Project has an in-flight request. No request was queued.\"}" :
                 "{\"error\":\"Project is unavailable; explicit owner action is required.\"}";
-            return reject(connection, status, body, status == 401 ? "WWW-Authenticate: Bearer realm=\"ShellBot project\"\r\n" : NULL);
+            char *challenge=status==401 && state->routes.challenge?state->routes.challenge(state->user,info->local_uri):NULL;
+            int result=reject(connection,status,body,status==401?(challenge?challenge:"WWW-Authenticate: Bearer realm=\"ShellBot project\"\r\n"):NULL);free(challenge);return result;
         }
     } else {
         if (!authorized(connection, state)) return reject(connection, 401, "{\"error\":\"Bearer token required.\"}", "WWW-Authenticate: Bearer realm=\"ShellBot local development\"\r\n");
@@ -208,7 +224,7 @@ static bool listen_http(http_state *state, sb_error *error) {
     char listen[64];
     snprintf(listen, sizeof(listen), "127.0.0.1:%u", state->config->port);
     const char *options[] = {"listening_ports", listen, "num_threads", "4", "request_timeout_ms", "5000",
-        "connection_queue", "4", "decode_url", state->routes.open ? "no" : "yes",
+        "connection_queue", "32", "decode_url", state->routes.open ? "no" : "yes",
         "enable_keep_alive", "yes", "keep_alive_timeout_ms", "2000", "linger_timeout_ms", "5000",
         "tcp_nodelay", "1", "enable_directory_listing", "no", NULL};
     struct mg_callbacks callbacks = {0};

@@ -15,12 +15,13 @@ static bool close_requested(struct mg_connection *connection) {
 }
 
 static int reply_typed(struct mg_connection *connection, int status, const char *body, size_t size, const char *extra, const char *type) {
-    /* Complete a bounded incoming body before closing an error response on
-       Windows. Unread socket data may otherwise discard the outgoing reply. */
+    /* Drain only a reusable request here. An early rejection must reach the
+       peer before waiting for a body it may never send; socket close performs
+       its own bounded drain after publishing FIN. */
     const struct mg_request_info *info = mg_get_request_info(connection);
     bool closing=status>=400 || close_requested(connection);
     if (closing) mg_disable_keep_alive(connection);
-    if (info->content_length >= 0 && info->content_length <= 2 * SB_REQUEST_LIMIT &&
+    if (!closing && info->content_length >= 0 && info->content_length <= 2 * SB_REQUEST_LIMIT &&
         !mg_get_header(connection, "Transfer-Encoding")) {
         char discard[4096];
         size_t drained = 0;
@@ -29,7 +30,7 @@ static int reply_typed(struct mg_connection *connection, int status, const char 
         while (drained < 2 * SB_REQUEST_LIMIT && sb_platform_millis() < deadline &&
             (got = mg_read(connection, discard, sizeof(discard))) > 0) drained += (size_t)got;
     }
-    const char *reason = status == 200 ? "OK" : status == 202 ? "Accepted" : status == 400 ? "Bad Request" :
+    const char *reason = status == 200 ? "OK" : status == 201 ? "Created" : status == 202 ? "Accepted" : status == 400 ? "Bad Request" :
         status == 401 ? "Unauthorized" : status == 403 ? "Forbidden" : status == 404 ? "Not Found" :
         status == 405 ? "Method Not Allowed" : status == 406 ? "Not Acceptable" :
         status == 411 ? "Length Required" : status == 413 ? "Content Too Large" : status == 415 ? "Unsupported Media Type" :

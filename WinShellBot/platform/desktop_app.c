@@ -10,13 +10,15 @@
 #include <string.h>
 typedef struct { sb_desktop_draft value;char *file; } saved_project;
 struct sb_desktop_app {
-    char *directory,*manager_data,*index,*configuration;
+    char *base,*locator,*directory,*manager_data,*index,*configuration;
     char origin[320],owner[257];unsigned port;size_t count;
     saved_project projects[SB_MAX_PROJECTS];
     sb_lease *lease;HANDLE stop,manager_stop,ready,thread,mutex;
     volatile LONG busy;int code;sb_error runtime_error;
     wchar_t instance_key[96];
 };
+static char *remap(const char *path,const char *from,const char *to);
+static char *rebase_definition(const char *text,const char *from,const char *to,sb_error *error);
 static const char *str(yyjson_val *o,const char *key) { const char *v=sb_string(yyjson_obj_get(o,key));return v ? v : ""; }
 static bool nonce(char out[65],sb_error *error) {
     unsigned char bytes[32];if (!sb_platform_random(bytes,sizeof(bytes),error)) return false;
@@ -46,7 +48,7 @@ static char *configuration(sb_desktop_app *app,const sb_desktop_draft *replaceme
 static char *catalog(sb_desktop_app *app,const sb_desktop_draft *replacement,const char *file,size_t index) {
     yyjson_mut_doc *doc=yyjson_mut_doc_new(NULL);if (!doc) return NULL;
     yyjson_mut_val *root=yyjson_mut_obj(doc),*projects=yyjson_mut_arr(doc);yyjson_mut_doc_set_root(doc,root);
-    yyjson_mut_obj_add_uint(doc,root,"format_version",1);yyjson_mut_obj_add_uint(doc,root,"port",app->port);
+    yyjson_mut_obj_add_uint(doc,root,"format_version",2);yyjson_mut_obj_add_str(doc,root,"storage_root",app->base);yyjson_mut_obj_add_uint(doc,root,"port",app->port);
     yyjson_mut_obj_add_str(doc,root,"public_url",app->origin);yyjson_mut_obj_add_val(doc,root,"projects",projects);
     size_t count=app->count+(replacement && index==app->count ? 1 : 0);
     for (size_t i=0;i<count;++i) {
@@ -57,22 +59,25 @@ static char *catalog(sb_desktop_app *app,const sb_desktop_draft *replacement,con
     char *json=yyjson_mut_write(doc,0,NULL);yyjson_mut_doc_free(doc);return json;
 }
 static bool exists(const char *path) { wchar_t *p=sb_desktop_wide(path);DWORD attr=p ? GetFileAttributesW(p) : INVALID_FILE_ATTRIBUTES;free(p);return attr!=INVALID_FILE_ATTRIBUTES; }
-static bool load_project(sb_desktop_app *app,yyjson_val *index,sb_error *error) {
+static bool load_project(sb_desktop_app *app,yyjson_val *index,const char *old_base,sb_error *error) {
     saved_project *entry=&app->projects[app->count];sb_desktop_draft *p=&entry->value;
     const char *id=str(index,"id"),*directory=str(index,"directory"),*file=str(index,"file");
     if (!sb_identifier(id) || !sb_project_path_valid(directory) || !sb_identifier(file) || strlen(file)>50 || app->count>=SB_MAX_PROJECTS) goto invalid;
+    char *mapped=old_base ? remap(directory,old_base,app->base) : sb_strdup(directory);if(!mapped || !sb_platform_storage_path(mapped,error)){free(mapped);goto invalid;}directory=mapped;
     char leaf[80];snprintf(leaf,sizeof(leaf),"%s.sbproj",file);char *path=sb_desktop_join(directory,leaf),*plain=path ? sb_desktop_unseal(path,error) : NULL;
     yyjson_doc *doc=plain ? yyjson_read(plain,strlen(plain),0) : NULL;yyjson_val *root=yyjson_doc_get_root(doc),*definition=yyjson_obj_get(root,"definition");
     bool ok=doc && yyjson_obj_size(root)==5 && yyjson_get_uint(yyjson_obj_get(root,"format_version"))==1 && yyjson_is_bool(yyjson_obj_get(root,"automatic")) &&
         yyjson_is_obj(definition) && !strcmp(str(definition,"id"),id) && sb_identifier(str(definition,"token_env")) && strlen(str(root,"token"))==64 &&
         strspn(str(root,"token"),"0123456789abcdef")==64 && *str(root,"name") && strlen(str(root,"name"))<256;
-    char *expected=sb_desktop_join(directory,"State");ok=ok && expected && !_stricmp(expected,str(definition,"data_dir"));free(expected);
+    char *raw=ok ? yyjson_val_write(definition,0,NULL) : NULL,*rebased=raw && old_base ? rebase_definition(raw,old_base,app->base,error) : raw ? sb_strdup(raw) : NULL;free(raw);
+    yyjson_doc *changed=rebased ? yyjson_read(rebased,strlen(rebased),0) : NULL;definition=yyjson_doc_get_root(changed);
+    char *expected=sb_desktop_join(directory,"State");ok=ok && changed && expected && !_stricmp(expected,str(definition,"data_dir"));free(expected);
     if (ok) {
         strcpy(p->id,id);strcpy(p->token_env,str(definition,"token_env"));strcpy(p->token,str(root,"token"));p->name=sb_strdup(str(root,"name"));
         p->directory=sb_strdup(directory);p->definition=yyjson_val_write(definition,0,NULL);p->automatic=yyjson_get_bool(yyjson_obj_get(root,"automatic"));entry->file=sb_strdup(file);
         ok=p->name && p->directory && p->definition && entry->file;
     }
-    yyjson_doc_free(doc);if (plain) { SecureZeroMemory(plain,strlen(plain));free(plain); }free(path);
+    yyjson_doc_free(changed);free(rebased);yyjson_doc_free(doc);if (plain) { SecureZeroMemory(plain,strlen(plain));free(plain); }free(path);free(mapped);
     if (!ok) goto invalid;++app->count;return true;
 invalid:
     if (!*error->text) sb_fail(error,"项目索引或加密配置损坏；原文件保留，请使用原账户或备份恢复。");return false;
@@ -159,13 +164,8 @@ bool sb_desktop_draft_load(sb_desktop_app *app,const char *id,sb_desktop_draft *
     if (app->count>=SB_MAX_PROJECTS) { sb_fail(error,"最多可创建 16 个项目。");return false; }
     char random[65];if (!nonce(random,error) || !nonce(draft->token,error)) return false;
     snprintf(draft->id,sizeof(draft->id),"project-%.8s",random);snprintf(draft->token_env,sizeof(draft->token_env),"SB_DESKTOP_%.16s",random);
-    PWSTR documents=NULL;char *base=NULL;
-    if (SUCCEEDED(SHGetKnownFolderPath(&FOLDERID_Documents,0,NULL,&documents))) {
-        int size=WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,documents,-1,NULL,0,NULL,NULL);base=size ? malloc((size_t)size) : NULL;
-        if (base) WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,documents,-1,base,size,NULL,NULL);CoTaskMemFree(documents);
-    }
-    char *parent=base ? sb_desktop_join(base,"ShellBotProjects") : NULL;draft->directory=parent ? sb_desktop_join(parent,draft->id) : NULL;
-    free(base);free(parent);draft->name=sb_strdup("新项目");draft->automatic=true;
+    char *parent=sb_desktop_join(app->base,"Projects");draft->directory=parent ? sb_desktop_join(parent,draft->id) : NULL;
+    free(parent);draft->name=sb_strdup("新项目");draft->automatic=true;
     char *data=draft->directory ? sb_desktop_join(draft->directory,"State") : NULL,*work=draft->directory ? sb_desktop_join(draft->directory,"Workspace") : NULL;
     yyjson_mut_doc *doc=yyjson_mut_doc_new(NULL);if (!doc || !data || !work) { yyjson_mut_doc_free(doc);free(data);free(work);sb_desktop_draft_free(draft);return false; }
     yyjson_mut_val *root=yyjson_mut_obj(doc),*array=yyjson_mut_arr(doc),*directory=yyjson_mut_obj(doc),*policy=yyjson_mut_obj(doc),*tools=yyjson_mut_arr(doc);yyjson_mut_doc_set_root(doc,root);
@@ -181,6 +181,24 @@ static char *remap(const char *path,const char *from,const char *to) {
     size_t n=strlen(from);if (strlen(path)<n || !sb_desktop_overlap(path,from)) return sb_strdup(path);
     for (size_t i=0;i<n;++i) { char a=path[i]=='/' ? '\\' : path[i],b=from[i]=='/' ? '\\' : from[i];if (a>='A' && a<='Z') a+=32;if (b>='A' && b<='Z') b+=32;if (a!=b) return sb_strdup(path); }
     size_t size=strlen(to)+strlen(path+n)+1;char *out=malloc(size);if (out) snprintf(out,size,"%s%s",to,path+n);return out;
+}
+static char *rebase_definition(const char *text,const char *from,const char *to,sb_error *error) {
+    yyjson_doc *input=yyjson_read(text,strlen(text),0);yyjson_mut_doc *doc=input?yyjson_doc_mut_copy(input,NULL):NULL;yyjson_doc_free(input);if(!doc)return NULL;
+    yyjson_mut_val *root=yyjson_mut_doc_get_root(doc);bool changed=false,ok=true;
+    const char *data=yyjson_mut_get_str(yyjson_mut_obj_get(root,"data_dir"));char *next=data?remap(data,from,to):NULL;
+    if(!next)ok=false;else {changed=strcmp(data,next)!=0;yyjson_mut_obj_remove_key(root,"data_dir");yyjson_mut_obj_add_strcpy(doc,root,"data_dir",next);}free(next);
+    const char *keys[]={"workspaces","extra_directories"};
+    for(size_t k=0;ok && k<2;++k){yyjson_mut_val *a=yyjson_mut_obj_get(root,keys[k]);for(size_t i=0;i<yyjson_mut_arr_size(a);++i){
+        yyjson_mut_val *v=yyjson_mut_arr_get(a,i);const char *old=yyjson_mut_get_str(yyjson_mut_obj_get(v,"path"));next=old?remap(old,from,to):NULL;
+        if(!next){ok=false;break;}changed=changed || strcmp(old,next)!=0;yyjson_mut_obj_remove_key(v,"path");yyjson_mut_obj_add_strcpy(doc,v,"path",next);free(next);
+    }}
+    yyjson_mut_val *a=yyjson_mut_obj_get(yyjson_mut_obj_get(yyjson_mut_obj_get(root,"policy"),"execution"),"runtime_files");
+    for(size_t i=0;ok && i<yyjson_mut_arr_size(a);++i){const char *old=yyjson_mut_get_str(yyjson_mut_arr_get(a,i));next=old?remap(old,from,to):NULL;
+        if(!next){ok=false;break;}changed=changed || strcmp(old,next)!=0;yyjson_mut_arr_replace(a,i,yyjson_mut_strcpy(doc,next));free(next);
+    }
+    if(changed){uint64_t rev=yyjson_mut_get_uint(yyjson_mut_obj_get(root,"policy_revision"));if(rev==UINT64_MAX)ok=false;
+        else {yyjson_mut_obj_remove_key(root,"policy_revision");yyjson_mut_obj_add_uint(doc,root,"policy_revision",rev+1);}}
+    char *out=ok?yyjson_mut_write(doc,0,NULL):NULL;yyjson_mut_doc_free(doc);if(!out)sb_fail(error,"无法更新便携项目路径，旧配置保持完整。");return out;
 }
 static char *draft_definition(sb_desktop_draft *draft,const char *old_directory,uint64_t revision,sb_error *error) {
     yyjson_doc *source=yyjson_read(draft->definition,strlen(draft->definition),0);yyjson_mut_doc *doc=source ? yyjson_doc_mut_copy(source,NULL) : NULL;yyjson_doc_free(source);
@@ -237,7 +255,7 @@ done:
 }
 bool sb_desktop_save(sb_desktop_app *app,const char *original_id,sb_desktop_draft *draft,sb_error *error) {
     if (InterlockedCompareExchange(&app->busy,1,0)) { sb_fail(error,"其他项目设置正在保存。");return false; }
-    bool ok=false,was_running=false,was_alive=runtime_alive(app),catalog_written=false,unconfirmed=false;size_t index=app->count;
+    bool ok=false,was_running=false,was_alive=runtime_alive(app),catalog_written=false,unconfirmed=false,policy_changed=true;size_t index=app->count;
     char *definition=NULL,*next=NULL,*old_catalog=NULL,*next_catalog=NULL,*sealed=NULL,*plain=NULL,*file_path=NULL,*saved_file=NULL;
     sb_desktop_draft replacement={0};sb_project_registry *registry=calloc(1,sizeof(*registry));
     if(WaitForSingleObject(app->stop,0)==WAIT_OBJECT_0){sb_fail(error,"正在退出，未保存新的项目设置。");goto done;}
@@ -246,18 +264,24 @@ bool sb_desktop_save(sb_desktop_app *app,const char *original_id,sb_desktop_draf
         !sb_project_path_valid(draft->directory) || draft->directory[1]!=':' || (index==app->count && app->count>=SB_MAX_PROJECTS)) {
         sb_fail(error,"请填写项目名称、有效的英数标识及本地绝对存储路径。已有项目标识保持固定。");goto done;
     }
+    if(!sb_platform_storage_path(draft->directory,error))goto done;
     size_t directory_length=strlen(draft->directory);
     while(directory_length>3 && (draft->directory[directory_length-1]=='/' || draft->directory[directory_length-1]=='\\'))draft->directory[--directory_length]=0;
     for(char *c=draft->directory;*c;++c)if(*c=='/')*c='\\';
     for (size_t i=0;i<app->count;++i) if(i!=index && !strcmp(draft->id,app->projects[i].value.id)) {sb_fail(error,"项目标识已存在，请为新项目填写不同的地址标识。");goto done;}
     uint64_t revision=1;yyjson_doc *prior=index<app->count ? yyjson_read(app->projects[index].value.definition,strlen(app->projects[index].value.definition),0) : NULL;
-    if (prior) revision=yyjson_get_uint(yyjson_obj_get(yyjson_doc_get_root(prior),"policy_revision"))+1;
-    yyjson_doc_free(prior);if (!revision) { sb_fail(error,"项目策略版本已耗尽。");goto done; }
     const char *previous=index<app->count ? app->projects[index].value.directory : NULL;
-    definition=draft_definition(draft,previous,revision,error);if (!definition) goto done;free(draft->definition);draft->definition=definition;definition=NULL;
+    if(prior)revision=yyjson_get_uint(yyjson_obj_get(yyjson_doc_get_root(prior),"policy_revision"));
+    definition=draft_definition(draft,previous,revision,error);
+    yyjson_doc *proposed=definition?yyjson_read(definition,strlen(definition),0):NULL;
+    if(prior&&proposed)policy_changed=!yyjson_equals(yyjson_doc_get_root(prior),yyjson_doc_get_root(proposed))||strcmp(draft->token,app->projects[index].value.token)!=0;
+    yyjson_doc_free(prior);yyjson_doc_free(proposed);if(!definition)goto done;
+    if(index<app->count&&policy_changed){if(revision==UINT64_MAX){sb_fail(error,"项目策略版本已耗尽。");goto done;}free(definition);definition=draft_definition(draft,previous,++revision,error);if(!definition)goto done;}
+    free(draft->definition);draft->definition=definition;definition=NULL;
+    if(index<app->count&&!policy_changed&&!strcmp(draft->name,app->projects[index].value.name)&&draft->automatic==app->projects[index].value.automatic&&!_stricmp(draft->directory,previous)){ok=true;goto done;}
     next=configuration(app,draft,index);
     if (!registry || !next || !sb_projects_parse(registry,next,strlen(next),error) || !project_boundaries(app,draft,registry,index,error)) goto done;
-    if (was_alive && index<app->count) {
+    if (was_alive && index<app->count && policy_changed) {
         char *state=manager_command(app,"project-status",original_id,NULL,error);yyjson_doc *doc=state ? yyjson_read(state,strlen(state),0) : NULL;
         was_running=!strcmp(str(yyjson_obj_get(yyjson_doc_get_root(doc),"project"),"state"),"running");yyjson_doc_free(doc);free(state);
         char *stopped=manager_command(app,"project-stop",original_id,NULL,error);if (!stopped) goto done;free(stopped);
@@ -283,7 +307,7 @@ bool sb_desktop_save(sb_desktop_app *app,const char *original_id,sb_desktop_draf
     old_catalog=catalog(app,NULL,NULL,0);next_catalog=catalog(app,draft,file,index);
     if (!old_catalog || !next_catalog || !sb_desktop_private_write(app->index,next_catalog,strlen(next_catalog),true,error)) goto done;catalog_written=true;
     if (_putenv_s(draft->token_env,draft->token)) { sb_fail(error,"无法准备内部项目凭据。");goto done; }
-    if (was_alive) {
+    if (was_alive && policy_changed) {
         char *applied=manager_command(app,"configuration-apply",NULL,next,error);
         if (!applied) {
             sb_error verification={0};char *actual=manager_command(app,"configuration-snapshot",NULL,NULL,&verification);
@@ -307,6 +331,58 @@ done:
     if (plain) { SecureZeroMemory(plain,strlen(plain));free(plain); }free(sealed);free(file_path);free(definition);free(next);free(old_catalog);free(next_catalog);free(saved_file);sb_desktop_draft_free(&replacement);sb_projects_free(registry);free(registry);
     InterlockedExchange(&app->busy,0);return ok;
 }
+static bool read_catalog(sb_desktop_app *app,bool *rebased,sb_error *error) {
+    *rebased=false;if(!exists(app->index))return true;
+    size_t length=0;char *bytes=sb_platform_load_config(app->index,&length,error);yyjson_doc *doc=bytes?yyjson_read(bytes,length,0):NULL;
+    yyjson_val *root=yyjson_doc_get_root(doc),*projects=yyjson_obj_get(root,"projects");uint64_t version=yyjson_get_uint(yyjson_obj_get(root,"format_version"));const char *prior=version==2?str(root,"storage_root"):NULL;
+    bool valid=doc && (version==1 || version==2) && yyjson_obj_size(root)==(version==2?5u:4u) && (version!=2 || sb_project_path_valid(prior)) &&
+        yyjson_is_arr(projects) && yyjson_arr_size(projects)<=SB_MAX_PROJECTS && yyjson_is_uint(yyjson_obj_get(root,"port")) &&
+        yyjson_get_uint(yyjson_obj_get(root,"port"))>=1024 && yyjson_get_uint(yyjson_obj_get(root,"port"))<=65535 && strlen(str(root,"public_url"))<sizeof(app->origin);
+    *rebased=valid && prior && _stricmp(prior,app->base)!=0;
+    if(valid){app->port=(unsigned)yyjson_get_uint(yyjson_obj_get(root,"port"));strcpy(app->origin,str(root,"public_url"));
+        for(size_t i=0;i<yyjson_arr_size(projects) && valid;++i)valid=load_project(app,yyjson_arr_get(projects,i),*rebased?prior:NULL,error);}
+    yyjson_doc_free(doc);free(bytes);if(!valid && !*error->text)sb_fail(error,"应用索引无效，原配置保留；请核对数据目录和备份。");return valid;
+}
+static bool publish_rebased(sb_desktop_app *app,sb_error *error) {
+    /* New encrypted versions first, then one atomic index publication. Existing
+       versions remain recoverable if any step before publication fails. */
+    for(size_t i=0;i<app->count;++i){saved_project *p=&app->projects[i];yyjson_mut_doc *doc=yyjson_mut_doc_new(NULL);if(!doc)return false;
+        yyjson_mut_val *root=yyjson_mut_obj(doc);yyjson_mut_doc_set_root(doc,root);yyjson_mut_obj_add_uint(doc,root,"format_version",1);
+        yyjson_mut_obj_add_str(doc,root,"name",p->value.name);yyjson_mut_obj_add_bool(doc,root,"automatic",p->value.automatic);yyjson_mut_obj_add_str(doc,root,"token",p->value.token);yyjson_mut_obj_add_val(doc,root,"definition",project_value(doc,&p->value));
+        char *plain=yyjson_mut_write(doc,0,NULL);yyjson_mut_doc_free(doc);char *sealed=plain?sb_desktop_seal(plain,error):NULL;
+        if(plain){SecureZeroMemory(plain,strlen(plain));free(plain);}char random[65],file[48],leaf[64];bool ok=sealed && nonce(random,error);
+        snprintf(file,sizeof(file),"project-%.32s",ok?random:"");snprintf(leaf,sizeof(leaf),"%s.sbproj",file);char *path=sb_desktop_join(p->value.directory,leaf);
+        ok=ok && path && sb_desktop_private_write(path,sealed,strlen(sealed),false,error);free(path);free(sealed);if(!ok)return false;
+        char *saved=sb_strdup(file);if(!saved)return false;free(p->file);p->file=saved;
+    }
+    char *json=catalog(app,NULL,NULL,0);bool ok=json && sb_desktop_private_write(app->index,json,strlen(json),true,error);free(json);return ok;
+}
+bool sb_desktop_relocate(sb_desktop_app *app,const char *directory,sb_error *error) {
+    if(InterlockedCompareExchange(&app->busy,1,0)){sb_fail(error,"其他设置正在保存，请稍后重试。");return false;}
+    bool ok=false,stopped=false;sb_desktop_app view={0};char *target=sb_desktop_absolute(directory);directory=target;
+    if(!directory)goto done;
+    if(!app->locator){sb_fail(error,"程序目录不可写，无法保存迁移位置。请先将程序移到可写的非 C 盘目录。");goto done;}
+    if(!sb_platform_storage_path(app->locator,error) || !sb_platform_storage_path(directory,error))goto done;
+    if(sb_desktop_overlap(directory,app->base)){sb_fail(error,"新旧数据目录不能相同或互相包含，请选择独立空目录。");goto done;}
+    for(size_t i=0;i<app->count;++i)if(!sb_desktop_overlap(app->projects[i].value.directory,app->base) && sb_desktop_overlap(directory,app->projects[i].value.directory)){
+        sb_fail(error,"应用数据目录不能与另行指定的项目存储目录重叠。");goto done;}
+    if(!stop_runtime(app,error))goto done;stopped=true;sb_platform_lease_close(app->lease);app->lease=NULL;
+    if(!sb_desktop_copy_tree(app->base,directory,app->stop,error))goto done;
+    view.port=app->port;strcpy(view.origin,app->origin);view.base=sb_strdup(directory);view.directory=sb_desktop_join(directory,"Desktop");view.manager_data=view.directory?sb_desktop_join(view.directory,"Manager"):NULL;view.index=view.directory?sb_desktop_join(view.directory,"catalog.json"):NULL;
+    bool rebased=false;if(!view.base || !view.directory || !view.manager_data || !view.index || !read_catalog(&view,&rebased,error))goto done;
+    char *definition=configuration(&view,NULL,0);sb_project_registry *registry=calloc(1,sizeof(*registry));
+    bool valid=definition && registry && sb_projects_parse(registry,definition,strlen(definition),error);
+    for(size_t i=0;valid && i<view.count;++i)valid=project_boundaries(&view,&view.projects[i].value,registry,i,error);
+    free(definition);sb_projects_free(registry);free(registry);if(!valid)goto done;
+    if(!publish_rebased(&view,error) || WaitForSingleObject(app->stop,0)==WAIT_OBJECT_0 || !sb_desktop_publish_storage(app->locator,directory,error))goto done;
+    ok=true;
+done:
+    for(size_t i=0;i<SB_MAX_PROJECTS;++i){sb_desktop_draft_free(&view.projects[i].value);free(view.projects[i].file);}
+    free(view.base);free(view.directory);free(view.manager_data);free(view.index);
+    if(!ok && stopped){sb_error restore={0};app->lease=sb_platform_lease(app->directory,&restore);if(app->lease && WaitForSingleObject(app->stop,0)!=WAIT_OBJECT_0)start_runtime(app,&app->runtime_error);}
+    if(!ok && !*error->text)sb_fail(error,"数据迁移未完成，旧位置和配置保留，未切换数据目录。");
+    free(target);InterlockedExchange(&app->busy,0);return ok;
+}
 bool sb_desktop_connection(sb_desktop_app *app,unsigned port,const char *origin,sb_error *error) {
     if (port<1024 || port>65535 || strlen(origin)>=sizeof(app->origin)) { sb_fail(error,"端口须为 1024～65535；公共地址请填写域名或 HTTP(S) 来源地址。");return false; }
     sb_config config;sb_config_defaults(&config);bool valid=!*origin || sb_config_public_url(&config,origin,error);sb_config_free(&config);if (!valid) return false;
@@ -320,6 +396,7 @@ bool sb_desktop_connection(sb_desktop_app *app,unsigned port,const char *origin,
 unsigned sb_desktop_port(sb_desktop_app *app) {return app->port;}
 const char *sb_desktop_origin(sb_desktop_app *app) {return app->origin;}
 const char *sb_desktop_data(sb_desktop_app *app) {return app->manager_data;}
+const char *sb_desktop_storage(sb_desktop_app *app) {return app->base;}
 const char *sb_desktop_owner_token(sb_desktop_app *app) {return app->owner;}
 HANDLE sb_desktop_stop(sb_desktop_app *app) {return app->stop;}
 void sb_desktop_request_exit(sb_desktop_app *app) {SetEvent(app->stop);SetEvent(app->manager_stop);}
@@ -330,7 +407,7 @@ static void close_app(sb_desktop_app *app) {
     for (size_t i=0;i<SB_MAX_PROJECTS;++i) { if (*app->projects[i].value.token_env) _putenv_s(app->projects[i].value.token_env,"");sb_desktop_draft_free(&app->projects[i].value);free(app->projects[i].file); }
     _putenv_s("SHELLBOT_DESKTOP_OWNER","");SecureZeroMemory(app->owner,sizeof(app->owner));
     if (app->stop) CloseHandle(app->stop);if (app->manager_stop) CloseHandle(app->manager_stop);if (app->ready) CloseHandle(app->ready);
-    sb_platform_lease_close(app->lease);if (app->mutex) CloseHandle(app->mutex);free(app->directory);free(app->manager_data);free(app->index);free(app->configuration);free(app);
+    sb_platform_lease_close(app->lease);if (app->mutex) CloseHandle(app->mutex);free(app->base);free(app->locator);free(app->directory);free(app->manager_data);free(app->index);free(app->configuration);free(app);
 }
 static BOOL CALLBACK activate_instance(HWND window,LPARAM parameter) {
     const wchar_t *key=(const wchar_t *)parameter;
@@ -341,9 +418,10 @@ int sb_desktop_main(const char *directory) {
     if (!app) return 2;
     HANDLE token=NULL;bool allowed=OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&token) && sb_win_owner_token_allowed(token);if (token) CloseHandle(token);
     if (!allowed) { sb_fail(&error,"管理界面需要交互式 Windows 所有者账户。");goto done; }
-    char *base=directory ? sb_strdup(directory) : sb_platform_default_data_dir(&error);
-    app->directory=base ? sb_desktop_join(base,"Desktop") : NULL;free(base);if (!app->directory) goto done;
+    app->base=sb_desktop_resolve_storage(directory,&app->locator,&error);
+    app->directory=app->base ? sb_desktop_join(app->base,"Desktop") : NULL;if (!app->directory) goto done;
     if (!sb_desktop_make_directory(app->directory,false,&error)) goto done;
+    if (!sb_platform_prepare_runtime(app->base,&error)) goto done;
     char hash[65],identity[50];sb_root *directory_root=sb_platform_root(app->directory,&error);
     bool identified=directory_root && sb_platform_root_identity(directory_root,identity,&error);sb_platform_root_close(directory_root);
     if (!identified || !sb_platform_sha256(identity,strlen(identity),hash,&error)) goto done;
@@ -355,19 +433,14 @@ int sb_desktop_main(const char *directory) {
     app->manager_data=sb_desktop_join(app->directory,"Manager");app->index=sb_desktop_join(app->directory,"catalog.json");app->port=8765;
     app->stop=CreateEventW(NULL,TRUE,FALSE,NULL);app->manager_stop=CreateEventW(NULL,TRUE,FALSE,NULL);app->ready=CreateEventW(NULL,TRUE,FALSE,NULL);
     if (!app->manager_data || !app->index || !app->stop || !app->manager_stop || !app->ready) goto done;
-    if (exists(app->index)) {
-        size_t length=0;char *bytes=sb_platform_load_config(app->index,&length,&error);yyjson_doc *doc=bytes ? yyjson_read(bytes,length,0) : NULL;yyjson_val *root=yyjson_doc_get_root(doc),*projects=yyjson_obj_get(root,"projects");
-        bool valid=doc && yyjson_get_uint(yyjson_obj_get(root,"format_version"))==1 && yyjson_obj_size(root)==4 && yyjson_is_arr(projects) && yyjson_arr_size(projects)<=SB_MAX_PROJECTS &&
-            yyjson_is_uint(yyjson_obj_get(root,"port")) && yyjson_get_uint(yyjson_obj_get(root,"port"))>=1024 && yyjson_get_uint(yyjson_obj_get(root,"port"))<=65535 && strlen(str(root,"public_url"))<sizeof(app->origin);
-        if (valid) { app->port=(unsigned)yyjson_get_uint(yyjson_obj_get(root,"port"));strcpy(app->origin,str(root,"public_url"));for (size_t i=0;i<yyjson_arr_size(projects) && valid;++i) valid=load_project(app,yyjson_arr_get(projects,i),&error); }
-        yyjson_doc_free(doc);free(bytes);if (!valid) goto done;
-    }
+    bool rebased=false;if(!read_catalog(app,&rebased,&error))goto done;
     char *owner_path=sb_desktop_join(app->directory,"owner.sbkey"),*owner=owner_path && exists(owner_path) ? sb_desktop_unseal(owner_path,&error) : NULL;
     if (owner_path && !exists(owner_path)) { if (!nonce(app->owner,&error)) { free(owner_path);goto done; }char *sealed=sb_desktop_seal(app->owner,&error);bool saved=sealed && sb_desktop_private_write(owner_path,sealed,strlen(sealed),false,&error);free(sealed);if (!saved) { free(owner_path);goto done; } }
     else if (owner && strlen(owner)==64 && strspn(owner,"0123456789abcdef")==64) strcpy(app->owner,owner);
     if (owner) { SecureZeroMemory(owner,strlen(owner));free(owner); }free(owner_path);if (!*app->owner) goto done;
     app->configuration=configuration(app,NULL,0);sb_project_registry *registry=calloc(1,sizeof(*registry));
     bool valid=registry && app->configuration && sb_projects_parse(registry,app->configuration,strlen(app->configuration),&error);sb_projects_free(registry);free(registry);if (!valid) goto done;
+    if(rebased && !publish_rebased(app,&error))goto done;
     start_runtime(app,&app->runtime_error);FreeConsole();code=sb_manager_desktop_ui(app);
 done:
     if (code) { wchar_t *message=sb_desktop_wide(*error.text ? error.text : "无法打开项目管理；原配置保持完整。");MessageBoxW(NULL,message,L"ShellBot",MB_OK|MB_ICONERROR);free(message); }

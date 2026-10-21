@@ -188,12 +188,17 @@
     <ClInclude Include="platform\desktop.h" />
     <ClCompile Include="platform\manager_ui.c" />
     <ClCompile Include="platform\desktop_app.c" />
+    <ClCompile Include="platform\oauth.c" />
+    <ClCompile Include="platform\oauth_ui.c" />
+    <ClInclude Include="platform\oauth.h" />
     <ClCompile Include="platform\desktop_dialog.c" />
     <ClCompile Include="platform\desktop_store.c" />
+    <ClCompile Include="platform\portable.c" />
     <ClInclude Include="platform\desktop_app.h" />
     <ClCompile Include="platform\project_settings.c" />
     <ClInclude Include="platform\project_settings.h" />
     <ClInclude Include="platform\manager_ui.h" />
+    <ClInclude Include="platform\native_ui.h" />
     <ClCompile Include="platform\execution.c" />
     <ClCompile Include="platform\shared_admin.c" />
     <ClInclude Include="platform\shared_admin.h" />

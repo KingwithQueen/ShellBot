@@ -182,6 +182,7 @@ static int run(int argc, char **argv) {
     }
     if (!host.config.data_dir) host.config.data_dir = sb_platform_default_data_dir(&error);
     if (!host.config.data_dir) goto failed;
+    if (!sb_platform_prepare_runtime(host.config.data_dir,&error)) goto failed;
     if (owner_command) {
         int result = sb_owner_command(host.config.data_dir, owner_command, approval_id, &error);
         if (result && *error.text) fprintf(stderr, "ShellBot: %s\n", error.text);

@@ -8,6 +8,7 @@
 #include "project_settings.h"
 #include "sandbox.h"
 #include "desktop.h"
+#include "oauth.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -68,6 +69,7 @@ typedef struct {
     size_t owner_token_length;
     const char *configuration;
     char *live_configuration;
+    sb_oauth *oauth;
 } manager;
 static char *apply_configuration(manager *m,yyjson_val *configuration);
 
@@ -271,31 +273,10 @@ static void refresh(manager *m, worker *w) {
         sb_audit_project(m->audit, "project_failed", w->project->id, w->project->policy_revision, w->pid);
     }
 }
-static wchar_t *environment(const sb_project_registry *registry) {
-    static const wchar_t *names[] = {L"ALLUSERSPROFILE",L"APPDATA",L"COMPUTERNAME",L"ComSpec",L"HOMEDRIVE",L"HOMEPATH",L"LOCALAPPDATA",L"PATH",L"PATHEXT",L"ProgramData",L"ProgramFiles",L"ProgramFiles(x86)",L"SystemDrive",L"SystemRoot",L"TEMP",L"TMP",L"USERDOMAIN",L"USERNAME",L"USERPROFILE",L"windir"};
-    wchar_t *block = calloc(32768, sizeof(wchar_t)); size_t used = 0;
-    if (!block) return NULL;
-    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
-        bool excluded = false;
-        wchar_t *owner=wide(registry->owner_token_env);
-        if (owner && !_wcsicmp(owner,names[i])) excluded=true;
-        free(owner);
-        for (size_t j = 0; j < registry->project_count; ++j) {
-            wchar_t *key = wide(registry->projects[j].token_env);
-            if (!key) { free(block); return NULL; }
-            if (!_wcsicmp(key, names[i])) excluded = true;
-            free(key);
-        }
-        if (excluded) continue;
-        DWORD n = GetEnvironmentVariableW(names[i], NULL, 0); if (!n) continue;
-        size_t key_length = wcslen(names[i]);
-        if (n + key_length + 2 >= 32768 - used) { free(block); return NULL; }
-        memcpy(block + used, names[i], key_length * sizeof(wchar_t)); used += key_length; block[used++] = L'=';
-        DWORD got = GetEnvironmentVariableW(names[i], block + used, n);
-        if (!got || got >= n) { free(block); return NULL; }
-        used += got + 1;
-    }
-    return block;
+static wchar_t *environment(const sb_project_registry *registry,const char *directory,sb_error *error) {
+    const char *excluded[SB_MAX_PROJECTS+1];size_t count=0;if(*registry->owner_token_env)excluded[count++]=registry->owner_token_env;
+    for(size_t i=0;i<registry->project_count;++i)excluded[count++]=registry->projects[i].token_env;
+    return sb_platform_child_environment(directory,excluded,count,error);
 }
 static bool start_worker(manager *m, worker *w, sb_error *error) {
     refresh(m, w);
@@ -326,7 +307,7 @@ static bool start_worker(manager *m, worker *w, sb_error *error) {
     InitializeProcThreadAttributeList(NULL, 1, 0, &attr_size);
     startup.lpAttributeList = attr_size ? malloc(attr_size) : NULL;
     bool initialized = startup.lpAttributeList && InitializeProcThreadAttributeList(startup.lpAttributeList, 1, 0, &attr_size);
-    wchar_t *env = ok ? environment(&m->registry) : NULL;
+    wchar_t *env = ok ? environment(&m->registry,w->project->data_dir,error) : NULL;
     if (ok && initialized && env) {
         if(m->ordinary_token)swprintf(line,SB_PATH_CAP,L"\"%ls\" --project-worker \"%ls\" %lu",exe,name,GetCurrentProcessId());
         else {
@@ -528,6 +509,11 @@ invalid_owner:
 invalid:
     sb_fail(error, "Every enabled project requires a 32..256 byte visible-ASCII bearer in its token_env; gateway startup blocked."); return false;
 }
+static sb_oauth_project oauth_project(worker *w) {
+    sb_oauth_project result={.id=w->project->id,.revision=w->project->policy_revision,.enabled=w->project->enabled};sb_error error={0};
+    if(!w->token_length||!sb_platform_sha256(w->token,w->token_length,result.binding,&error))result.enabled=false;
+    return result;
+}
 static void *gateway_open_unlocked(void *context, const char *path, const char *authorization, bool *health, int *http_status) {
     manager *m = context; worker *w = NULL;
     const char *suffix = !strcmp(path, "/mcp") ? "mcp" : !strcmp(path, "/healthz") ? "healthz" : NULL;
@@ -545,9 +531,15 @@ static void *gateway_open_unlocked(void *context, const char *path, const char *
     }
     if (!w) { *http_status = 404; return NULL; }
     if (!w->project->enabled) { *http_status = 503; return NULL; }
-    if (!token_matches(w, authorization)) { *http_status = 401; return NULL; }
+    sb_oauth_project oauth_binding=oauth_project(w);
+    if (!token_matches(w, authorization) && !sb_oauth_authorized(m->oauth,&oauth_binding,authorization)) { *http_status = 401; return NULL; }
     if (WaitForSingleObject(m->stop, 0) == WAIT_OBJECT_0) { *http_status = 503; return NULL; }
-    if (!TryEnterCriticalSection(&w->lock)) { *http_status = 429; return NULL; }
+    uint64_t wait_end=sb_platform_millis()+1000;
+    while(!TryEnterCriticalSection(&w->lock)){
+        if(WaitForSingleObject(m->stop,0)==WAIT_OBJECT_0){*http_status=503;return NULL;}
+        if(sb_platform_millis()>=wait_end){*http_status=429;return NULL;}
+        Sleep(2);
+    }
     refresh(m, w);
     if (!w->process) { LeaveCriticalSection(&w->lock); *http_status = 503; return NULL; }
     *health = !strcmp(suffix, "healthz"); *http_status = 200; return w;
@@ -560,6 +552,14 @@ static void *gateway_open(void *context,const char *path,const char *authorizati
 static void gateway_close(void *context, void *binding) {
     LeaveCriticalSection(&((worker *)binding)->lock); ReleaseSRWLockShared(&((manager *)context)->registry_lock);
 }
+static size_t oauth_projects(manager *m,sb_oauth_project projects[SB_MAX_PROJECTS]) {
+    for(size_t i=0;i<m->registry.project_count;++i)projects[i]=oauth_project(&m->workers[i]);return m->registry.project_count;
+}
+static bool oauth_http(void *context,const sb_http_request *request,sb_http_response *response) {
+    manager *m=context;sb_oauth_project projects[SB_MAX_PROJECTS];AcquireSRWLockShared(&m->registry_lock);
+    bool ok=sb_oauth_http(m->oauth,projects,oauth_projects(m,projects),request,response);ReleaseSRWLockShared(&m->registry_lock);return ok;
+}
+static char *oauth_challenge(void *context,const char *path){return sb_oauth_challenge(((manager *)context)->oauth,path);}
 static bool owner_enabled(void *context) { return ((manager *)context)->owner_token_length!=0; }
 static bool owner_authorized(void *context, const char *authorization) {
     manager *m=context;
@@ -725,11 +725,13 @@ static char *manager_request_unlocked(void *context, const char *request, size_t
     manager *m = context;
     yyjson_doc *input = yyjson_read(request, length, 0);
     yyjson_val *root = yyjson_doc_get_root(input);
-    static const char *const keys[] = {"command", "id", "request"};
+    static const char *const keys[] = {"command", "id", "request", "persistent"};
     const char *command = sb_string(yyjson_obj_get(root, "command")), *id = sb_string(yyjson_obj_get(root, "id"));
     yyjson_val *payload = yyjson_obj_get(root, "request");
     char *json = NULL;
-    if (!sb_config_keys(root, keys, 3) || !command || (yyjson_obj_get(root, "id") && !sb_identifier(id)) ||
+    bool oauth_id=command && !strncmp(command,"oauth-",6) && id && strlen(id)==64 && strspn(id,"0123456789abcdef")==64;
+    yyjson_val *persistent=yyjson_obj_get(root,"persistent");
+    if (!sb_config_keys(root, keys, 4) || !command || (persistent&&(!yyjson_is_bool(persistent)||strcmp(command,"oauth-approve"))) || (yyjson_obj_get(root, "id") && !sb_identifier(id) && !oauth_id) ||
         (payload && !yyjson_is_obj(payload))) { json = error_json("Invalid manager request."); goto done; }
     if (!strcmp(command, "manager-stop") && !id && !payload) {
         json = sb_strdup("{\"status\":\"stopping\"}"); goto done;
@@ -741,6 +743,7 @@ static char *manager_request_unlocked(void *context, const char *request, size_t
         goto done;
     }
     if (WaitForSingleObject(m->stop, 0) == WAIT_OBJECT_0) { json = error_json("Manager is stopping."); goto done; }
+    if(!strncmp(command,"oauth-",6) && !payload){if(strcmp(command,"oauth-status")&&!sb_audit_operation(m->audit,"oauth_owner_intent","interactive-owner","manager","oauth",command,id)){json=error_json("Manager audit unavailable; OAuth decision blocked.");goto done;}sb_oauth_project projects[SB_MAX_PROJECTS];json=sb_oauth_owner(m->oauth,projects,oauth_projects(m,projects),root);goto done;}
     if (m->service_mode && (!strcmp(command,"administrator-start") || !strncmp(command,"project-administrator-",22) ||
         !strncmp(command,"desktop-",8))) { json=error_json("Service mode does not expose interactive desktop or administrator authorization.");goto done; }
     if ((!strcmp(command,"desktop-status") || !strcmp(command,"desktop-pause") || !strcmp(command,"desktop-resume")) && !id && !payload) {
@@ -792,6 +795,7 @@ static char *manager_request_unlocked(void *context, const char *request, size_t
         yyjson_mut_obj_add_bool(doc,result,"console_attached",GetConsoleWindow()!=NULL);
         yyjson_mut_obj_add_uint(doc, result, "owner_workers", 4);
         yyjson_mut_obj_add_bool(doc, result, "http_gateway", m->gateway != NULL);
+        sb_oauth_summary(m->oauth,doc,result);
         yyjson_mut_obj_add_uint(doc, result, "http_workers", m->gateway ? 4 : 0);
         yyjson_mut_obj_add_uint(doc, result, "http_connection_queue", m->gateway ? 4 : 0);
         if(!strcmp(command,"management-status")) {
@@ -1072,7 +1076,8 @@ static int run_manager(const char *source, const char *data, bool http,const cha
         if (!gateway_credentials(m, &error)) goto done;
         sb_config_defaults(&m->gateway_config); m->gateway_config.port = m->registry.port;
         if (*m->registry.public_origin && !sb_config_public_url(&m->gateway_config, m->registry.public_origin, &error)) goto done;
-        const sb_http_routes routes = {gateway_open, gateway_call, gateway_close, owner_enabled, owner_authorized, owner_call};
+        if(desktop_mode){m->oauth=sb_oauth_new(data,m->gateway_config.public_origin,&error);if(!m->oauth)goto done;}
+        const sb_http_routes routes = {.open=gateway_open,.call=gateway_call,.close=gateway_close,.owner_enabled=owner_enabled,.owner_authorized=owner_authorized,.owner_call=owner_call,.auxiliary=desktop_mode?oauth_http:NULL,.challenge=desktop_mode?oauth_challenge:NULL};
         m->gateway = sb_http_start(&m->gateway_config, &routes, m, &error); if (!m->gateway) goto done;
     }
     m->owner = sb_owner_start_handler(data, manager_request, m, &error); if (!m->owner) goto done;
@@ -1118,6 +1123,7 @@ done:
         }
         sb_http_stop(m->gateway);
         sb_owner_stop(m->owner);
+        sb_oauth_free(m->oauth);
         for (size_t i = 0; i < m->initialized; ++i) {
             if (m->workers[i].process)
                 sb_audit_project(m->audit, "project_stopped", m->workers[i].project->id, m->workers[i].project->policy_revision, m->workers[i].pid);
@@ -1282,7 +1288,7 @@ int sb_manager_desktop_startup(const char *configuration,const char *data,const 
 }
 bool sb_manager_option(const char *option) {
     static const char *const names[] = {"--manager", "--manager-stop", "--project-create", "--project-configure", "--project-remove", "--project-settings", "--project-start",
-        "--project-stop", "--project-pause", "--project-resume", "--project-status", "--management-status", "--manage", "--project-request", "--project-owner", "--project-links", "--administrator-start", "--administrator-stop", "--administrator-status",
+        "--project-stop", "--project-pause", "--project-resume", "--project-status", "--management-status", "--manage", "--project-request", "--project-owner", "--project-links", "--administrator-start", "--administrator-stop", "--administrator-status", "--oauth-status", "--oauth-approve", "--oauth-deny", "--oauth-revoke", "--oauth-remove-client",
         "--project-administrator-allow", "--project-administrator-revoke", "--project-administrator-owner", "--project-administrator-boundary-probe",
         "--desktop-status", "--desktop-pause", "--desktop-resume"};
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) if (!strcmp(option, names[i])) return true;
@@ -1295,12 +1301,13 @@ int sb_manager_cli(int argc, char **argv) {
     bool payload = !strcmp(mode, "--project-request") || !strcmp(mode, "--project-owner") || !strcmp(mode,"--project-administrator-owner");
     bool global=!strcmp(mode,"--administrator-start") || !strcmp(mode,"--administrator-stop") || !strcmp(mode,"--administrator-status") ||
         !strcmp(mode,"--management-status") || !strcmp(mode,"--manage") || !strcmp(mode,"--project-settings") ||
-        !strcmp(mode,"--desktop-status") || !strcmp(mode,"--desktop-pause") || !strcmp(mode,"--desktop-resume");
+        !strcmp(mode,"--desktop-status") || !strcmp(mode,"--desktop-pause") || !strcmp(mode,"--desktop-resume") || !strcmp(mode,"--oauth-status");
     bool http = false;
     int index = 2;
     if (strcmp(mode, "--manager") && strcmp(mode, "--manager-stop") && !global) {
         if (index < argc && strncmp(argv[index], "--", 2)) id = argv[index++];
-        if ((!id && strcmp(mode, "--project-status")) || (id && !sb_identifier(id))) goto invalid;
+        bool oauth_id=!strncmp(mode,"--oauth-",8) && id && strlen(id)==64 && strspn(id,"0123456789abcdef")==64;
+        if ((!id && strcmp(mode, "--project-status")) || (id && !sb_identifier(id) && !oauth_id)) goto invalid;
     }
     for (; index < argc; ++index) {
         if (!strcmp(argv[index], "--http") && !strcmp(mode, "--manager") && !http) { http = true; continue; }

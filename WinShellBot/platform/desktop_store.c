@@ -37,19 +37,21 @@ static PSECURITY_DESCRIPTOR descriptor(void) {
     }
     if (token) CloseHandle(token);if (sid) LocalFree(sid);free(user);return out;
 }
-bool sb_desktop_private_write(const char *path,const char *bytes,size_t length,bool replace,sb_error *error) {
+static bool private_write(const char *path,const char *bytes,size_t length,bool replace,bool retain,size_t maximum,sb_error *error) {
     unsigned char nonce[16];char suffix[48]=".pending-";
-    if (!sb_project_path_valid(path) || !bytes || length>SB_TEXT_LIMIT || !sb_platform_random(nonce,sizeof(nonce),error)) return false;
+    if (!sb_project_path_valid(path) || !sb_platform_storage_path(path,error) || !bytes || length>maximum || !sb_platform_random(nonce,sizeof(nonce),error)) return false;
     for (size_t i=0;i<16;++i) snprintf(suffix+9+i*2,3,"%02x",nonce[i]);
     if (replace) {
         wchar_t *existing=sb_desktop_wide(path);DWORD flags=existing ? GetFileAttributesW(existing) : INVALID_FILE_ATTRIBUTES;free(existing);
         if (flags!=INVALID_FILE_ATTRIBUTES) {
             if (flags&(FILE_ATTRIBUTE_REPARSE_POINT|FILE_ATTRIBUTE_DIRECTORY)) {sb_fail(error,"配置文件被替换为目录或链接，已拒绝覆盖。");return false;}
+            if(retain){
             size_t original_size=0;char *original=sb_platform_load_config(path,&original_size,error);
             size_t capacity=strlen(path)+sizeof(suffix)+9;char *backup=malloc(capacity);
             if (backup) snprintf(backup,capacity,"%s.backup%s",path,suffix);
             bool retained=original && backup && sb_desktop_private_write(backup,original,original_size,false,error);free(original);free(backup);
             if (!retained) return false;
+            }
         }
     }
     size_t size=strlen(path)+sizeof(suffix);char *temporary=malloc(size);if (temporary) snprintf(temporary,size,"%s%s",path,suffix);
@@ -63,6 +65,8 @@ bool sb_desktop_private_write(const char *path,const char *bytes,size_t length,b
     if (!ok) sb_fail(error,"无法保存项目配置；原文件保持完整，请检查目录权限、剩余空间或被占用的文件。");
     if (sd) LocalFree(sd);free(target);free(name);free(temporary);return ok;
 }
+bool sb_desktop_private_write(const char *path,const char *bytes,size_t length,bool replace,sb_error *error){return private_write(path,bytes,length,replace,true,SB_TEXT_LIMIT,error);}
+bool sb_desktop_secret_write(const char *path,const char *bytes,size_t length,sb_error *error){return private_write(path,bytes,length,true,false,512u*1024u,error);}
 char *sb_desktop_seal(const char *text,sb_error *error) {
     DATA_BLOB input={(DWORD)strlen(text)+1,(BYTE *)text},output={0};char *base64=NULL,*json=NULL;DWORD size=0;
     if (input.cbData>40000 || !CryptProtectData(&input,L"ShellBot desktop project",NULL,NULL,NULL,CRYPTPROTECT_UI_FORBIDDEN,&output)) goto done;
@@ -90,6 +94,7 @@ done:
     free(encrypted.pbData);yyjson_doc_free(doc);free(bytes);if (!out && !*error->text) sb_fail(error,"项目配置无法由当前 Windows 账户解密，请保留原文件。");return out;
 }
 bool sb_desktop_make_directory(const char *path,bool empty,sb_error *error) {
+    if(!sb_platform_storage_path(path,error))return false;
     wchar_t *name=sb_desktop_wide(path);bool ok=name && sb_project_path_valid(path);
     if (ok) {
         for (wchar_t *p=name+3;*p;++p) if (*p==L'\\' || *p==L'/') {

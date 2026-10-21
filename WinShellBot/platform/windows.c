@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
+#include <wctype.h>
 
 struct sb_root { HANDLE handle; wchar_t *path; };
 struct sb_file { HANDLE handle; wchar_t *path; uint64_t size; };
@@ -364,25 +365,76 @@ bool sb_platform_target_version(sb_root *root, const char *relative, bool direct
     return version_walk(root, relative, directory, recursive, 0, &objects, version, error);
 }
 
-char *sb_platform_default_data_dir(sb_error *error) {
-    PWSTR local = NULL;
-    if (FAILED(SHGetKnownFolderPath(&FOLDERID_LocalAppData, 0, NULL, &local))) {
-        sb_fail(error, "Cannot locate local application data."); return NULL;
+char *sb_platform_program_directory(sb_error *error) {
+    wchar_t path[SB_PATH_CAP];DWORD n=GetModuleFileNameW(NULL,path,SB_PATH_CAP);
+    wchar_t *leaf=n && n<SB_PATH_CAP ? wcsrchr(path,L'\\') : NULL;
+    if (!leaf) {sb_fail(error,"Cannot locate the program directory.");return NULL;}
+    if(leaf==path+2)leaf[1]=0;else *leaf=0;return utf8(path);
+}
+bool sb_platform_storage_path(const char *path,sb_error *error) {
+    /* Validate the nearest existing ancestor before creating anything. Resolve
+       drive aliases and junctions too: an E: spelling must not hide C: storage. */
+    wchar_t *name=wide(path),full[SB_PATH_CAP];bool ok=name && sb_project_path_valid(path) &&
+        ((name[0]>=L'A' && name[0]<=L'Z') || (name[0]>=L'a' && name[0]<=L'z')) && towupper(name[0])!=L'C' && name[1]==L':';
+    DWORD n=ok ? GetFullPathNameW(name,SB_PATH_CAP,full,NULL) : 0;ok=ok && n>0 && n<SB_PATH_CAP;
+    if (ok) {
+        while(GetFileAttributesW(full)==INVALID_FILE_ATTRIBUTES) {
+            wchar_t *leaf=wcsrchr(full,L'\\');if(!leaf || leaf<full+2){ok=false;break;}if(leaf==full+2)leaf[1]=0;else *leaf=0;
+            if(leaf==full+2 && GetFileAttributesW(full)==INVALID_FILE_ATTRIBUTES){ok=false;break;}
+        }
+        HANDLE file=ok ? CreateFileW(full,FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,NULL,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS,NULL) : INVALID_HANDLE_VALUE;
+        wchar_t *actual=file!=INVALID_HANDLE_VALUE ? final_path(file) : NULL;
+        ok=actual && !wcsncmp(actual,L"\\\\?\\",4) && actual[5]==L':' &&
+            ((actual[4]>=L'A' && actual[4]<=L'Z') || (actual[4]>=L'a' && actual[4]<=L'z')) && towupper(actual[4])!=L'C';
+        free(actual);if(file!=INVALID_HANDLE_VALUE)CloseHandle(file);
     }
-    size_t size = wcslen(local) + 10;
-    wchar_t *path = calloc(size, sizeof(*path));
-    if (path) swprintf(path, size, L"%ls\\ShellBot", local);
-    CoTaskMemFree(local);
-    char *result = path ? utf8(path) : NULL;
-    free(path);
-    if (!result) sb_fail(error, "Cannot allocate data path.");
-    return result;
+    free(name);if(!ok)sb_fail(error,"ShellBot 数据必须位于可访问的非 C 盘本地目录；请明确选择其他目录，不会回退到 C 盘。");return ok;
+}
+char *sb_platform_default_data_dir(sb_error *error) {
+    char *base=sb_platform_program_directory(error);size_t size=base ? strlen(base)+6 : 0;
+    char *path=size ? malloc(size) : NULL;if(path)snprintf(path,size,"%s\\Data",base);free(base);
+    if(path && !sb_platform_storage_path(path,error)){free(path);path=NULL;}return path;
+}
+bool sb_platform_prepare_runtime(const char *directory,sb_error *error) {
+    if(!sb_platform_storage_path(directory,error))return false;
+    static const struct {const wchar_t *name,*leaf;} items[]={
+        {L"TEMP",L"Temp"},{L"TMP",L"Temp"},{L"APPDATA",L"Roaming"},
+        {L"LOCALAPPDATA",L"Local"},{L"XDG_CACHE_HOME",L"Cache"},{L"HOME",L"Home"},{L"USERPROFILE",L"Home"}};
+    wchar_t *base=wide(directory);bool ok=base!=NULL;
+    for(size_t i=0;ok && i<sizeof(items)/sizeof(items[0]);++i){
+        size_t n=wcslen(base)+wcslen(items[i].leaf)+12;wchar_t *path=calloc(n,sizeof(*path));
+        if(path)swprintf(path,n,L"%ls\\Runtime\\%ls",base,items[i].leaf);
+        char *narrow=path?utf8(path):NULL;bool permitted=narrow && sb_platform_storage_path(narrow,error);free(narrow);
+        int created=permitted ? SHCreateDirectoryExW(NULL,path,NULL) : ERROR_ACCESS_DENIED;
+        ok=path && (created==ERROR_SUCCESS || created==ERROR_ALREADY_EXISTS || created==ERROR_FILE_EXISTS) && !_wputenv_s(items[i].name,path);
+        free(path);
+    }
+    free(base);if(!ok)sb_fail(error,"无法准备非 C 盘临时目录；未使用系统临时目录。");return ok;
+}
+wchar_t *sb_platform_child_environment(const char *directory,const char *const *excluded,size_t count,sb_error *error) {
+    static const wchar_t *names[]={L"ALLUSERSPROFILE",L"APPDATA",L"COMPUTERNAME",L"ComSpec",L"HOME",L"HOMEDRIVE",L"HOMEPATH",L"LOCALAPPDATA",L"PATH",L"PATHEXT",L"ProgramData",L"ProgramFiles",L"ProgramFiles(x86)",L"SystemDrive",L"SystemRoot",L"TEMP",L"TMP",L"USERDOMAIN",L"USERNAME",L"USERPROFILE",L"windir",L"XDG_CACHE_HOME"};
+    if(!sb_platform_storage_path(directory,error))return NULL;
+    wchar_t *base=wide(directory),*block=calloc(32768,sizeof(wchar_t));size_t used=0;bool ok=base && block;
+    for(size_t i=0;ok && i<sizeof(names)/sizeof(names[0]);++i){
+        bool skip=false;for(size_t j=0;j<count;++j){wchar_t *key=wide(excluded[j]);if(key && !_wcsicmp(key,names[i]))skip=true;free(key);}if(skip)continue;
+        const wchar_t *leaf=!wcscmp(names[i],L"TEMP") || !wcscmp(names[i],L"TMP") ? L"Temp" : !wcscmp(names[i],L"APPDATA")?L"Roaming":!wcscmp(names[i],L"LOCALAPPDATA")?L"Local":!wcscmp(names[i],L"XDG_CACHE_HOME")?L"Cache":!wcscmp(names[i],L"HOME") || !wcscmp(names[i],L"USERPROFILE") || !wcscmp(names[i],L"HOMEDRIVE") || !wcscmp(names[i],L"HOMEPATH")?L"Home":NULL;
+        wchar_t *value=NULL;
+        if(leaf){size_t n=wcslen(base)+wcslen(leaf)+12;value=calloc(n,sizeof(wchar_t));if(value)swprintf(value,n,L"%ls\\Runtime\\%ls",base,leaf);
+            char *path=value?utf8(value):NULL;ok=path && sb_platform_storage_path(path,error);free(path);
+            int made=ok?SHCreateDirectoryExW(NULL,value,NULL):ERROR_ACCESS_DENIED;ok=ok && (made==ERROR_SUCCESS || made==ERROR_ALREADY_EXISTS || made==ERROR_FILE_EXISTS);
+            if(value && !wcscmp(names[i],L"HOMEDRIVE"))value[2]=0;
+            if(value && !wcscmp(names[i],L"HOMEPATH"))memmove(value,value+2,(wcslen(value+2)+1)*sizeof(wchar_t));
+        }else {DWORD n=GetEnvironmentVariableW(names[i],NULL,0);value=n?calloc(n,sizeof(wchar_t)):NULL;if(value && !GetEnvironmentVariableW(names[i],value,n)){free(value);value=NULL;}}
+        if(value){size_t n=wcslen(names[i])+wcslen(value)+2;if(n+used+1>=32768)ok=false;else{swprintf(block+used,n,L"%ls=%ls",names[i],value);used+=n;}}free(value);
+    }
+    free(base);if(!ok){free(block);block=NULL;if(!*error->text)sb_fail(error,"Cannot prepare portable child environment.");}return block;
 }
 
 sb_lease *sb_platform_lease(const char *directory, sb_error *error) {
     return sb_platform_lease_bound(directory, NULL, error);
 }
 sb_lease *sb_platform_lease_bound(const char *directory, const char *identity, sb_error *error) {
+    if (!sb_platform_storage_path(directory,error)) return NULL;
     wchar_t *path = wide(directory);
     if (!path) { sb_fail(error, "Invalid data directory."); return NULL; }
     int result = identity ? ERROR_ALREADY_EXISTS : SHCreateDirectoryExW(NULL, path, NULL);
@@ -558,8 +610,13 @@ bool sb_platform_random(unsigned char *buffer, size_t size, sb_error *error) {
 char *sb_platform_load_config(const char *path, size_t *length, sb_error *error) {
     wchar_t *name = wide(path);
     HANDLE handle = name ? CreateFileW(name, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL) : INVALID_HANDLE_VALUE;
+    DWORD failure=name?GetLastError():ERROR_NO_UNICODE_TRANSLATION;
     free(name);
-    if (handle == INVALID_HANDLE_VALUE) { sb_fail(error, "Cannot open configuration file."); return NULL; }
+    if (handle == INVALID_HANDLE_VALUE) {
+        char message[256];size_t n=path?strlen(path):0;if(n>180)n=180;
+        while(n && path[n] && ((unsigned char)path[n]&0xc0)==0x80)--n;
+        snprintf(message,sizeof(message),"Cannot open configuration file (Windows error %lu): %.*s",failure,(int)n,path?path:"");sb_fail(error,message);return NULL;
+    }
     LARGE_INTEGER size;
     char *buffer = NULL;
     if (GetFileType(handle) == FILE_TYPE_DISK && GetFileSizeEx(handle, &size) && size.QuadPart > 0 && size.QuadPart <= SB_TEXT_LIMIT) {
@@ -581,6 +638,7 @@ static void discard_export(HANDLE handle) {
 bool sb_platform_export_config(const char *output, const char *backup,
                                const char *json, size_t json_length,
                                const char *original, size_t original_length, sb_error *error) {
+    if (!sb_platform_storage_path(output,error) || !sb_platform_storage_path(backup,error))return false;
     if (!sb_project_path_valid(output) || !sb_project_path_valid(backup) ||
         !json || !original || !json_length || !original_length || json_length > SB_TEXT_LIMIT || original_length > SB_TEXT_LIMIT) {
         sb_fail(error, "Configuration export needs new absolute file paths and bounded JSON."); return false;

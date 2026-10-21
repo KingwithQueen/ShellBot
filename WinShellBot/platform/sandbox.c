@@ -3,6 +3,7 @@
 #include "sandbox.h"
 #include "execution.h"
 #include <userenv.h>
+#include <winternl.h>
 #include <aclapi.h>
 #include <sddl.h>
 #include <stdlib.h>
@@ -120,10 +121,23 @@ static bool grant_tree(sb_win_sandbox *sandbox,const wchar_t *path,bool read_onl
     free(actual);if(!ok && !*error->text)sb_fail(error,"Cannot grant journaled sandbox resource permissions.");return ok;
 }
 bool sb_win_sandbox_attributes(sb_win_sandbox *sandbox,LPPROC_THREAD_ATTRIBUTE_LIST attributes) {
-    return UpdateProcThreadAttribute(attributes,0,PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,&sandbox->capabilities,sizeof(sandbox->capabilities),NULL,NULL) &&
-        UpdateProcThreadAttribute(attributes,0,PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,&sandbox->packages_policy,sizeof(sandbox->packages_policy),NULL,NULL) &&
+    return UpdateProcThreadAttribute(attributes,0,PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,&sandbox->packages_policy,sizeof(sandbox->packages_policy),NULL,NULL) &&
         UpdateProcThreadAttribute(attributes,0,PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY,&sandbox->mitigation,sizeof(sandbox->mitigation),NULL,NULL) &&
         UpdateProcThreadAttribute(attributes,0,PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY,&sandbox->children_policy,sizeof(sandbox->children_policy),NULL,NULL);
+}
+bool sb_win_sandbox_launch(sb_win_sandbox *sandbox,const wchar_t *image,wchar_t *line,bool inherit,DWORD flags,void *environment,const wchar_t *directory,STARTUPINFOW *startup,PROCESS_INFORMATION *process){
+    /* Use an in-memory LowBox token, without a registered profile or package
+       directory. All four independent LPAC checks run before thread resume.
+       API: learn.microsoft.com/windows/win32/secauthz/ntcreatelowboxtoken */
+    typedef NTSTATUS (NTAPI *lowbox_fn)(PHANDLE,HANDLE,ACCESS_MASK,POBJECT_ATTRIBUTES,PSID,ULONG,PSID_AND_ATTRIBUTES,ULONG,HANDLE *);
+    FARPROC address=GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtCreateLowBoxToken");lowbox_fn create=NULL;
+    _Static_assert(sizeof(create)==sizeof(address),"Native function pointer size");memcpy(&create,&address,sizeof(create));
+    HANDLE source=NULL,token=NULL;OBJECT_ATTRIBUTES attributes={0};attributes.Length=sizeof(attributes);NTSTATUS status=(NTSTATUS)0xc0000001;
+    bool ok=create && OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY|TOKEN_DUPLICATE,&source);
+    if(ok){status=create(&token,source,TOKEN_ALL_ACCESS,&attributes,sandbox->sid,0,NULL,0,NULL);ok=status>=0;}
+    if(source)CloseHandle(source);
+    if(ok)ok=CreateProcessAsUserW(token,image,line,NULL,NULL,inherit,flags,environment,directory,startup,process)!=FALSE;
+    DWORD failure=GetLastError();if(token)CloseHandle(token);if(!ok)SetLastError(failure?failure:(status<0?ERROR_BAD_TOKEN_TYPE:ERROR_ACCESS_DENIED));return ok;
 }
 static bool lpac_access_check(HANDLE token,PSID sid) {
     HANDLE duplicate=NULL;bool ok=DuplicateTokenEx(token,TOKEN_QUERY|TOKEN_IMPERSONATE,NULL,SecurityImpersonation,TokenImpersonation,&duplicate)!=FALSE;
@@ -201,12 +215,14 @@ static bool verify(sb_win_sandbox *sandbox,sb_host *host,const wchar_t *probe,co
     wchar_t *line=capacity?calloc(capacity,sizeof(*line)):NULL;
     wchar_t journal_name[80];swprintf(journal_name,80,L"sandbox-%hs.jsonl",instance);
     if(line)swprintf(line,capacity,L"\"%ls\" \"%ls\" %u \"%ls\\%ls\" \"%ls\" %lu %u",probe,workspace,!host->config.workspaces[0].read_only,data,journal_name,readonly?readonly:L"",GetCurrentProcessId(),ntohs(address.sin_port));
-    SIZE_T size=0;InitializeProcThreadAttributeList(NULL,4,0,&size);LPPROC_THREAD_ATTRIBUTE_LIST attributes=size?malloc(size):NULL;
-    bool initialized=attributes && InitializeProcThreadAttributeList(attributes,4,0,&size);ok=ok && initialized && line && sb_win_sandbox_attributes(sandbox,attributes);
+    SIZE_T size=0;InitializeProcThreadAttributeList(NULL,3,0,&size);LPPROC_THREAD_ATTRIBUTE_LIST attributes=size?malloc(size):NULL;
+    bool initialized=attributes && InitializeProcThreadAttributeList(attributes,3,0,&size);
+    bool network_ready=ok,attributes_ready=initialized && line && sb_win_sandbox_attributes(sandbox,attributes);DWORD setup_error=GetLastError();
+    ok=ok && attributes_ready;
     STARTUPINFOEXW startup={0};startup.StartupInfo.cb=sizeof(startup);startup.lpAttributeList=attributes;PROCESS_INFORMATION process={0};
     HANDLE job=CreateJobObjectW(NULL,NULL);JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits={0};limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE|JOB_OBJECT_LIMIT_ACTIVE_PROCESS;limits.BasicLimitInformation.ActiveProcessLimit=1;
     ok=ok && job && SetInformationJobObject(job,JobObjectExtendedLimitInformation,&limits,sizeof(limits)) &&
-        CreateProcessW(probe,line,NULL,NULL,FALSE,CREATE_SUSPENDED|DETACHED_PROCESS|EXTENDED_STARTUPINFO_PRESENT,NULL,workspace,&startup.StartupInfo,&process);
+        sb_win_sandbox_launch(sandbox,probe,line,false,CREATE_SUSPENDED|DETACHED_PROCESS|EXTENDED_STARTUPINFO_PRESENT,NULL,workspace,&startup.StartupInfo,&process);
     DWORD exit_code=999;unsigned phase=1;
     if(ok){phase=2;ok=AssignProcessToJobObject(job,process.hProcess)!=FALSE;}
     if(ok){phase=3;ok=sb_win_sandbox_token(sandbox,process.hProcess);}
@@ -216,7 +232,7 @@ static bool verify(sb_win_sandbox *sandbox,sb_host *host,const wchar_t *probe,co
     if(job){TerminateJobObject(job,125);CloseHandle(job);}if(process.hProcess){WaitForSingleObject(process.hProcess,2500);CloseHandle(process.hProcess);}if(process.hThread)CloseHandle(process.hThread);
     if(initialized)DeleteProcThreadAttributeList(attributes);free(attributes);free(line);free(workspace);free(data);free(readonly);
     if(listener!=INVALID_SOCKET)closesocket(listener);WSACleanup();
-    if(!ok){char reason[160];snprintf(reason,sizeof(reason),"Restricted activation probe failed (phase %u, exit %lu, Windows error %lu); backend stays closed.",phase,exit_code,native_error);sb_fail(error,reason);}return ok;
+    if(!ok){char reason[220];snprintf(reason,sizeof(reason),"Restricted activation probe failed (phase %u, exit %lu, Windows error %lu, network %u, attributes %u/%lu); backend stays closed.",phase,exit_code,native_error,(unsigned)network_ready,(unsigned)attributes_ready,setup_error);sb_fail(error,reason);}return ok;
 }
 sb_win_sandbox *sb_win_sandbox_new(sb_host *host,const char *instance,sb_error *error) {
     if(!host->project->policy.runtime_file_count){sb_fail(error,"Restricted execution requires owner-configured exact runtime_files.");return NULL;}
@@ -231,9 +247,11 @@ sb_win_sandbox *sb_win_sandbox_new(sb_host *host,const char *instance,sb_error *
     if(!sid_utf8 || strlen(sid_utf8)>=sizeof(sandbox->sid_text)){free(sid_utf8);goto failed;}strcpy(sandbox->sid_text,sid_utf8);free(sid_utf8);
     char name[64];snprintf(name,sizeof(name),"sandbox-%s.jsonl",instance);sandbox->journal=sb_platform_journal_open(host->lease,name,error);
     if(!sandbox->journal || !journal_record(sandbox,NULL,NULL,false,false,error))goto failed;
-    PSID created=NULL;HRESULT result=CreateAppContainerProfile(sandbox->profile,L"ShellBot restricted worker",L"Private project execution identity",NULL,0,&created);
-    if(FAILED(result))goto failed;sandbox->profile_created=true;
-    bool same=EqualSid(created,sandbox->sid)!=FALSE;FreeSid(created);if(!same)goto failed;
+    /* A derived LPAC SID needs no registered Windows profile. Registering one
+       would create per-user package data on the system drive. */
+    wchar_t *child_environment=sb_platform_child_environment(host->config.data_dir,NULL,0,error);if(!child_environment)goto failed;free(child_environment);
+    size_t runtime_size=strlen(host->config.data_dir)+12;char *runtime=malloc(runtime_size);if(runtime)snprintf(runtime,runtime_size,"%s\\Runtime",host->config.data_dir);
+    wchar_t *runtime_path=wide(runtime);free(runtime);bool runtime_ready=runtime_path && grant_tree(sandbox,runtime_path,false,true,0,error);free(runtime_path);if(!runtime_ready)goto failed;
     for(size_t i=0;i<host->config.workspace_count;++i) {
         sb_file *directory=sb_platform_open(host->config.workspaces[i].root,".",true,error);
         char *text=directory?sb_platform_directory_path(directory,error):NULL;sb_platform_close(directory);wchar_t *path=wide(text);free(text);
