@@ -79,14 +79,38 @@ done:
     sb_projects_free(&registry); sb_projects_free(&candidate); yyjson_doc_free(source); yyjson_mut_doc_free(doc); return json;
 }
 
-static bool separator(char c) { return c == '/' || c == '\\'; }
+static bool separator(char c) {
+#ifdef _WIN32
+    return c == '/' || c == '\\';
+#else
+    return c == '/';
+#endif
+}
 static unsigned char folded(char c) {
+#ifdef _WIN32
     if (separator(c)) return '/';
     return (unsigned char)(c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c);
+#else
+    return (unsigned char)c;
+#endif
 }
 
 bool sb_project_path_valid(const char *path) {
     if (!path || !*path || strlen(path) >= SB_PATH_CAP) return false;
+#ifndef _WIN32
+    if (*path != '/') return false;
+    const char *start = path + 1;
+    if (!*start) return true;
+    for (const char *p = start; ; ++p) {
+        if (*p && (unsigned char)*p < 32) return false;
+        if (!*p || *p == '/') {
+            size_t n = (size_t)(p - start);
+            if (!n || (n == 1 && *start == '.') || (n == 2 && !memcmp(start, "..", 2))) return false;
+            if (!*p) return true;
+            start = p + 1;
+        }
+    }
+#else
     size_t size = strlen(path), start;
     bool drive = size >= 3 && ((path[0] >= 'a' && path[0] <= 'z') || (path[0] >= 'A' && path[0] <= 'Z')) &&
                  path[1] == ':' && separator(path[2]);
@@ -108,6 +132,7 @@ bool sb_project_path_valid(const char *path) {
         }
     }
     return drive || components >= 2;
+#endif
 }
 
 /* Syntax-level conflict checks only. M2 must also compare physical directory

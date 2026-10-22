@@ -46,7 +46,16 @@ static const tool_definition definitions[] = {
 
 static size_t tool_count(void) { return sizeof(definitions) / sizeof(definitions[0]); }
 
+static bool platform_tool_available(const char *name) {
+#ifdef SB_POSIX
+    return name && (!strncmp(name,"fs_",3) || !strncmp(name,"host_",5) || !strncmp(name,"approval_",9));
+#else
+    (void)name; return true;
+#endif
+}
+
 bool sb_tool_exists(const char *name) {
+    if (!platform_tool_available(name)) return false;
     if (sb_desktop_tool(name)) return true;
     for (size_t i = 0; i < tool_count(); ++i) if (!strcmp(name, definitions[i].name)) return true;
     return false;
@@ -59,6 +68,7 @@ static yyjson_mut_val *tools_list(yyjson_mut_doc *doc, bool approvals) {
     yyjson_mut_val *result = yyjson_mut_obj(doc), *array = yyjson_mut_arr(doc);
     yyjson_mut_obj_add_val(doc, result, "tools", array);
     for (size_t i = 0; i < tool_count(); ++i) {
+        if (!platform_tool_available(definitions[i].name)) continue;
         if (!approvals && !strncmp(definitions[i].name,"approval_",9)) continue;
         if (!approvals && sb_transfer_tool(definitions[i].name)) continue;
         if (!approvals && sb_file_manage_tool(definitions[i].name)) continue;
@@ -84,6 +94,7 @@ static yyjson_mut_val *tools_list(yyjson_mut_doc *doc, bool approvals) {
 yyjson_mut_val *sb_tools_list(yyjson_mut_doc *doc) { return tools_list(doc,false); }
 
 static bool project_tool_visible(sb_host *host, const char *name) {
+    if (!platform_tool_available(name)) return false;
     if (sb_transfer_tool(name) && (!host->project || host->project->legacy_compatibility)) return false;
     if (sb_file_manage_tool(name) && (!host->project || host->project->legacy_compatibility)) return false;
     if (!host->project) return true;
@@ -122,7 +133,9 @@ yyjson_mut_val *sb_project_tools_list(sb_host *host, yyjson_mut_doc *doc) {
             const char *policy_description="Project policy controls this operation. Administrator operations require identity:administrator and a manager-owned shared agent with owner project permission. Keep this identity on task status/output/input/cancel too. Pending replies contain approval_id; the local owner uses the matching ordinary or administrator approval channel. Keep arguments identical; file pages use next_offset and the same approval_id. With current_user file scope, omit workspace_id for an absolute local path. Read-only grants, expected hashes and private backups still apply.";
             char document_description[2048];
             if (sb_document_tool(name) || sb_transfer_tool(name) || sb_file_manage_tool(name)) {
-                snprintf(document_description,sizeof(document_description),"%s %s",yyjson_mut_get_str(yyjson_mut_obj_get(tool,"description")),policy_description);
+                const char *description=yyjson_mut_get_str(yyjson_mut_obj_get(tool,"description"));
+                if (!description) return NULL;
+                snprintf(document_description,sizeof(document_description),"%s %s",description,policy_description);
             }
             yyjson_mut_obj_remove_str(tool,"description");
             if (sb_document_tool(name) || sb_transfer_tool(name) || sb_file_manage_tool(name)) yyjson_mut_obj_add_strcpy(doc,tool,"description",document_description);
@@ -239,6 +252,13 @@ static yyjson_mut_val *tool_call_inner(sb_host *host, const char *actor, const c
         return content_result(doc, data, false);
     }
     if (!strcmp(name, "host_capabilities")) {
+#ifdef SB_POSIX
+        const bool media_available = false;
+        const bool account_files_available = false;
+#else
+        const bool media_available = true;
+        const bool account_files_available = true;
+#endif
         yyjson_mut_val *tools = yyjson_mut_arr(doc), *roots = yyjson_mut_arr(doc), *versions = yyjson_mut_arr(doc);
         for (size_t i = 0; i < tool_count(); ++i)
             if (project_tool_visible(host, definitions[i].name)) yyjson_mut_arr_add_str(doc, tools, definitions[i].name);
@@ -263,8 +283,8 @@ static yyjson_mut_val *tool_call_inner(sb_host *host, const char *actor, const c
         yyjson_mut_obj_add_uint(doc, data, "max_image_source_pixels", SB_IMAGE_PIXEL_LIMIT);
         yyjson_mut_obj_add_uint(doc, data, "max_image_source_dimension", 32768);
         yyjson_mut_obj_add_uint(doc, data, "max_image_dimension", 4096);
-        yyjson_mut_obj_add_bool(doc, data, "image_full_decode", true);
-        yyjson_mut_obj_add_bool(doc, data, "image_resize", true);
+        yyjson_mut_obj_add_bool(doc, data, "image_full_decode", media_available);
+        yyjson_mut_obj_add_bool(doc, data, "image_resize", media_available);
         yyjson_mut_obj_add_bool(doc, data, "file_write", true);
         yyjson_mut_obj_add_bool(doc, data, "file_overwrite", true);
         yyjson_mut_obj_add_bool(doc, data, "file_patch", true);
@@ -281,7 +301,7 @@ static yyjson_mut_val *tool_call_inner(sb_host *host, const char *actor, const c
             (host->project->policy.approval_mode == SB_PROJECT_NEVER ? "never" : host->project->policy.approval_mode == SB_PROJECT_WORKSPACE_AUTO ? "workspace_auto" : "always") : "local-owner");
         if (host->project) {
             yyjson_mut_obj_add_bool(doc, data, "project_approval_adapter", !host->project->legacy_compatibility);
-            yyjson_mut_obj_add_bool(doc, data, "unlisted_account_file_adapter", !host->project->legacy_compatibility && host->project->policy.file_scope == SB_FILES_CURRENT_USER);
+            yyjson_mut_obj_add_bool(doc, data, "unlisted_account_file_adapter", account_files_available && !host->project->legacy_compatibility && host->project->policy.file_scope == SB_FILES_CURRENT_USER);
             yyjson_mut_obj_add_bool(doc, data, "administrator_backend", host->administrator_backend);
             yyjson_mut_obj_add_bool(doc, data, "administrator_identity_explicit", true);
             yyjson_mut_obj_add_uint(doc, data, "max_active_tasks", host->config.limits.active_tasks);
@@ -292,7 +312,7 @@ static yyjson_mut_val *tool_call_inner(sb_host *host, const char *actor, const c
             yyjson_mut_obj_add_uint(doc, data, "worker_memory_mb", host->config.limits.worker_memory_mb);
         }
         yyjson_mut_obj_add_bool(doc, data, "durable_approvals", host->store!=NULL);
-        yyjson_mut_obj_add_bool(doc, data, "durable_tasks", host->store!=NULL);
+        yyjson_mut_obj_add_bool(doc, data, "durable_tasks", host->store!=NULL && platform_tool_available("task_start"));
         yyjson_mut_obj_add_bool(doc, data, "approval_restored_after_restart", false);
         yyjson_mut_obj_add_bool(doc, data, "state_healthy", sb_store_healthy(host->store));
         yyjson_mut_obj_add_bool(doc, data, "remote_owner_approval", *host->owner_url!=0);
@@ -302,14 +322,14 @@ static yyjson_mut_val *tool_call_inner(sb_host *host, const char *actor, const c
         yyjson_mut_obj_add_uint(doc, data, "audit_max_bytes", host->config.audit_max_bytes);
         yyjson_mut_obj_add_str(doc, data, "search_mode", "case-sensitive literal filenames or Unicode content");
         yyjson_mut_obj_add_bool(doc, data, "content_search", true);
-        yyjson_mut_obj_add_bool(doc,data,"artifact_transfer",host->project && !host->project->legacy_compatibility);
+        yyjson_mut_obj_add_bool(doc,data,"artifact_transfer",host->project && !host->project->legacy_compatibility && platform_tool_available("artifact_download"));
         yyjson_mut_obj_add_uint(doc,data,"max_transfer_bytes",SB_TRANSFER_LIMIT);
         yyjson_mut_obj_add_uint(doc,data,"max_transfer_chunk_bytes",SB_TRANSFER_CHUNK);
-        yyjson_mut_obj_add_bool(doc,data,"document_read",true);
-        yyjson_mut_obj_add_bool(doc,data,"pdf_page_preview",true);
-        yyjson_mut_obj_add_str(doc,data,"pdf_backend","pinned PDFium 157.0.8086.0; no V8");
-        yyjson_mut_obj_add_str(doc,data,"office_formats","DOCX, XLSX, PPTX; legacy formats require conversion");
-        yyjson_mut_obj_add_str(doc,data,"office_preview","structured text, not original layout");
+        yyjson_mut_obj_add_bool(doc,data,"document_read",media_available);
+        yyjson_mut_obj_add_bool(doc,data,"pdf_page_preview",media_available);
+        yyjson_mut_obj_add_str(doc,data,"pdf_backend",media_available ? "pinned PDFium 157.0.8086.0; no V8" : "unavailable");
+        yyjson_mut_obj_add_str(doc,data,"office_formats",media_available ? "DOCX, XLSX, PPTX; legacy formats require conversion" : "unavailable");
+        yyjson_mut_obj_add_str(doc,data,"office_preview",media_available ? "structured text, not original layout" : "unavailable");
         yyjson_mut_obj_add_uint(doc,data,"max_document_source_bytes",SB_DOCUMENT_INPUT_LIMIT);
         yyjson_mut_obj_add_uint(doc,data,"max_document_unit_text_bytes",SB_DOCUMENT_TEXT_LIMIT);
         yyjson_mut_obj_add_bool(doc, data, "tunnel_management", false);

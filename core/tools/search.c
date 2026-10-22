@@ -113,8 +113,14 @@ static void search_directory(search_state *s, const char *path, unsigned depth) 
         char *relative = malloc(length);
         if (!relative) { s->allocation_failed = true; break; }
         size_t prefix = strlen(path);
+#ifdef SB_POSIX
+        if (!strcmp(path,".")) prefix = 0;
+        if (prefix) { memcpy(relative, path, prefix); relative[prefix] = '/'; }
+        strcpy(relative + (prefix ? prefix + 1 : 0), entries[i].name);
+#else
         memcpy(relative, path, prefix); relative[prefix] = '/';
         strcpy(relative + prefix + 1, entries[i].name);
+#endif
         if (s->content && !entries[i].directory) search_file(s, &entries[i], relative);
         else if (!s->content && strstr(entries[i].name, s->query))
             add_match(s, &entries[i], relative, 0, 0, NULL, 0, false, false, NULL);

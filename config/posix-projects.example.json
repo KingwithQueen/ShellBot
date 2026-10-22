@@ -1,0 +1,24 @@
+{
+  "format_version": 1,
+  "gateway": { "port": 8765 },
+  "projects": [
+    {
+      "id": "example",
+      "token_env": "SHELLBOT_EXAMPLE_TOKEN",
+      "data_dir": "/absolute/private/ShellBotData",
+      "workspaces": [
+        { "id": "workspace", "path": "/absolute/workspace", "read_only": true }
+      ],
+      "policy": {
+        "approval_mode": "always",
+        "files": { "scope": "configured" },
+        "execution": { "enabled": false },
+        "tools": [
+          "host_info", "host_capabilities", "fs_list", "fs_read", "fs_search",
+          "fs_write", "fs_patch", "fs_stat", "fs_mkdir", "fs_copy", "fs_move",
+          "fs_delete", "approval_status", "approval_cancel"
+        ]
+      }
+    }
+  ]
+}

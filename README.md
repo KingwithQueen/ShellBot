@@ -51,6 +51,12 @@
 
 本地自动化与真实客户端、实际 UAC、物理多屏 DPI、独立 Windows 环境、长期运行分别验收，准确范围见发布说明与包内验证摘要。
 
+## Linux 和 macOS 后台开发版
+
+首阶段新增独立 C17 POSIX 后端与 CMake 构建，可在本机编辑源码后通过 SSH 到 Linux/macOS 原生编译测试。当前范围为 stdio、回环 HTTP、固定项目策略、本地审批、审计与基础文件操作；未实现的命令、OAuth、GUI 和桌面能力不会暴露为可用工具。这不是完整跨平台正式发布。
+
+构建、配置、目录边界及远端开发流程见 [Linux/macOS 后台说明](docs/POSIX_BACKEND.md)。Windows 继续使用上面的 MSBuild 入口，原有 Win32 平台代码及发布包保持独立。
+
 ## 许可
 
 Copyright (c) 2026 姬敬。项目使用 [MIT 许可证](LICENSE.txt)；[第三方组件](third_party/README.md)保留各自许可，发布包的 `licenses` 目录包含完整声明。

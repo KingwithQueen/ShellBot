@@ -1,0 +1,91 @@
+param(
+    [ValidateSet('all','mac','linux')][string]$Target='all',
+    [string]$ConnectionFile,
+    [ValidateSet('Debug','Release')][string]$Configuration='Debug',
+    [switch]$WithTests,
+    [switch]$Sanitizers
+)
+$ErrorActionPreference='Stop'
+if($PSVersionTable.PSVersion -lt [version]'7.3'){throw 'Use PowerShell 7.3 or newer for native SSH argument handling.'}
+$PSNativeCommandArgumentPassing='Standard'
+$PSNativeCommandUseErrorActionPreference=$false
+$repo=Split-Path -Parent $PSScriptRoot
+if(!$ConnectionFile){$ConnectionFile=Join-Path $repo 'build\remote-dev-20261022\connections.json'}
+$connections=Get-Content -LiteralPath $ConnectionFile -Raw | ConvertFrom-Json
+$runId=(Get-Date -Format 'yyyyMMdd-HHmmss')+'-'+[guid]::NewGuid().ToString('N').Substring(0,8)
+$runDir=Join-Path $repo "build\posix\$runId"
+New-Item -ItemType Directory -Path $runDir -Force | Out-Null
+$files=@('CMakeLists.txt','LICENSE.txt','third_party/yyjson/LICENSE','third_party/civetweb/LICENSE.md','docs/POSIX_BACKEND.md','config/posix-projects.example.json')
+foreach($folder in @('core','PosixShellBot','third_party/yyjson','third_party/civetweb/src','third_party/civetweb/include')){
+    foreach($item in Get-ChildItem -LiteralPath (Join-Path $repo $folder) -Recurse -File){
+        if($item.Extension -in @('.c','.h','.inl')){$files+=[IO.Path]::GetRelativePath($repo,$item.FullName).Replace('\','/')}
+    }
+}
+if($WithTests){$files+='tests/posix_integration.py'}
+$files=@($files|Sort-Object -Unique)
+$hashes=foreach($file in $files){$path=Join-Path $repo $file;if(!(Test-Path -LiteralPath $path -PathType Leaf)){throw "Missing input: $file"};((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()+'  '+$file)}
+[IO.File]::WriteAllText((Join-Path $runDir 'SOURCE_SHA256SUMS'),($hashes -join "`n")+"`n",[Text.UTF8Encoding]::new($false))
+$fileList=Join-Path $runDir 'files.txt'
+[IO.File]::WriteAllText($fileList,($files -join "`n")+"`n",[Text.UTF8Encoding]::new($false))
+$archive=Join-Path $runDir 'source.tar'
+& tar -cf $archive -C $repo -T $fileList
+if($LASTEXITCODE -ne 0){throw 'Cannot archive selected source inputs.'}
+& tar -rf $archive -C $runDir SOURCE_SHA256SUMS
+if($LASTEXITCODE -ne 0){throw 'Cannot append source verification manifest.'}
+function Quote-Sh([string]$Text){return "'"+$Text.Replace("'","'\''")+"'"}
+$ssh=Join-Path $env:WINDIR 'System32\OpenSSH\ssh.exe'
+$scp=Join-Path $env:WINDIR 'System32\OpenSSH\scp.exe'
+$results=@()
+foreach($connection in $connections){
+    if($Target -ne 'all' -and $Target -ne $connection.name){continue}
+    if($connection.name -notin @('mac','linux') -or $connection.hostName -notmatch '^[-a-zA-Z0-9_.@]+$' -or $connection.remoteRoot -notmatch '^/' -or $connection.remoteRoot.Contains("`n")){throw 'Invalid local connection record.'}
+    $options=@('-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o',"UserKnownHostsFile=$($connection.knownHosts)",'-o','IdentitiesOnly=yes','-o','IdentityAgent=none','-o','ForwardAgent=no','-o','ClearAllForwardings=yes','-o','ConnectTimeout=10','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=2','-i',$connection.identityFile)
+    $root=Quote-Sh $connection.remoteRoot
+    $snapshot="$($connection.remoteRoot)/.native-build/$runId"
+    $snapshotQuoted=Quote-Sh $snapshot
+    $prepare="set -eu`ncd $root`ntest `"`$(pwd -P)`" = $root`nmkdir -p .native-build`nmkdir $snapshotQuoted`n"
+    & $ssh @options -T $connection.hostName ('sh -c '+(Quote-Sh $prepare))
+    if($LASTEXITCODE -ne 0){throw "Cannot prepare an isolated build directory on $($connection.name)."}
+    & $scp @options $archive ($connection.hostName+':'+$snapshot+'/source.tar')
+    if($LASTEXITCODE -ne 0){throw "Cannot transfer source snapshot to $($connection.name)."}
+    $testFlag=if($WithTests){'ON'}else{'OFF'}
+    $sanitizerFlag=if($Sanitizers){'ON'}else{'OFF'}
+    $remote=@'
+set -eu
+PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+export PATH
+cd __SNAPSHOT__
+mkdir src
+tar -xf source.tar -C src
+cd src
+if command -v sha256sum >/dev/null 2>&1; then sha256sum -c SOURCE_SHA256SUMS > ../source-verification.log; else shasum -a 256 -c SOURCE_SHA256SUMS > ../source-verification.log; fi
+cd ..
+if cmake -S src -B build -G Ninja -DCMAKE_BUILD_TYPE=__CONFIG__ -DSHELLBOT_TESTS=__TESTS__ -DSHELLBOT_SANITIZERS=__SANITIZERS__ > configure.log 2>&1; then cat configure.log; else cat configure.log; exit 1; fi
+if cmake --build build --parallel 4 > build.log 2>&1; then cat build.log; else cat build.log; exit 1; fi
+build/ShellBot --version
+if [ __TESTS__ = ON ]; then
+    if ctest --test-dir build --output-on-failure > test.log 2>&1; then cat test.log; else cat test.log; exit 1; fi
+fi
+'@
+    $remote=$remote.Replace('__SNAPSHOT__',$snapshotQuoted).Replace('__CONFIG__',$Configuration).Replace('__TESTS__',$testFlag).Replace('__SANITIZERS__',$sanitizerFlag).Replace("`r`n","`n")
+    $log=Join-Path $runDir ($connection.name+'-build.log')
+    & $ssh @options -T $connection.hostName ('sh -c '+(Quote-Sh $remote)) 2>&1 | Tee-Object -FilePath $log
+    $buildExit=$LASTEXITCODE
+    & $scp @options ($connection.hostName+':'+$snapshot+'/build/ShellBot') (Join-Path $runDir ($connection.name+'-ShellBot'))
+    $artifactExit=$LASTEXITCODE
+    $testVerified=$null
+    if($WithTests){
+        $testReport=Join-Path $runDir ($connection.name+'-test-report.json')
+        & $scp @options ($connection.hostName+':'+$snapshot+'/build/posix-test-report.json') $testReport
+        $testVerified=$false
+        if($LASTEXITCODE -eq 0 -and $artifactExit -eq 0){
+            $testResult=Get-Content -LiteralPath $testReport -Raw | ConvertFrom-Json
+            $testVerified=$testResult.status -ceq 'passed' -and $testResult.sha256 -ceq (Get-FileHash -LiteralPath (Join-Path $runDir ($connection.name+'-ShellBot')) -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+    }
+    $results+=[ordered]@{target=$connection.name;remote_snapshot=$snapshot;build_exit=$buildExit;artifact_copied=($artifactExit -eq 0);tests_requested=[bool]$WithTests;test_report_verified=$testVerified;configuration=$Configuration;sanitizers=[bool]$Sanitizers}
+}
+$receipt=[ordered]@{run_id=$runId;source_archive_sha256=(Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash;input_count=$files.Count;results=$results}
+$receipt | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $runDir 'receipt.json') -Encoding utf8
+Write-Host "Build records: $runDir"
+if(!$results.Count -or @($results|Where-Object {$_.build_exit -ne 0 -or !$_.artifact_copied -or ($_.tests_requested -and !$_.test_report_verified)}).Count){throw 'One or more native builds failed; see saved logs and receipt.'}

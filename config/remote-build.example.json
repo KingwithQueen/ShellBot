@@ -1,0 +1,16 @@
+[
+  {
+    "name": "mac",
+    "hostName": "user@mac-host",
+    "remoteRoot": "/Users/user/work/ShellBot",
+    "identityFile": "E:/private/ssh/id_ed25519",
+    "knownHosts": "E:/private/ssh/known_hosts"
+  },
+  {
+    "name": "linux",
+    "hostName": "user@linux-host",
+    "remoteRoot": "/home/user/ShellBot",
+    "identityFile": "E:/private/ssh/id_ed25519",
+    "knownHosts": "E:/private/ssh/known_hosts"
+  }
+]
