@@ -20,41 +20,42 @@ int sb_stdio_run(sb_host *h){
     }
     if(ferror(stdin)&&!sb_posix_signal)result=1;free(line);return result;
 }
-typedef struct{sb_host *host;char *authorization;pthread_mutex_t serial;char error[256];} http_context;
+
+struct sb_http_server {sb_config config;sb_http_routes routes;void *context;struct mg_context *native;char error[256];};
 static int send_reply(struct mg_connection *c,int status,const char *body){
-    mg_disable_keep_alive(c);size_t n=body?strlen(body):0;
-    mg_printf(c,"HTTP/1.1 %d %s\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: %zu\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",status,status==200?"OK":status==202?"Accepted":"Request rejected",n);
-    if(n)mg_write(c,body,n);return status;
+    mg_disable_keep_alive(c);size_t n=body?strlen(body):0;mg_printf(c,"HTTP/1.1 %d %s\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: %zu\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",status,status==200?"OK":status==202?"Accepted":"Request rejected",n);if(n)mg_write(c,body,n);return status;
 }
-static bool equal_secret(const char *a,const char *b){if(!a||strlen(a)!=strlen(b))return false;unsigned char diff=0;for(size_t i=0;b[i];i++)diff|=(unsigned char)(a[i]^b[i]);return !diff;}
+bool sb_posix_secret(const char *a,const char *b){if(!a||!b||strlen(a)!=strlen(b))return false;unsigned char diff=0;for(size_t i=0;b[i];i++)diff|=(unsigned char)(a[i]^b[i]);return !diff;}
+char *sb_posix_bearer(const char *name,sb_error *e){const char *token=getenv(name);if(!token||strlen(token)<32||strlen(token)>128||strspn(token,"0123456789abcdefABCDEF")!=strlen(token)){sb_fail(e,"HTTP requires a distinct 32..128 character hexadecimal bearer in each project's token_env.");return NULL;}size_t n=strlen(token)+8;char *b=malloc(n);if(b)snprintf(b,n,"Bearer %s",token);return b;}
 static int request(struct mg_connection *c){
-    const struct mg_request_info *r=mg_get_request_info(c);http_context *s=mg_get_user_data(mg_get_context(c));sb_host *h=s->host;
-    const char *host=mg_get_header(c,"Host");char local[64],name[64];snprintf(local,sizeof(local),"127.0.0.1:%u",h->config.port);snprintf(name,sizeof(name),"localhost:%u",h->config.port);
-    if(!host||(strcmp(host,local)&&strcmp(host,name)&&(!*h->config.public_authority||strcmp(host,h->config.public_authority)))||mg_get_header(c,"Origin")||r->query_string)return send_reply(c,403,"{\"error\":\"Invalid host, origin or query\"}");
-    if(!strcmp(r->local_uri,"/healthz")&&!strcmp(r->request_method,"GET"))return send_reply(c,200,"{\"status\":\"ok\",\"platform_backend\":\"posix-phase1\"}");
-    char endpoint[100];snprintf(endpoint,sizeof(endpoint),"/projects/%s/mcp",h->project?h->project->id:"");
-    if(strcmp(r->local_uri,"/mcp")&&(!h->project||strcmp(r->local_uri,endpoint)))return send_reply(c,404,"{\"error\":\"Unknown endpoint\"}");
-    unsigned authCount=0;for(int i=0;i<r->num_headers;i++)if(!strcasecmp(r->http_headers[i].name,"Authorization"))authCount++;
-    if(authCount!=1||!equal_secret(mg_get_header(c,"Authorization"),s->authorization))return send_reply(c,401,"{\"error\":\"Bearer authentication required\"}");
-    if(strcmp(r->request_method,"POST"))return send_reply(c,405,"{\"error\":\"POST required\"}");
-    const char *type=mg_get_header(c,"Content-Type");if(!type||strncasecmp(type,"application/json",16)||(type[16]&&type[16]!=';'))return send_reply(c,415,"{\"error\":\"application/json required\"}");
-    if(r->content_length<0||r->content_length>SB_REQUEST_LIMIT||mg_get_header(c,"Transfer-Encoding"))return send_reply(c,413,"{\"error\":\"A bounded Content-Length is required\"}");
-    size_t n=(size_t)r->content_length,at=0;char *bytes=malloc(n+1);if(!bytes)return send_reply(c,500,NULL);
-    while(at<n){int got=mg_read(c,bytes+at,n-at);if(got<=0){free(bytes);return send_reply(c,400,"{\"error\":\"Incomplete request\"}");}at+=(size_t)got;}bytes[n]=0;
-    sb_request_context ctx={.actor="http-bearer",.project=h->project,.policy_revision=h->project?h->project->policy_revision:0,
-        .version=mg_get_header(c,"MCP-Protocol-Version"),.method=mg_get_header(c,"MCP-Method"),.name=mg_get_header(c,"MCP-Name")};
-    size_t length;int status;pthread_mutex_lock(&s->serial);char *reply=sb_dispatch(h,NULL,bytes,n,&ctx,&length,&status);pthread_mutex_unlock(&s->serial);free(bytes);
-    int result=send_reply(c,status,reply);free(reply);return result;
+    const struct mg_request_info *r=mg_get_request_info(c);sb_http_server *s=mg_get_user_data(mg_get_context(c));const char *host=mg_get_header(c,"Host");char local[64],name[64];snprintf(local,sizeof(local),"127.0.0.1:%u",s->config.port);snprintf(name,sizeof(name),"localhost:%u",s->config.port);
+    if(!host||(strcmp(host,local)&&strcmp(host,name)&&(!*s->config.public_authority||strcmp(host,s->config.public_authority)))||mg_get_header(c,"Origin")||r->query_string)return send_reply(c,403,"{\"error\":\"Invalid host, origin or query\"}");
+    if(!strcmp(r->local_uri,"/healthz")&&!strcmp(r->request_method,"GET"))return send_reply(c,200,"{\"status\":\"ok\",\"platform_backend\":\"posix-phase2\"}");
+    unsigned auth_count=0;for(int i=0;i<r->num_headers;i++)if(!strcasecmp(r->http_headers[i].name,"Authorization"))auth_count++;
+    if(auth_count!=1)return send_reply(c,401,"{\"error\":\"Bearer authentication required\"}");
+    bool health=false;int status=401;void *binding=s->routes.open(s->context,r->local_uri,mg_get_header(c,"Authorization"),&health,&status);if(!binding)return send_reply(c,status,"{\"error\":\"Project unavailable or authentication failed\"}");
+    char *reply=NULL,*bytes=NULL;int result=0;
+    if(strcmp(r->request_method,"POST")){result=send_reply(c,405,"{\"error\":\"POST required\"}");goto done;}
+    const char *type=mg_get_header(c,"Content-Type");if(!type||strncasecmp(type,"application/json",16)||(type[16]&&type[16]!=';')){result=send_reply(c,415,"{\"error\":\"application/json required\"}");goto done;}
+    if(r->content_length<0||r->content_length>SB_REQUEST_LIMIT||mg_get_header(c,"Transfer-Encoding")){result=send_reply(c,413,"{\"error\":\"A bounded Content-Length is required\"}");goto done;}
+    size_t n=(size_t)r->content_length,at=0;bytes=malloc(n+1);if(!bytes){result=send_reply(c,500,NULL);goto done;}
+    while(at<n){int got=mg_read(c,bytes+at,n-at);if(got<=0){result=send_reply(c,400,"{\"error\":\"Incomplete request\"}");goto done;}at+=(size_t)got;}bytes[n]=0;
+    sb_request_context ctx={.actor="http-bearer",.version=mg_get_header(c,"MCP-Protocol-Version"),.method=mg_get_header(c,"MCP-Method"),.name=mg_get_header(c,"MCP-Name")};size_t length=0;
+    reply=s->routes.call(s->context,binding,bytes,n,&ctx,&length,&status);result=send_reply(c,status,reply);
+done:s->routes.close(s->context,binding);free(reply);free(bytes);return result;
 }
-static int log_message(const struct mg_connection *c,const char *message){if(c){http_context *s=mg_get_user_data(mg_get_context(c));if(s)snprintf(s->error,sizeof(s->error),"%s",message);}return 1;}
-int sb_http_run(sb_host *h,sb_error *e){
-    const char *token=getenv(h->config.token_env);if(!token||strlen(token)<32||strlen(token)>128||strspn(token,"0123456789abcdefABCDEF")!=strlen(token)){sb_fail(e,"HTTP requires a 32..128 character hexadecimal bearer token in the configured token_env.");return 2;}
-    http_context s={.host=h};size_t auth_size=strlen(token)+8;s.authorization=malloc(auth_size);if(!s.authorization)return 2;snprintf(s.authorization,auth_size,"Bearer %s",token);pthread_mutex_init(&s.serial,NULL);
-    char address[64];snprintf(address,sizeof(address),"127.0.0.1:%u",h->config.port);
-    const char *options[]={"listening_ports",address,"num_threads","4","request_timeout_ms","5000","enable_keep_alive","no","max_request_size","16384",NULL};
-    struct mg_callbacks callbacks={.begin_request=request,.log_message=log_message};mg_init_library(0);
-    struct mg_context *server=mg_start(&callbacks,&s,options);
-    if(!server){snprintf(e->text,sizeof(e->text),"Cannot bind loopback HTTP on port %u: %.160s",h->config.port,*s.error?s.error:"native listener initialization failed");}
-    else{fprintf(stderr,"ShellBot: listening on %s\n",address);while(!sb_posix_signal&&!sb_owner_stopping(h->owner)){struct timespec t={.tv_nsec=100000000};nanosleep(&t,NULL);}mg_stop(server);}
-    mg_exit_library();pthread_mutex_destroy(&s.serial);memset(s.authorization,0,strlen(s.authorization));free(s.authorization);return server?0:2;
+static int log_message(const struct mg_connection *c,const char *message){if(c){sb_http_server *s=mg_get_user_data(mg_get_context(c));if(s)snprintf(s->error,sizeof(s->error),"%s",message);}return 1;}
+sb_http_server *sb_http_start(const sb_config *config,const sb_http_routes *routes,void *context,sb_error *e){
+    sb_http_server *s=calloc(1,sizeof(*s));if(!s)return NULL;s->config=*config;s->routes=*routes;s->context=context;char address[64];snprintf(address,sizeof(address),"127.0.0.1:%u",config->port);
+    const char *options[]={"listening_ports",address,"num_threads","4","request_timeout_ms","5000","enable_keep_alive","no","max_request_size","16384",NULL};struct mg_callbacks callbacks={.begin_request=request,.log_message=log_message};mg_init_library(0);s->native=mg_start(&callbacks,s,options);
+    if(!s->native){snprintf(e->text,sizeof(e->text),"Cannot bind loopback HTTP on port %u: %.160s",config->port,*s->error?s->error:"native listener initialization failed");mg_exit_library();free(s);return NULL;}fprintf(stderr,"ShellBot: listening on %s\n",address);return s;
+}
+bool sb_http_stopping(void){return sb_posix_signal!=0;}
+void sb_http_stop(sb_http_server *s){if(s){mg_stop(s->native);mg_exit_library();free(s);}}
+typedef struct{sb_host *host;char *authorization;pthread_mutex_t mutex;} single;
+static void *single_open(void *context,const char *path,const char *authorization,bool *health,int *status){single *s=context;char endpoint[100];snprintf(endpoint,sizeof(endpoint),"/projects/%s/mcp",s->host->project?s->host->project->id:"");(void)health;if(strcmp(path,"/mcp")&&(!s->host->project||strcmp(path,endpoint))){*status=404;return NULL;}if(!sb_posix_secret(authorization,s->authorization)){*status=401;return NULL;}pthread_mutex_lock(&s->mutex);return s;}
+static char *single_call(void *context,void *binding,const char *bytes,size_t n,const sb_request_context *ctx,size_t *length,int *status){(void)context;single *s=binding;sb_request_context trusted=*ctx;trusted.project=s->host->project;trusted.policy_revision=s->host->project?s->host->project->policy_revision:0;return sb_dispatch(s->host,NULL,bytes,n,&trusted,length,status);}
+static void single_close(void *context,void *binding){(void)context;single *s=binding;pthread_mutex_unlock(&s->mutex);}
+int sb_http_run(sb_host *h,sb_error *e){single s={.host=h};s.authorization=sb_posix_bearer(h->config.token_env,e);if(!s.authorization)return 2;pthread_mutex_init(&s.mutex,NULL);sb_http_routes routes={.open=single_open,.call=single_call,.close=single_close};sb_http_server *server=sb_http_start(&h->config,&routes,&s,e);
+    if(server){while(!sb_posix_signal&&!sb_owner_stopping(h->owner)){struct timespec pause={.tv_nsec=100000000};nanosleep(&pause,NULL);}sb_http_stop(server);}pthread_mutex_destroy(&s.mutex);memset(s.authorization,0,strlen(s.authorization));free(s.authorization);return server?0:2;
 }

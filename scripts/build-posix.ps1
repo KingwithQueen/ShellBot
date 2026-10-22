@@ -15,13 +15,13 @@ $connections=Get-Content -LiteralPath $ConnectionFile -Raw | ConvertFrom-Json
 $runId=(Get-Date -Format 'yyyyMMdd-HHmmss')+'-'+[guid]::NewGuid().ToString('N').Substring(0,8)
 $runDir=Join-Path $repo "build\posix\$runId"
 New-Item -ItemType Directory -Path $runDir -Force | Out-Null
-$files=@('CMakeLists.txt','LICENSE.txt','third_party/yyjson/LICENSE','third_party/civetweb/LICENSE.md','docs/POSIX_BACKEND.md','config/posix-projects.example.json')
+$files=@('CMakeLists.txt','LICENSE.txt','third_party/yyjson/LICENSE','third_party/civetweb/LICENSE.md','docs/POSIX_BACKEND.md','config/posix-projects.example.json','config/posix-commands.example.json')
 foreach($folder in @('core','PosixShellBot','third_party/yyjson','third_party/civetweb/src','third_party/civetweb/include')){
     foreach($item in Get-ChildItem -LiteralPath (Join-Path $repo $folder) -Recurse -File){
         if($item.Extension -in @('.c','.h','.inl')){$files+=[IO.Path]::GetRelativePath($repo,$item.FullName).Replace('\','/')}
     }
 }
-if($WithTests){$files+='tests/posix_integration.py'}
+if($WithTests){$files+='tests/posix_integration.py';$files+='tests/posix_phase2.py'}
 $files=@($files|Sort-Object -Unique)
 $hashes=foreach($file in $files){$path=Join-Path $repo $file;if(!(Test-Path -LiteralPath $path -PathType Leaf)){throw "Missing input: $file"};((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()+'  '+$file)}
 [IO.File]::WriteAllText((Join-Path $runDir 'SOURCE_SHA256SUMS'),($hashes -join "`n")+"`n",[Text.UTF8Encoding]::new($false))

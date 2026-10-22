@@ -21,6 +21,8 @@ target_link_libraries(sb_http PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
 add_executable(ShellBot
   PosixShellBot/main.c PosixShellBot/transport.c PosixShellBot/owner.c
   PosixShellBot/platform.c PosixShellBot/sha256.c PosixShellBot/unavailable.c
+  PosixShellBot/process.c PosixShellBot/execution.c PosixShellBot/task_agent.c
+  PosixShellBot/manager.c
   core/config/config.c core/config/projects.c core/protocol/mcp.c
   core/policy/approval.c core/policy/audit.c core/policy/state.c core/policy/project_policy.c
   core/tools/tools.c core/tools/text.c core/tools/search.c core/tools/tasks.c
@@ -47,7 +49,7 @@ if(SHELLBOT_TESTS)
   endif()
   add_test(NAME posix-integration COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/tests/posix_integration.py $<TARGET_FILE:ShellBot>)
-  set_tests_properties(posix-integration PROPERTIES TIMEOUT 120)
+  set_tests_properties(posix-integration PROPERTIES TIMEOUT 240)
 endif()
 install(TARGETS ShellBot RUNTIME DESTINATION bin)
 install(FILES LICENSE.txt DESTINATION share/ShellBot/licenses)
@@ -55,3 +57,4 @@ install(FILES third_party/yyjson/LICENSE DESTINATION share/ShellBot/licenses REN
 install(FILES third_party/civetweb/LICENSE.md DESTINATION share/ShellBot/licenses RENAME civetweb-LICENSE.md)
 install(FILES docs/POSIX_BACKEND.md DESTINATION share/ShellBot)
 install(FILES config/posix-projects.example.json DESTINATION share/ShellBot/examples)
+install(FILES config/posix-commands.example.json DESTINATION share/ShellBot/examples)

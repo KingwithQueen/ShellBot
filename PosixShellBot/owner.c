@@ -9,7 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-struct sb_owner {int fd;pthread_t thread;atomic_bool quit,stopping;sb_host *host;char path[sizeof(((struct sockaddr_un *)0)->sun_path)];};
+struct sb_owner {int fd;pthread_t thread;atomic_bool quit,stopping;sb_owner_handler handler;void *context;char path[sizeof(((struct sockaddr_un *)0)->sun_path)];};
 static bool peer(int fd){
 #ifdef __APPLE__
     uid_t uid;gid_t gid;return !getpeereid(fd,&uid,&gid)&&uid==geteuid();
@@ -31,7 +31,7 @@ static void *serve(void *ctx){
             char *reply=NULL;
             if(complete){bytes[at]=0;yyjson_doc *d=yyjson_read(bytes,at,0);const char *cmd=sb_string(yyjson_obj_get(yyjson_doc_get_root(d),"command"));
                 if(cmd&&!strcmp(cmd,"stop")){atomic_store(&o->stopping,true);reply=sb_strdup("{\"stopping\":true}");}
-                else reply=sb_policy_owner_request(o->host->policy,bytes,at);yyjson_doc_free(d);
+                else reply=o->handler(o->context,bytes,at);yyjson_doc_free(d);
             }
             if(reply){sb_error e={0};sb_posix_write(fd,reply,strlen(reply),&e);sb_posix_write(fd,"\n",1,&e);free(reply);}
         }
@@ -39,21 +39,24 @@ static void *serve(void *ctx){
     }
     return NULL;
 }
-sb_owner *sb_owner_start(sb_host *h,sb_error *e){
-    sb_owner *o=calloc(1,sizeof(*o));if(!o)return NULL;o->fd=-1;o->host=h;
+sb_owner *sb_owner_start_handler(const char *data,sb_owner_handler handler,void *context,sb_error *e){
+    sb_root *root=sb_platform_root(data,e);if(!root)return NULL;if(!sb_posix_private(root,e)){sb_platform_root_close(root);return NULL;}
+    sb_owner *o=calloc(1,sizeof(*o));if(!o){sb_platform_root_close(root);return NULL;}o->fd=-1;o->handler=handler;o->context=context;
     atomic_init(&o->quit,false);atomic_init(&o->stopping,false);
-    if(!sb_posix_socket_path(h->config.data_dir,o->path,sizeof(o->path),e))goto fail;
+    if(!sb_posix_socket_path(data,o->path,sizeof(o->path),e))goto fail;
     struct stat st;
-    if(!fstatat(h->lease->root->fd,"owner.sock",&st,AT_SYMLINK_NOFOLLOW)){
+    if(!fstatat(root->fd,"owner.sock",&st,AT_SYMLINK_NOFOLLOW)){
         if(!S_ISSOCK(st.st_mode)||st.st_uid!=geteuid()){sb_fail(e,"Unsafe existing owner socket path.");goto fail;}
-        if(unlinkat(h->lease->root->fd,"owner.sock",0)){sb_posix_error(e,"Remove stale owner socket");goto fail;}
+        if(unlinkat(root->fd,"owner.sock",0)){sb_posix_error(e,"Remove stale owner socket");goto fail;}
     }else if(errno!=ENOENT){sb_posix_error(e,"Inspect owner socket");goto fail;}
     o->fd=socket(AF_UNIX,SOCK_STREAM,0);if(o->fd<0)goto fail;fcntl(o->fd,F_SETFD,FD_CLOEXEC);
     struct sockaddr_un a={.sun_family=AF_UNIX};memcpy(a.sun_path,o->path,strlen(o->path)+1);
     if(bind(o->fd,(struct sockaddr *)&a,sizeof(a))||chmod(o->path,0600)||listen(o->fd,4)){sb_posix_error(e,"Create private owner socket");goto fail;}
-    if(pthread_create(&o->thread,NULL,serve,o)){sb_fail(e,"Cannot start local owner thread.");goto fail;}return o;
-fail:if(o->fd>=0)close(o->fd);free(o);return NULL;
+    if(pthread_create(&o->thread,NULL,serve,o)){sb_fail(e,"Cannot start local owner thread.");goto fail;}sb_platform_root_close(root);return o;
+fail:sb_platform_root_close(root);if(o->fd>=0)close(o->fd);free(o);return NULL;
 }
+static char *host_request(void *context,const char *bytes,size_t n){sb_host *h=context;return sb_policy_owner_request(h->policy,bytes,n);}
+sb_owner *sb_owner_start(sb_host *h,sb_error *e){return sb_owner_start_handler(h->config.data_dir,host_request,h,e);}
 void sb_owner_stop(sb_owner *o){if(o){atomic_store(&o->quit,true);pthread_join(o->thread,NULL);close(o->fd);unlink(o->path);free(o);}}
 bool sb_owner_stopping(sb_owner *o){return o&&atomic_load(&o->stopping);}
 char *sb_owner_exchange(const char *dir,const char *request,size_t length,sb_error *e){

@@ -5,6 +5,7 @@
 #include <stdatomic.h>
 #include <pthread.h>
 #include <signal.h>
+#include <sys/types.h>
 struct sb_root { int fd; char *path; };
 struct sb_file { int fd; bool directory; struct stat initial; };
 struct sb_lease { sb_root *root; int lock; unsigned backups; pthread_mutex_t mutex; };
@@ -19,4 +20,22 @@ bool sb_posix_write(int fd, const void *bytes, size_t length, sb_error *error);
 bool sb_posix_private(sb_root *root, sb_error *error);
 bool sb_posix_socket_path(const char *directory, char *out, size_t capacity, sb_error *error);
 extern volatile sig_atomic_t sb_posix_signal;
+void sb_posix_set_program(const char *argv0);
+const char *sb_posix_program(void);
+void sb_posix_close_inherited(void);
+bool sb_posix_peer(int fd, bool parent);
+char *sb_posix_frame_read(int fd, unsigned timeout_ms, sb_error *error);
+bool sb_posix_frame_write(int fd, const char *bytes, unsigned timeout_ms, sb_error *error);
+bool sb_posix_spawn_channel(char *const argv[], int *channel, pid_t *pid, sb_error *error);
+bool sb_posix_wait_child(pid_t pid, unsigned timeout_ms, int *status);
+char *sb_posix_json(yyjson_mut_doc *doc, yyjson_mut_val *root);
+char *sb_posix_json_error(const char *message);
+bool sb_posix_execution_bind(sb_execution *execution, sb_host *host, sb_error *error);
+void sb_posix_execution_cancel_all(sb_execution *execution);
+int sb_posix_task_agent(int fd);
+int sb_posix_worker_run(sb_host *host, int fd);
+bool sb_posix_manager_option(const char *option);
+int sb_posix_manager_cli(int argc, char **argv);
+bool sb_posix_secret(const char *a, const char *b);
+char *sb_posix_bearer(const char *name, sb_error *error);
 #endif

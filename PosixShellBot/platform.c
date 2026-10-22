@@ -117,8 +117,17 @@ static bool beneath(int ancestor,int descendant) {
 }
 bool sb_platform_roots_overlap(const sb_root *a,const sb_root *b){return beneath(a->fd,b->fd)||beneath(b->fd,a->fd);}
 bool sb_platform_root_identity(const sb_root *r,char out[50],sb_error *e){struct stat st;if(fstat(r->fd,&st)){sb_posix_error(e,"Root identity");return false;}identity(&st,out);return true;}
-sb_root *sb_platform_account_parent(const char *absolute,char **relative,sb_error *e){(void)absolute;*relative=NULL;sb_fail(e,"Account-wide file scope is not implemented by this POSIX milestone; use configured roots.");return NULL;}
-bool sb_platform_target_within(sb_root *root,sb_root *p,const char *rel,sb_error *e){(void)rel;(void)e;return beneath(root->fd,p->fd);}
+sb_root *sb_platform_account_parent(const char *absolute,char **relative,sb_error *e){
+    *relative=NULL;if(!absolute||*absolute!='/'||!valid_relative(absolute+1,false)){sb_fail(e,"A canonical absolute account path is required.");return NULL;}
+    char *copy=sb_strdup(absolute);if(!copy)return NULL;char *slash=strrchr(copy,'/');*relative=sb_strdup(slash+1);if(slash==copy)slash[1]=0;else *slash=0;
+    sb_root *r=*relative?sb_platform_root(copy,e):NULL;free(copy);if(!r){free(*relative);*relative=NULL;}return r;
+}
+bool sb_platform_target_within(sb_root *root,sb_root *p,const char *rel,sb_error *e){
+    if(beneath(root->fd,p->fd))return true;
+    /* Account paths may name the configured root itself. Compare its handle too. */
+    sb_file *f=sb_platform_open(p,rel,true,e);if(!f){if(e)e->text[0]=0;return false;}
+    bool inside=beneath(root->fd,f->fd);sb_platform_close(f);return inside;
+}
 sb_file *sb_platform_open(sb_root *root,const char *path,bool directory,sb_error *e) {
     int fd=-1;char *leaf=NULL;
     if(directory && path && !strcmp(path,"."))fd=walk(root->fd,".");
@@ -135,7 +144,16 @@ sb_file *sb_platform_open(sb_root *root,const char *path,bool directory,sb_error
     return f;
 }
 void sb_platform_close(sb_file *f){if(f){close(f->fd);free(f);}}
-char *sb_platform_directory_path(sb_file *f,sb_error *e){(void)f;sb_fail(e,"Command execution is unavailable.");return NULL;}
+char *sb_platform_directory_path(sb_file *f,sb_error *e){
+    char path[SB_PATH_CAP];if(!f||!f->directory){sb_fail(e,"A directory handle is required.");return NULL;}
+#ifdef __APPLE__
+    if(fcntl(f->fd,F_GETPATH,path)){sb_posix_error(e,"Resolve directory handle");return NULL;}
+#else
+    char link[64];snprintf(link,sizeof(link),"/proc/self/fd/%d",f->fd);ssize_t n=readlink(link,path,sizeof(path)-1);if(n<=0||(size_t)n>=sizeof(path)-1){sb_posix_error(e,"Resolve directory handle");return NULL;}path[n]=0;
+#endif
+    sb_root *again=sb_platform_root(path,e);struct stat a,b;bool ok=again&&!fstat(f->fd,&a)&&!fstat(again->fd,&b)&&same(&a,&b);sb_platform_root_close(again);
+    if(!ok){sb_fail(e,"Working directory moved or is no longer a canonical path.");return NULL;}return sb_strdup(path);
+}
 uint64_t sb_platform_size(sb_file *f){return (uint64_t)f->initial.st_size;}
 bool sb_platform_file_version(sb_file *f,char out[65],sb_error *e){struct stat st;return checked(f->fd,f->directory,&st,e)&&version(&st,out,e);}
 bool sb_platform_read(sb_file *f,uint64_t offset,unsigned char *out,size_t cap,size_t *length,sb_error *e) {
@@ -351,4 +369,13 @@ bool sb_platform_fs_execute(sb_fs_plan *p,sb_lease *l,sb_fs_backup_receipt recei
 void sb_platform_fs_close(sb_fs_plan *p){if(p){sb_platform_close(p->source);sb_platform_create_close(p->destination);if(p->parent>=0)close(p->parent);free(p->path);free(p->leaf);free(p);}}
 sb_file *sb_platform_transfer_spool(sb_lease *l,sb_error *e){(void)l;sb_fail(e,"Artifact transfers are unavailable in this milestone.");return NULL;}
 bool sb_platform_spool_append(sb_file *f,const unsigned char *bytes,size_t length,sb_error *e){(void)f;(void)bytes;(void)length;sb_fail(e,"Artifact transfers are unavailable.");return false;}
-bool sb_platform_export_config(const char *out,const char *backup,const char *json,size_t n,const char *original,size_t on,sb_error *e){(void)out;(void)backup;(void)json;(void)n;(void)original;(void)on;sb_fail(e,"Configuration export is unavailable; edit a separate owner-controlled configuration file.");return false;}
+static bool export_one(const char *path,const char *bytes,size_t n,sb_error *e){
+    char *leaf=NULL;sb_root *r=sb_platform_account_parent(path,&leaf,e);if(!r)return false;
+    int fd=openat(r->fd,leaf,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);bool ok=fd>=0&&sb_posix_write(fd,bytes,n,e)&&!fsync(fd);
+    if(fd>=0)close(fd);if(ok)ok=!fsync(r->fd);if(!ok&&!*e->text)sb_posix_error(e,"Export new private configuration");free(leaf);sb_platform_root_close(r);return ok;
+}
+bool sb_platform_export_config(const char *out,const char *backup,const char *json,size_t n,const char *original,size_t on,sb_error *e){
+    if(!out||!backup||!strcmp(out,backup)){sb_fail(e,"Distinct new output and backup paths are required.");return false;}
+    /* Keep a successfully flushed backup even if creating the new output fails. */
+    return export_one(backup,original,on,e)&&export_one(out,json,n,e);
+}

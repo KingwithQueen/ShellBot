@@ -1,4 +1,4 @@
-# Linux / macOS 后台开发版：第一阶段
+# Linux / macOS 后台开发版：第二阶段
 
 这是独立的 C17 POSIX 后台入口，不是 Windows 正式包或完整桌面版。正式 Windows 1.0.3 的 MSBuild 入口和 Win32 后端继续使用原有构建方式。当前已使用 Linux x86_64 和 Intel macOS 实机通过 SSH 编译运行；不能据此宣称所有发行版、旧系统或 Apple Silicon 已验收。
 
@@ -10,8 +10,10 @@
 - `fs_stat`、创建目录、文件复制、同文件系统移动、文件删除及空目录删除；拒绝覆盖目标、目录树复制和递归删除。
 - 本地 Unix socket 审批通道，由 Linux `SO_PEERCRED` 或 macOS `getpeereid` 核对同一用户。支持 inspect/approve/deny/revoke、审批列表和停止 HTTP 后台。
 - 审批与状态使用原有持久化模型，重启保留历史，未完成操作记录中断，不自动重放或恢复旧许可。
+- 本地项目列表、新增/配置/删除导出、启停、暂停/恢复与状态；管理器为每个启动的项目创建独立工作进程，统一回环 HTTP 按项目路由、分别认证。
+- 普通当前账户命令：启动、状态、二进制输出分页、标准输入及 EOF、取消、超时、输出限制、任务历史和输入回执。
 
-命令执行、受限/管理员进程、OAuth 与凭据存储、产物传输、图像/PDF/Office、桌面控制、管理界面、托盘、自启和服务安装尚未实现。工具发现隐藏这些能力，直接调用也会拒绝；注册表不能开启执行、管理员、桌面或账户全盘范围。每个后台进程只有一个固定项目，项目管理器和自动启停留到下一阶段。
+受限/管理员进程、OAuth 与凭据加密存储、产物传输、图像/PDF/Office、桌面控制、管理界面、托盘、自启和服务安装尚未实现。媒体工具继续隐藏；受限执行、管理员和桌面配置在启动时拒绝。普通命令须由项目显式开启；注册项目不会自动启动，异常退出的工作进程也不会自动重启。
 
 ## 原生构建
 
@@ -36,7 +38,7 @@ build/posix-native/ShellBot --validate-projects /absolute/private/projects.json
 build/posix-native/ShellBot --stdio --projects /absolute/private/projects.json --project example
 ```
 
-示例默认只读且每次审批。需要写入时，由所有者明确将相应工作目录的 `read_only` 改为 `false`。`approval_mode:workspace_auto` 仅自动批准已授权工作目录内的文件操作；`always` 保留逐次本地审批。配置由进程启动时固定加载，修改后停止对应进程再重启，不宣称已有管理器热更新或 OAuth 会话撤销机制。
+文件示例默认只读且每次审批。需要写入时，由所有者明确将相应工作目录的 `read_only` 改为 `false`。`approval_mode:workspace_auto` 仅自动批准已授权工作目录内的文件操作；`always` 保留逐次本地审批。配置由进程启动时固定加载；管理器内重启项目仍使用本次管理器的私有注册表快照。修改注册表后应重启管理器，不支持热更新。
 
 HTTP 使用独立进程环境中的令牌，访问 `/mcp` 或 `/projects/example/mcp`；`/healthz` 只报告存活。令牌要求 32～128 个十六进制字符，可使用内置生成器：
 
@@ -63,6 +65,62 @@ build/posix-native/ShellBot --approve APPROVAL_ID --data-dir /absolute/private/S
 
 `--stop --data-dir ...` 停止 HTTP 后台；stdio 由 EOF、SIGINT 或 SIGTERM 退出。关闭审批 socket 不代表撤销文件效果。Unix socket 有系统路径长度限制；过长的数据目录会在启动时明确报错，应选择较短的私有路径。
 
+## 项目管理与独立工作进程
+
+管理器和各项目分别使用私有 `0700` 数据目录，不能互相重叠，也不能与任何配置的文件根目录重叠。用目标机器的短绝对路径替换以下示例。HTTP 模式下，所有启用的项目须配置互不相同的 bearer；管理器只监听一个端口，工作进程不另开公开监听器。
+
+```sh
+ShellBot --project-list /private/projects.json
+ShellBot --manager --http --projects /private/projects.json --manager-data-dir /private/ManagerData --start-project example
+ShellBot --management-status --manager-data-dir /private/ManagerData
+ShellBot --project-start another --manager-data-dir /private/ManagerData
+ShellBot --project-pause example --manager-data-dir /private/ManagerData
+ShellBot --project-resume example --manager-data-dir /private/ManagerData
+ShellBot --project-status example --manager-data-dir /private/ManagerData
+ShellBot --project-stop example --manager-data-dir /private/ManagerData
+ShellBot --manager-stop --manager-data-dir /private/ManagerData
+```
+
+省略 `--http` 可仅运行本地管理后台。只有 `--start-project ID` 或本地启动命令会启动项目。访问 `/projects/ID/mcp` 使用该项目凭据；管理器的 `/mcp` 只有配置了 `gateway.default_project_id` 时才有路由。每个工作进程固定项目、策略版本、Data 和实例编号，工具参数不能切换其身份。暂停先阻止路由并取消已有命令，恢复沿用当前实例；停止后显式启动产生新实例。另一个项目保持独立运行。
+
+同一用户的本地管理通道可以转发项目审批或历史请求：
+
+```sh
+ShellBot --project-owner example --request /private/owner-request.json --manager-data-dir /private/ManagerData
+```
+
+`owner-request.json` 使用现有 owner 格式，例如 `{"command":"list"}` 或 `{"command":"history","id":"任务编号"}`。项目自己的 `--approve ID --data-dir PROJECT_DATA` 也继续可用。
+
+新增与配置文件为单个项目 JSON 对象。导出始终创建新注册表并保存原始字节备份；不覆盖旧文件，不在线改动运行中策略：
+
+```sh
+ShellBot --project-create /private/new-project.json --projects /private/projects.json --output /private/projects-next.json --backup /private/projects-original.json
+ShellBot --project-configure example --project-definition /private/changed-project.json --projects /private/projects.json --output /private/projects-next.json --backup /private/projects-original.json
+ShellBot --project-remove example --projects /private/projects.json --output /private/projects-next.json --backup /private/projects-original.json
+```
+
+每次使用新的输出和备份路径。备份成功而输出失败时保留备份供检查。配置命令沿用共享核心的策略版本递增和注册表验证规则；下一次管理器启动时加载新的注册表。
+
+## 普通命令与任务边界
+
+`config/posix-commands.example.json` 是独立的命令示例，默认逐次审批。它显式授予 `execution.enabled:true`、`default_identity:current_user`、`files.scope:current_user` 和 `current_user_read_only:false`；任何配置目录为只读时，普通命令仍按原策略拒绝。配置根目录范围的项目不能借普通命令绕过目录边界。不会自动扩大现有项目许可，也不会调用 sudo 或请求管理员授权。
+
+先调用 `host_capabilities` 取得 `execution_status.host_instance_id`。所有 `task_*` 请求携带该编号，`task_start` 另带工作目录 ID、程序绝对真实路径、`argv` 数组、`request_key` 和可选超时。程序须为原生 ELF/Mach-O，拒绝路径中的符号链接、多硬链接、set-id 文件及直接脚本；脚本应通过明确的解释器及 argv 执行。不会搜索 PATH 或自动拼接 shell。需要 shell 时由调用方明确选择原生 shell 程序并承担其当前账户权限。
+
+```json
+{"workspace_id":"workspace","path":".","executable":"/usr/bin/uname","argv":["-a"],"request_key":"inspect-system-1","timeout_ms":10000,"host_instance_id":"能力查询返回的32位编号"}
+```
+
+任务启动前保存意图及审计，再交由任务监督进程执行；保存失败时阻止新命令和 stdin。相同请求键返回原任务，内容变化拒绝；跨实例保留的键阻止自动重放。审批固定程序摘要和目录/程序版本；Linux 使用已打开文件执行，macOS 在校验后按原生路径执行，不宣称抵御恶意同 UID 修改程序的所有竞争。解释器读取的脚本、依赖和网络资源没有被自动固定或隔离。
+
+`task_output` 返回 `data_base64`、字节偏移及 `next_offset`；有效 UTF-8 页另带 `text_utf8`。stdout 和 stderr 合计保留不超过项目 `max_output_bytes`，超限停止任务。默认最多 8 个活动任务、32 条实例内记录、256 KiB 输出；记录不自动淘汰，避免旧请求键被再次执行。`task_input` 每次最多 4096 字节 UTF-8，携带 `input_key` 和可选 EOF；每任务最多 16 份回执，同键不同内容拒绝。状态区分排队、已投递和失败；部分写入字节数保留供核对。
+
+任务只继承系统生成的 HOME/USER/LOGNAME、固定 PATH、LANG 和 TMPDIR，不继承宿主 bearer 或自定义环境变量。当前实例的输出留在受限内存缓冲区；历史保留每流最多 8192 字节前缀与截断标记，以及命令元数据和 stdin 投递回执。Data 沿用私有权限保护，尚未加密。
+
+取消、超时、暂停和正常退出会停止任务进程组中的普通后代。工作进程崩溃时独立监督进程检测通道关闭并清理进程组；管理器异常退出后，工作进程因私有通道关闭而退出并停止任务。没有按进程名批量终止其他程序，也不自动恢复任务或 stdin。主动脱离进程组的守护进程、恶意同 UID 程序、监督进程本身被强杀均不属于已验证的完整任务树隔离。
+
+`worker_memory_mb` 在 Linux 当前实现中用作单条命令的地址空间限制，排除监督进程和工作进程；macOS 暂不执行该内存限制，能力响应会明确标注。两平台都有任务数、输出、输入、超时及关闭 core dump 的限制；不能把它们当作账户权限或整个进程树资源沙箱。
+
 ## 文件边界与限制
 
 根目录及相对路径逐段通过目录描述符和 `openat` 定位，拒绝符号链接、`..`、空路径分量、特殊文件和多硬链接普通文件。根目录还按物理身份检查重叠，不能依靠大小写差异绕过同一卷的别名检查。根路径自身也不能经过符号链接，因此 macOS 的 `/tmp`、`/var` 等别名路径应使用真实路径或用户目录。目录中不能解码为受支持 Unicode 文本的名字会使列举报错。
@@ -81,6 +139,6 @@ POSIX `flock` 是协作式锁。目录定位与版本复核是文件工具的访
 
 脚本仅选择 CMake、POSIX 后端、共享 C 源码及两个源码依赖，包含本机未提交的这些源码改动；不复制 `.git`、Windows 产物、Data 或 SSH 密钥。每次在远端指定根目录的 `.native-build/时间-随机值` 下新建源码和构建快照，核对逐文件 SHA-256 后编译，不覆盖现有文件，不运行安装操作。结果和取回的二进制保存在本机 `build/posix`，历史失败保留。
 
-现有约定将测试源保留在本机而不纳入 Git。恢复本地 `tests/posix_integration.py` 后可增加 `-WithTests`；测试仅在各远端项目下独立 `.qa-*` 夹具中读写，保留报告和备份，退出自己启动的进程。报告摘要须与取回的程序一致才视为通过。`-Sanitizers` 可对后台与共享核心启用地址/未定义行为检查；不声称第三方静态库也已经插桩。
+现有约定将测试源保留在本机而不纳入 Git。恢复本地 `tests/posix_integration.py` 和 `tests/posix_phase2.py` 后可增加 `-WithTests`；测试仅在各远端项目下独立 `.qa-*` 夹具中读写，保留报告和备份，退出自己启动的进程。报告摘要须与取回的程序一致才视为通过。`-Sanitizers` 可对后台与共享核心启用地址/未定义行为检查；不声称第三方静态库也已经插桩。
 
 本阶段的 SSH、原生后台、隔离文件与 HTTP 测试不等于真实 MCP 客户端、OAuth、GUI、物理桌面或跨发行版发布验收。

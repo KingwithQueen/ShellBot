@@ -24,6 +24,9 @@ yyjson_mut_val *sb_tasks_call(sb_host *host,const char *actor,const char *name,y
         if(!workspace_id || !exe || !task_key_valid(key) || !yyjson_is_arr(argv) || yyjson_arr_size(argv)>64 || (yyjson_obj_get(args,"path") && !path) ||
             (timeout_value && (!sb_integer(timeout_value,&timeout) || timeout<100 || timeout>host->config.limits.task_timeout_ms))) { sb_fail(&error,"Invalid task program, argv, request key, working directory or timeout."); goto done; }
         sb_workspace *workspace=sb_workspace_find(&host->config,workspace_id);
+#ifdef SB_POSIX
+        for(size_t i=0;i<yyjson_arr_size(argv);i++)if(!sb_string(yyjson_arr_get(argv,i))){sb_fail(&error,"Every command argument must be a string without embedded NUL.");goto done;}
+#endif
         if(!workspace) { sb_fail(&error,"Unknown workspace_id."); goto done; }
         directory=sb_platform_open(workspace->root,path?path:".",true,&error);
         if(!directory) goto done;
@@ -45,6 +48,11 @@ yyjson_mut_val *sb_tasks_call(sb_host *host,const char *actor,const char *name,y
         yyjson_mut_obj_add_uint(request,parameters,"timeout_ms",timeout);
         canonical=yyjson_mut_val_write(parameters,0,NULL);
         if(!canonical || !sb_platform_sha256(canonical,strlen(canonical),request_hash,&error)) goto done;
+#ifdef SB_POSIX
+        /* Guards can change after a command writes into cwd. They must not
+           change the idempotency digest of an otherwise identical retry. */
+        if(host->approved_program_version){yyjson_mut_obj_add_strcpy(request,parameters,"executable_version",host->approved_program_version);yyjson_mut_obj_add_strcpy(request,parameters,"cwd_version",host->approved_target_version);}
+#endif
         yyjson_mut_obj_add_strcpy(request,parameters,"request_key",key);
         yyjson_mut_obj_add_strcpy(request,parameters,"request_sha256",request_hash);
         yyjson_mut_obj_add_strcpy(request,parameters,"token_env",host->config.token_env);
