@@ -47,12 +47,18 @@ add_executable(ShellBot
   PosixShellBot/manager.c PosixShellBot/credentials.c PosixShellBot/keyring.c PosixShellBot/oauth.c
   PosixShellBot/desktop.c PosixShellBot/desktop_png.c
   PosixShellBot/startup.c
+  PosixShellBot/restricted.c PosixShellBot/admin.c
   core/config/config.c core/config/projects.c core/protocol/mcp.c
   core/policy/approval.c core/policy/audit.c core/policy/state.c core/policy/project_policy.c
   core/tools/tools.c core/tools/text.c core/tools/search.c core/tools/tasks.c
   core/tools/image.c core/tools/png_validate.c core/tools/document.c
   core/tools/transfer.c core/tools/desktop.c)
 target_include_directories(ShellBot PRIVATE core/include PosixShellBot)
+add_executable(ShellBot-RestrictedProbe PosixShellBot/restricted_probe.c)
+target_compile_definitions(ShellBot-RestrictedProbe PRIVATE _DARWIN_C_SOURCE _GNU_SOURCE)
+target_compile_options(ShellBot-RestrictedProbe PRIVATE -Wall -Wextra -Werror)
+add_dependencies(ShellBot ShellBot-RestrictedProbe)
+install(TARGETS ShellBot-RestrictedProbe RUNTIME DESTINATION bin)
 target_include_directories(ShellBot SYSTEM PRIVATE third_party/stb third_party/pdfium/include)
 target_compile_definitions(ShellBot PRIVATE SB_POSIX=1 _FILE_OFFSET_BITS=64)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -130,6 +136,8 @@ if(SHELLBOT_TESTS)
   set_tests_properties(media-transfer PROPERTIES TIMEOUT 180)
   add_test(NAME startup-service COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/posix_startup.py $<TARGET_FILE:ShellBot>)
   set_tests_properties(startup-service PROPERTIES TIMEOUT 240)
+  add_test(NAME command-identities COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/posix_commands.py $<TARGET_FILE:ShellBot>)
+  set_tests_properties(command-identities PROPERTIES TIMEOUT 180)
   if(SHELLBOT_DESKTOP)
     if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/posix_desktop.py")
       message(FATAL_ERROR "Restore local tests/posix_desktop.py before enabling desktop tests.")
@@ -146,6 +154,7 @@ install(DIRECTORY "${PDFIUM_DIR}/licenses/" DESTINATION share/ShellBot/licenses/
 install(FILES third_party/stb/LICENSE DESTINATION share/ShellBot/licenses RENAME stb-LICENSE)
 install(FILES docs/POSIX_MEDIA.md DESTINATION share/ShellBot)
 install(FILES docs/POSIX_STARTUP.md DESTINATION share/ShellBot)
+install(FILES docs/POSIX_COMMANDS.md DESTINATION share/ShellBot)
 install(FILES config/posix-media.example.json DESTINATION share/ShellBot/examples)
 install(FILES LICENSE.txt DESTINATION share/ShellBot/licenses)
 install(FILES third_party/yyjson/LICENSE DESTINATION share/ShellBot/licenses RENAME yyjson-LICENSE)
@@ -157,4 +166,5 @@ install(FILES docs/POSIX_REMOTE_DESKTOP.md DESTINATION share/ShellBot)
 install(FILES config/posix-desktop.example.json DESTINATION share/ShellBot/examples)
 install(FILES config/posix-projects.example.json DESTINATION share/ShellBot/examples)
 install(FILES config/posix-commands.example.json DESTINATION share/ShellBot/examples)
+install(FILES config/posix-restricted.example.json config/posix-admin.example.json DESTINATION share/ShellBot/examples)
 install(FILES config/posix-oauth.example.json DESTINATION share/ShellBot/examples)

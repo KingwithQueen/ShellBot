@@ -1,4 +1,5 @@
 #include "posix.h"
+#include "restricted.h"
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <sys/resource.h>
@@ -43,6 +44,7 @@ typedef struct {
     task items[RECORDS];
     unsigned count;
     sb_resource_limits limits;
+    sb_restricted *restricted;
 } agent;
 static const char *str(yyjson_val *v, const char *k) { return sb_string(yyjson_obj_get(v, k)); }
 static void close_fd(int *fd) {
@@ -292,7 +294,7 @@ static bool launch(task *t, agent *a, sb_error *e) {
 #ifdef __linux__
         struct rlimit memory = {(rlim_t)a->limits.worker_memory_mb * 1024u * 1024u,
                                 (rlim_t)a->limits.worker_memory_mb * 1024u * 1024u};
-        if (setrlimit(RLIMIT_AS, &memory) || prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0))
+        if ((!a->restricted && setrlimit(RLIMIT_AS, &memory)) || prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0))
             failure = errno;
 #else
         (void)a;
@@ -310,12 +312,18 @@ static bool launch(task *t, agent *a, sb_error *e) {
                 close(pipes[i][1]);
         }
         if (!failure) {
+            if (a->restricted) {
+                sb_restricted_exec(a->restricted, argv[0], t->program->fd, argv, env,
+                                   a->limits.worker_memory_mb);
+                failure = errno;
+            } else {
 #ifdef __linux__
-            fexecve(t->program->fd, argv, env);
+                fexecve(t->program->fd, argv, env);
 #else
-            execve(argv[0], argv, env);
+                execve(argv[0], argv, env);
 #endif
-            failure = errno;
+                failure = errno;
+            }
         }
         (void)write(pipes[3][1], &failure, sizeof(failure));
         _exit(127);
@@ -374,6 +382,13 @@ static yyjson_mut_val *handle(agent *a, const char *op, yyjson_val *args, yyjson
     sb_error e = {0};
     task *t = NULL;
     if (!strcmp(op, "configure")) {
+        if (a->count || a->restricted) {
+            sb_fail(&e, "Task supervisor is already configured.");
+            goto fail;
+        }
+        yyjson_val *restricted = yyjson_obj_get(args, "restricted");
+        if (restricted && !(a->restricted = sb_restricted_new(restricted, &e)))
+            goto fail;
         uint64_t n;
         const char *keys[] = {"active_tasks",    "task_records",     "output_bytes",
                               "task_timeout_ms", "approval_records", "worker_memory_mb"};
@@ -591,7 +606,7 @@ fail: {
 }
 int sb_posix_task_agent(int fd) {
     fcntl(fd, F_SETFD, FD_CLOEXEC);
-    if (!sb_posix_peer(fd, true) || geteuid() == 0 || getuid() != geteuid())
+    if (!sb_posix_peer(fd, true) || getuid() != geteuid())
         return 2;
     sb_posix_close_inherited();
     agent a = {.limits = {8, 32, 262144, 3600000, 64, 512}};
@@ -673,5 +688,6 @@ int sb_posix_task_agent(int fd) {
             free(t->inputs[j].bytes);
     }
     close(fd);
+    sb_restricted_free(a.restricted);
     return 0;
 }

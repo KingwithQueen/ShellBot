@@ -1,0 +1,64 @@
+{
+  "format_version": 1,
+  "gateway": {
+    "port": 8765
+  },
+  "projects": [
+    {
+      "id": "restricted",
+      "token_env": "SHELLBOT_RESTRICTED_TOKEN",
+      "data_dir": "/absolute/private/RestrictedData",
+      "workspaces": [
+        {
+          "id": "workspace",
+          "path": "/absolute/development",
+          "read_only": false
+        }
+      ],
+      "policy": {
+        "approval_mode": "always",
+        "files": {
+          "scope": "configured",
+          "current_user_read_only": false
+        },
+        "execution": {
+          "enabled": true,
+          "default_identity": "restricted",
+          "administrator_allowed": false,
+          "runtime_files": [
+            "/absolute/readonly/runtime/native-tool"
+          ]
+        },
+        "tools": [
+          "host_info",
+          "host_capabilities",
+          "fs_list",
+          "fs_read",
+          "fs_search",
+          "fs_write",
+          "fs_patch",
+          "fs_stat",
+          "fs_mkdir",
+          "fs_copy",
+          "fs_move",
+          "fs_delete",
+          "task_start",
+          "task_status",
+          "task_output",
+          "task_input",
+          "task_cancel",
+          "approval_status",
+          "approval_cancel"
+        ]
+      },
+      "resources": {
+        "max_active_tasks": 8,
+        "max_task_records": 32,
+        "max_output_bytes": 262144,
+        "max_timeout_ms": 3600000,
+        "max_approval_records": 64,
+        "worker_memory_mb": 512
+      }
+    }
+  ]
+}

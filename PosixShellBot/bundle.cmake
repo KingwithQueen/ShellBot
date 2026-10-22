@@ -2,6 +2,7 @@
 set(bundle "${OUTPUT}/ShellBot.app/Contents")
 file(MAKE_DIRECTORY "${bundle}/MacOS" "${bundle}/Resources" "${OUTPUT}/ShellBot.iconset")
 configure_file("${PROGRAM}" "${bundle}/MacOS/ShellBot" COPYONLY)
+configure_file("${OUTPUT}/ShellBot-RestrictedProbe" "${bundle}/MacOS/ShellBot-RestrictedProbe" COPYONLY)
 configure_file("${PDFIUM}" "${bundle}/MacOS/libpdfium.dylib" COPYONLY)
 file(MAKE_DIRECTORY "${bundle}/Resources/licenses/pdfium")
 file(COPY "${SOURCE}/third_party/pdfium/mac-x64/licenses/" DESTINATION "${bundle}/Resources/licenses/pdfium")

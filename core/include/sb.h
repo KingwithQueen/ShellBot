@@ -92,6 +92,10 @@ typedef struct {
     char owner_url[384]; /* Trusted owner entry URL; never a bearer credential. */
     const char *approved_target_version, *approved_program_version; /* Private per-call worker guards; never parsed from JSON. */
 } sb_host;
+#ifdef SB_POSIX
+char *sb_posix_administrator_call(sb_host *host, const char *actor, const char *name, yyjson_val *args);
+bool sb_posix_administrator_available(sb_host *host);
+#endif
 typedef struct {
     char *name;
     uint64_t size;

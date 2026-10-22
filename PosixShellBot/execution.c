@@ -1,5 +1,6 @@
 #include "posix.h"
 #include "sb_projects.h"
+#include "restricted.h"
 #include <sys/socket.h>
 #include <unistd.h>
 #include <stdlib.h>
@@ -7,7 +8,8 @@
 #include <string.h>
 struct sb_execution {
     char instance[33];
-    bool enabled, healthy, monitor_started;
+    bool enabled, healthy, monitor_started, restricted_verified;
+    sb_execution_profile profile;
     atomic_bool quit;
     pthread_mutex_t mutex;
     pthread_t monitor;
@@ -27,7 +29,7 @@ static bool persist(sb_execution *x, yyjson_val *v, const char *event) {
         yyjson_mut_obj_remove_str(body, "_actor");
     bool ok = body && id && actor && status &&
               sb_store_append(x->host->store, "task", id, actor, status, event, body) &&
-              sb_audit_task(x->host->audit, event, actor, str(v, "request_key"), id, SB_EXEC_USER,
+              sb_audit_task(x->host->audit, event, actor, str(v, "request_key"), id, x->profile,
                             str(v, "request_sha256"), "lifecycle",
                             yyjson_get_uint(yyjson_obj_get(v, "process_id")));
     yyjson_mut_doc_free(d);
@@ -95,14 +97,16 @@ sb_execution *sb_execution_new(const sb_config *c, sb_error *e) {
     }
     x->fd = -1;
     x->enabled = c->execution_enabled;
+    x->profile = c->execution_profile;
     x->limits = c->limits;
     x->healthy = true;
     atomic_init(&x->quit, false);
     pthread_mutex_init(&x->mutex, NULL);
     for (unsigned i = 0; i < 16; i++)
         snprintf(x->instance + 2 * i, 3, "%02x", b[i]);
-    if (x->enabled && (c->execution_profile != SB_EXEC_USER || geteuid() == 0)) {
-        sb_fail(e, "POSIX commands require a non-root ordinary current-user project.");
+    if (x->enabled &&
+        ((c->execution_profile == SB_EXEC_ADMINISTRATOR) != (geteuid() == 0) || getuid() != geteuid())) {
+        sb_fail(e, "Command identity does not match the native execution account.");
         sb_execution_free(x);
         return NULL;
     }
@@ -131,12 +135,27 @@ bool sb_posix_execution_bind(sb_execution *x, sb_host *h, sb_error *e) {
                          x->limits.task_timeout_ms, x->limits.approval_records, x->limits.worker_memory_mb};
     for (unsigned i = 0; i < 6; i++)
         yyjson_mut_obj_add_uint(d, v, keys[i], values[i]);
+    if (x->profile == SB_EXEC_CONTROLLED) {
+        yyjson_mut_val *policy = sb_restricted_config(d, h);
+        yyjson_mut_obj_add_val(d, v, "restricted", policy);
+        char *wire = yyjson_mut_val_write(policy, 0, NULL);
+        yyjson_doc *parsed = wire ? yyjson_read(wire, strlen(wire), 0) : NULL;
+        free(wire);
+        sb_restricted *r = parsed ? sb_restricted_new(yyjson_doc_get_root(parsed), e) : NULL;
+        x->restricted_verified = r && sb_restricted_verify(r, h->config.data_dir, e);
+        sb_restricted_free(r);
+        yyjson_doc_free(parsed);
+        if (!x->restricted_verified) {
+            yyjson_mut_doc_free(d);
+            return false;
+        }
+    }
     char *bytes = sb_posix_json(d, v);
     yyjson_doc *config = bytes ? yyjson_read(bytes, strlen(bytes), 0) : NULL;
     free(bytes);
     yyjson_doc *reply = config ? exchange(x, "configure", yyjson_doc_get_root(config), e) : NULL;
     yyjson_doc_free(config);
-    bool ok = reply != NULL;
+    bool ok = reply && !yyjson_get_bool(yyjson_obj_get(yyjson_doc_get_root(reply), "_error"));
     yyjson_doc_free(reply);
     if (!ok)
         return false;
@@ -203,11 +222,21 @@ bool sb_execution_available(sb_execution *x) {
     return ok;
 }
 bool sb_execution_restricted_verified(sb_execution *x) {
-    (void)x;
-    return false;
+    return x && x->restricted_verified && sb_execution_available(x);
 }
 bool sb_execution_program_permitted(sb_execution *x, const char *p) {
-    return sb_execution_available(x) && p && *p == '/';
+    if (!sb_execution_available(x) || !p || *p != '/')
+        return false;
+    if (x->profile != SB_EXEC_CONTROLLED)
+        return true;
+    for (size_t i = 0; i < x->host->project->policy.runtime_file_count; i++)
+        if (!strcmp(p, x->host->project->policy.runtime_files[i]))
+            return true;
+    return false;
+}
+void sb_posix_execution_instance_bind(sb_execution *x, const char *instance) {
+    if (x && !x->host && instance && strlen(instance) == 32)
+        memcpy(x->instance, instance, 33);
 }
 const char *sb_execution_instance(sb_execution *x) { return x ? x->instance : ""; }
 bool sb_execution_task_owned(sb_execution *x, const char *actor, const char *id) {
@@ -235,10 +264,15 @@ yyjson_mut_val *sb_execution_status(sb_execution *x, yyjson_mut_doc *d) {
     yyjson_mut_val *v = yyjson_mut_obj(d);
     yyjson_mut_obj_add_bool(d, v, "available", sb_execution_available(x));
     yyjson_mut_obj_add_strcpy(d, v, "host_instance_id", sb_execution_instance(x));
-    yyjson_mut_obj_add_str(d, v, "profile", "current_user");
-    yyjson_mut_obj_add_bool(d, v, "restricted_verified", false);
+    yyjson_mut_obj_add_str(d, v, "profile",
+                           x && x->profile == SB_EXEC_CONTROLLED      ? "restricted"
+                           : x && x->profile == SB_EXEC_ADMINISTRATOR ? "administrator"
+                                                                      : "current_user");
+    yyjson_mut_obj_add_bool(d, v, "restricted_verified", sb_execution_restricted_verified(x));
     yyjson_mut_obj_add_str(d, v, "containment",
-                           "process groups; current-user commands are not a filesystem sandbox");
+                           x && x->profile == SB_EXEC_CONTROLLED
+                               ? "native filesystem isolation, no network, no child processes"
+                               : "process groups; account commands are not a filesystem sandbox");
 #ifdef __linux__
     yyjson_mut_obj_add_str(d, v, "memory_limit", "per-command RLIMIT_AS; excludes supervisor and worker");
 #else

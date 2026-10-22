@@ -42,7 +42,7 @@ Mac 用户服务的操作目标为 gui/UID，SSH 可在该账户已有图形登�
 
 把上面的 kind 换成 system-service，并添加 `--service-user owl`。plan 可由普通用户生成；install/start/stop/uninstall 必须由管理员通过 sudo 执行。指定的运行用户必须存在且不是 root；必须明确提供该用户拥有的私有 credential-key-file。安装状态目录及其所有祖先必须由 root 拥有且不可被组或其他账户写入，不能放在普通用户的 home 或 /tmp 下；这也保护 launchd 降权前打开的日志路径。安装状态独立于后台普通用户的数据目录；Mac 可选 /Library/Application Support/ShellBotStartup/name，Linux 可选 /var/lib/ShellBotStartup/name（父目录先由管理员准备）。不要修改既有 Data 的所有者来迁就安装。
 
-系统 unit/plist 只赋予普通账户启动权限，不提供受限命令/管理员命令后端。没有图形会话时，屏幕与键鼠、系统密钥串和用户总线等仍受系统限制。系统启动前必须已挂载运行程序、注册表、密钥和项目路径；加密用户目录、FileVault、网络挂载的实际时序需人工验收。系统服务不能绕过这些边界。
+系统 unit/plist 只赋予普通账户启动权限。受限命令仍须通过实际隔离探针；管理员命令另需本地所有者显式启动匹配项目的提权代理，服务安装不授予管理员命令能力，见 POSIX_COMMANDS.md。没有图形会话时，屏幕与键鼠、系统密钥串和用户总线等仍受系统限制。系统启动前必须已挂载运行程序、注册表、密钥和项目路径；加密用户目录、FileVault、网络挂载的实际时序需人工验收。系统服务不能绕过这些边界。
 
 ## 登记归属和恢复
 

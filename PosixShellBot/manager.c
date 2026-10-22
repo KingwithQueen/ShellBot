@@ -1,4 +1,5 @@
 #include "posix.h"
+#include "admin.h"
 #include "desktop.h"
 #include "sb_projects.h"
 #include "oauth.h"
@@ -120,6 +121,7 @@ int sb_posix_worker_run(sb_host *h, int fd) {
         } else if (op && !strcmp(op, "owner") && wire)
             reply = sb_posix_owner_request(h, wire, strlen(wire));
         else if (op && !strcmp(op, "pause")) {
+            sb_posix_admin_close(h);
             sb_posix_desktop_pause(h->desktop);
             paused = true;
             sb_posix_execution_cancel_all(h->execution);
@@ -128,6 +130,7 @@ int sb_posix_worker_run(sb_host *h, int fd) {
             paused = false;
             reply = ok();
         } else if (op && !strcmp(op, "shutdown")) {
+            sb_posix_admin_close(h);
             sb_posix_execution_cancel_all(h->execution);
             reply = ok();
             stop = true;

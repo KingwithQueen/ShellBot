@@ -31,6 +31,9 @@ $files+='third_party/pdfium/include/fpdfview.h';$files+='third_party/pdfium/incl
 foreach($platform in @('linux-x64','mac-x64')){foreach($item in Get-ChildItem -LiteralPath (Join-Path $repo ('third_party/pdfium/'+$platform)) -Recurse -File){$files+=[IO.Path]::GetRelativePath($repo,$item.FullName).Replace('\','/')}}
 $files+='docs/POSIX_STARTUP.md';$files+='docs/POSIX_MEDIA.md';$files+='config/posix-media.example.json'
 if($WithTests){$files+='tests/posix_media.py';$files+='tests/posix_startup.py'}
+$files+='docs/POSIX_COMMANDS.md'
+$files+='config/posix-restricted.example.json';$files+='config/posix-admin.example.json'
+if($WithTests){$files+='tests/posix_commands.py';$files+='tests/posix_command_fixture.c'}
 $files=@($files|Sort-Object -Unique)
 $hashes=foreach($file in $files){$path=Join-Path $repo $file;if(!(Test-Path -LiteralPath $path -PathType Leaf)){throw "Missing input: $file"};((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()+'  '+$file)}
 [IO.File]::WriteAllText((Join-Path $runDir 'SOURCE_SHA256SUMS'),($hashes -join "`n")+"`n",[Text.UTF8Encoding]::new($false))
@@ -97,6 +100,12 @@ fi
                 $testVerified=$testVerified -and $desktopResult.status -ceq 'passed' -and $desktopResult.sha256 -ceq $testResult.sha256
             }
             $startupReport=Join-Path $runDir ($connection.name+'-startup-report.json')
+            $commandsReport=Join-Path $runDir ($connection.name+'-commands-report.json')
+            & $scp @options ($connection.hostName+':'+$snapshot+'/build/commands-test-report.json') $commandsReport
+            if($LASTEXITCODE -ne 0){$testVerified=$false}else{
+                $commandsResult=Get-Content -LiteralPath $commandsReport -Raw|ConvertFrom-Json
+                $testVerified=$testVerified -and $commandsResult.status -ceq 'passed' -and $commandsResult.sha256 -ceq $testResult.sha256
+            }
             & $scp @options ($connection.hostName+':'+$snapshot+'/build/startup-test-report.json') $startupReport
             if($LASTEXITCODE -ne 0){$testVerified=$false}else{
                 $startupResult=Get-Content -LiteralPath $startupReport -Raw|ConvertFrom-Json

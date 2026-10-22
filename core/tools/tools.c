@@ -306,7 +306,11 @@ static yyjson_mut_val *tool_call_inner(sb_host *host, const char *actor, const c
         if (host->project) {
             yyjson_mut_obj_add_bool(doc, data, "project_approval_adapter", !host->project->legacy_compatibility);
             yyjson_mut_obj_add_bool(doc, data, "unlisted_account_file_adapter", account_files_available && !host->project->legacy_compatibility && host->project->policy.file_scope == SB_FILES_CURRENT_USER);
+#ifdef SB_POSIX
+            yyjson_mut_obj_add_bool(doc, data, "administrator_backend", host->administrator_host || sb_posix_administrator_available(host));
+#else
             yyjson_mut_obj_add_bool(doc, data, "administrator_backend", host->administrator_backend);
+#endif
             yyjson_mut_obj_add_bool(doc, data, "administrator_identity_explicit", true);
             yyjson_mut_obj_add_uint(doc, data, "max_active_tasks", host->config.limits.active_tasks);
             yyjson_mut_obj_add_uint(doc, data, "max_task_records", host->config.limits.task_records);
@@ -694,7 +698,11 @@ static yyjson_mut_val *project_tool_call(sb_host *host, const char *actor, const
     const char *selected_identity=sb_string(yyjson_obj_get(args,"identity"));
     bool administrator=selected_identity && !strcmp(selected_identity,"administrator");
     if (administrator && !host->administrator_host) {
+#ifdef SB_POSIX
+        char *wire=sb_posix_administrator_call(host,actor,name,args);
+#else
         char *wire=host->administrator_call ? host->administrator_call(host->administrator_context,name,args) : NULL;
+#endif
         yyjson_doc *reply=wire ? yyjson_read(wire,strlen(wire),0) : NULL;
         yyjson_val *root=yyjson_doc_get_root(reply);
         yyjson_mut_val *result=yyjson_is_bool(yyjson_obj_get(root,"isError")) ? yyjson_val_mut_copy(doc,root) :

@@ -32,6 +32,7 @@ char *sb_posix_json(yyjson_mut_doc *doc, yyjson_mut_val *root);
 char *sb_posix_json_error(const char *message);
 bool sb_posix_execution_bind(sb_execution *execution, sb_host *host, sb_error *error);
 void sb_posix_execution_cancel_all(sb_execution *execution);
+void sb_posix_execution_instance_bind(sb_execution *execution, const char *instance);
 int sb_posix_task_agent(int fd);
 int sb_posix_worker_run(sb_host *host, int fd);
 bool sb_posix_manager_option(const char *option);

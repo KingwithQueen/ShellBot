@@ -46,4 +46,4 @@ cmake --install build/native --prefix /absolute/staging-directory
 
 安装到指定目录只生成文件，不注册服务、自启、钥匙串解锁或系统应用关联。Linux `.desktop` 需要 `ShellBot` 在应用启动环境的 PATH 中；未安装时直接打开暂存目录的程序。Mac 开发包未签名、公证或制作通用架构包；Linux 二进制依赖构建机的 libc、GTK、OpenSSL、libsecret 等系统库。
 
-`SHELLBOT_TESTS=ON` 额外启用隔离控制器驱动和短时界面检查入口。它们使用生成的项目和凭据，不连接真实 MCP 账户；正式打包可关闭此选项。后端回归、界面自动化、托盘协议模拟、实际桌面会话和人工操作验收须分别记录。第五阶段加入独立的“远程桌面”页和托盘暂停/恢复入口，参见 [远程桌面](POSIX_REMOTE_DESKTOP.md)。尚不包含受限/管理员命令、自启服务、媒体工具和真实外部客户端验收。
+`SHELLBOT_TESTS=ON` 额外启用隔离控制器驱动和短时界面检查入口。它们使用生成的项目和凭据，不连接真实 MCP 账户；正式打包可关闭此选项。后端回归、界面自动化、托盘协议模拟、实际桌面会话和人工操作验收须分别记录。第五阶段加入独立的“远程桌面”页和托盘暂停/恢复入口，参见 [远程桌面](POSIX_REMOTE_DESKTOP.md)。后续阶段的媒体工具、自启服务和命令身份分别见 POSIX_MEDIA.md、POSIX_STARTUP.md、POSIX_COMMANDS.md；真实外部客户端与实际桌面仍需人工验收。

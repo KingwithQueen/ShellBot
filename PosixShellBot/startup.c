@@ -357,6 +357,33 @@ static int control(startup *s, const char *command, char out[OUTPUT_LIMIT + 1], 
 #endif
     return native(args, out, e);
 }
+#ifdef __APPLE__
+static bool unload(startup *s, char out[OUTPUT_LIMIT + 1], sb_error *e) {
+    if (control(s, "print", out, e))
+        return true;
+    const char *entry = strstr(out, "\n\tpid = ");
+    char *end = NULL;
+    long pid = entry ? strtol(entry + 8, &end, 10) : 0;
+    bool have_pid = pid > 1 && end && (*end == '\n' || *end == '\r');
+    if (control(s, "bootout", out, e))
+        return false;
+    /* bootout can return before the old process releases its state lease.
+       Never signal this numeric pid: it is only a bounded completion check. */
+    if (have_pid) {
+        uint64_t deadline = sb_platform_millis() + 10000;
+        while (!kill((pid_t)pid, 0) || errno == EPERM) {
+            if (sb_platform_millis() >= deadline) {
+                sb_fail(e, "Native job was unloaded but its previous process is still exiting; inspect "
+                           "status before starting again.");
+                return false;
+            }
+            struct timespec pause = {.tv_nsec = 50000000};
+            nanosleep(&pause, NULL);
+        }
+    }
+    return true;
+}
+#endif
 static bool paths(startup *s, bool account_lookup, sb_error *e) {
     if (!s->kind ||
         (!strcmp(s->kind, "desktop")
@@ -496,10 +523,9 @@ static bool build(startup *s, sb_error *e) {
             sb_fail(e, "OAuth services require a configured HTTPS public_url.");
         for (unsigned i = 0; i < s->count; i++) {
             const sb_project *p = sb_project_find(&r, s->starts[i]);
-            if (!p || !p->enabled || p->legacy_compatibility || p->policy.administrator_allowed ||
-                (p->policy.execution_enabled && p->policy.default_identity != SB_ID_CURRENT_USER)) {
-                sb_fail(
-                    e, "Startup projects must be enabled native projects with ordinary current-user policy.");
+            if (!p || !p->enabled || p->legacy_compatibility) {
+                sb_fail(e, "Startup projects must be enabled native projects; command identities are "
+                           "verified by their workers.");
                 ok = false;
                 break;
             }
@@ -904,7 +930,9 @@ int sb_startup_cli(int argc, char **argv) {
         int exists = control(&s, "print", native_out, &e);
         int code = !strcmp(s.action, "start") ? (exists ? control(&s, "bootstrap", native_out, &e)
                                                         : control(&s, "kickstart", native_out, &e))
-                                              : (exists ? 0 : control(&s, "bootout", native_out, &e));
+                                              : (exists                       ? 0
+                                                 : unload(&s, native_out, &e) ? 0
+                                                                              : 1);
 #else
         if (!strcmp(s.action, "start")) {
             /* An unloaded healthy unit has no failure state to reset. The
@@ -933,7 +961,7 @@ int sb_startup_cli(int argc, char **argv) {
 #endif
         if (strcmp(s.kind, "desktop")) {
 #ifdef __APPLE__
-            if (!control(&s, "print", native_out, &e) && control(&s, "bootout", native_out, &e)) {
+            if (!unload(&s, native_out, &e)) {
                 sb_fail(&e, "Native service could not be unloaded; registration retained.");
                 goto done;
             }
