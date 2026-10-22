@@ -10,7 +10,7 @@ typedef struct {
     sb_native_manager *desktop;
     GtkApplication *app;
     GtkWidget *window, *projects, *requests, *details, *request_detail, *message, *summary, *tray_label;
-    GtkWidget *http, *oauth, *port, *url, *persistent, *desktop_status;
+    GtkWidget *http, *oauth, *port, *url, *persistent, *desktop_status, *startup_status;
     yyjson_doc *model;
     char project[64], request_id[65], request_type[32];
     bool busy, rendering, tray, quitting, settings_loaded;
@@ -133,6 +133,9 @@ static void render(void) {
     gtk_label_set_text(GTK_LABEL(ui.summary),
                        active ? "后台运行中 · 项目独立运行" : "后台已停止 · 点击启动后台后可启动项目");
     gtk_label_set_text(GTK_LABEL(ui.message), sb_gui_string(yyjson_doc_get_root(ui.model), "message"));
+    if(ui.startup_status)gtk_label_set_text(GTK_LABEL(ui.startup_status),
+        *sb_gui_string(model("startup"),"error")?"登录自启：配置需要检查":
+        sb_gui_bool(model("startup"),"installed")?"登录自启：已启用":"登录自启：未启用");
     if (ui.desktop_status) {
         char *status = sb_gui_desktop_text(model("desktop"));
         set_text(ui.desktop_status, status);
@@ -480,6 +483,7 @@ static void import_clicked(GtkButton *b, gpointer data) {
     gtk_file_dialog_open(d, GTK_WINDOW(ui.window), NULL, import_chosen, NULL);
     g_object_unref(d);
 }
+static void startup_clicked(GtkButton *b,gpointer action) { (void)b;submit(action); }
 static void settings_save(GtkButton *b, gpointer unused) {
     (void)b;
     (void)unused;
@@ -994,6 +998,10 @@ static void activate(GtkApplication *app, gpointer data) {
     b = gtk_button_new_with_label("保存连接设置");
     g_signal_connect(b, "clicked", G_CALLBACK(settings_save), NULL);
     append(settings_box, b);
+    ui.startup_status=label("登录自启：正在检查");append(settings_box,ui.startup_status);
+    append(settings_box,label("登录自启只打开管理界面；独立后台服务请按 POSIX_STARTUP.md 安装。"));
+    b=gtk_button_new_with_label("启用登录自启");g_signal_connect(b,"clicked",G_CALLBACK(startup_clicked),"startup_install");append(settings_box,b);
+    b=gtk_button_new_with_label("取消登录自启");g_signal_connect(b,"clicked",G_CALLBACK(startup_clicked),"startup_uninstall");append(settings_box,b);
     gtk_notebook_append_page(GTK_NOTEBOOK(tabs), settings_box, gtk_label_new("连接设置"));
     ui.tray_label = label("正在连接系统托盘…");
     ui.message = label("");

@@ -46,6 +46,7 @@ add_executable(ShellBot
   PosixShellBot/process.c PosixShellBot/execution.c PosixShellBot/task_agent.c
   PosixShellBot/manager.c PosixShellBot/credentials.c PosixShellBot/keyring.c PosixShellBot/oauth.c
   PosixShellBot/desktop.c PosixShellBot/desktop_png.c
+  PosixShellBot/startup.c
   core/config/config.c core/config/projects.c core/protocol/mcp.c
   core/policy/approval.c core/policy/audit.c core/policy/state.c core/policy/project_policy.c
   core/tools/tools.c core/tools/text.c core/tools/search.c core/tools/tasks.c
@@ -127,6 +128,8 @@ if(SHELLBOT_TESTS)
   set_tests_properties(remote-desktop PROPERTIES TIMEOUT 150)
   add_test(NAME media-transfer COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/posix_media.py $<TARGET_FILE:ShellBot>)
   set_tests_properties(media-transfer PROPERTIES TIMEOUT 180)
+  add_test(NAME startup-service COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/posix_startup.py $<TARGET_FILE:ShellBot>)
+  set_tests_properties(startup-service PROPERTIES TIMEOUT 240)
   if(SHELLBOT_DESKTOP)
     if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/posix_desktop.py")
       message(FATAL_ERROR "Restore local tests/posix_desktop.py before enabling desktop tests.")
@@ -142,6 +145,7 @@ install(FILES "${PDFIUM_DIR}/LICENSE" DESTINATION share/ShellBot/licenses/pdfium
 install(DIRECTORY "${PDFIUM_DIR}/licenses/" DESTINATION share/ShellBot/licenses/pdfium)
 install(FILES third_party/stb/LICENSE DESTINATION share/ShellBot/licenses RENAME stb-LICENSE)
 install(FILES docs/POSIX_MEDIA.md DESTINATION share/ShellBot)
+install(FILES docs/POSIX_STARTUP.md DESTINATION share/ShellBot)
 install(FILES config/posix-media.example.json DESTINATION share/ShellBot/examples)
 install(FILES LICENSE.txt DESTINATION share/ShellBot/licenses)
 install(FILES third_party/yyjson/LICENSE DESTINATION share/ShellBot/licenses RENAME yyjson-LICENSE)

@@ -240,6 +240,20 @@ static yyjson_doc *settings(sb_native_manager *g) {
         d = yyjson_read("{\"http\":true,\"oauth\":false}", 27, 0);
     return d;
 }
+static char *run(sb_native_manager *g, char *const argv[], bool daemon, sb_error *e);
+static yyjson_doc *startup(sb_native_manager *g, const char *action, sb_error *e) {
+    char state[SB_PATH_CAP], id[64], hash[65];
+    snprintf(state,sizeof(state),"%s/startup",g->directory);
+    sb_platform_sha256(g->directory,strlen(g->directory),hash,e);
+    snprintf(id,sizeof(id),"desktop-%.20s",hash);
+    char *args[16]={(char *)sb_posix_program(),(char *)action,"--startup-dir",state,NULL};
+    if(!strcmp(action,"--startup-install")){
+        unsigned n=4;args[n++]="--kind";args[n++]="desktop";args[n++]="--name";args[n++]=id;
+        args[n++]="--desktop-data-dir";args[n++]=g->directory;
+        if(*g->key){args[n++]="--credential-key-file";args[n++]=g->key;}args[n]=NULL;
+    }
+    return parse(run(g,args,false,e));
+}
 /* Spawn a fixed local executable without a shell, with bounded capture and time. */
 static char *run(sb_native_manager *g, char *const argv[], bool daemon, sb_error *e) {
     int pipes[2] = {-1, -1};
@@ -771,6 +785,7 @@ static void copy_doc(yyjson_mut_doc *d, yyjson_mut_val *root, const char *key, y
 static char *snapshot(sb_native_manager *g) {
     yyjson_doc *cfg = registry(g), *state = exchange(g, "status", NULL, NULL), *s = settings(g),
                *oauth = NULL, *approvals = NULL, *desktop = NULL;
+    sb_error startup_error={0};yyjson_doc *autostart=startup(g,"--startup-status",&startup_error);
     bool active = yyjson_obj_get(yyjson_doc_get_root(state), "manager_pid") != NULL;
     if (!find(cfg, "projects", "id", g->selected)) {
         yyjson_val *first = yyjson_arr_get(yyjson_obj_get(yyjson_doc_get_root(cfg), "projects"), 0);
@@ -790,6 +805,8 @@ static char *snapshot(sb_native_manager *g) {
     copy_doc(d, v, "oauth", oauth);
     copy_doc(d, v, "approvals", approvals);
     copy_doc(d, v, "desktop", desktop);
+    copy_doc(d, v, "startup", autostart);
+    yyjson_doc_free(autostart);
     copy_doc(d, v, "inspected", g->inspected);
     yyjson_mut_obj_add_bool(d, v, "online", active);
     yyjson_mut_obj_add_bool(d, v, "ok", g->last_ok);
@@ -831,6 +848,12 @@ char *sb_desktop_work(sb_native_manager *g, const char *request) {
         ok = edit(g, q, &e);
     else if (!strcmp(a, "settings"))
         ok = configure(g, q, &e);
+    else if (!strcmp(a,"startup_install") || !strcmp(a,"startup_uninstall")) {
+        yyjson_doc *r=startup(g,!strcmp(a,"startup_install")?"--startup-install":"--startup-uninstall",&e);
+        ok=r&&!*sb_gui_string(yyjson_doc_get_root(r),"error");
+        if(!ok&&r)sb_fail(&e,sb_gui_string(yyjson_doc_get_root(r),"error"));
+        yyjson_doc_free(r);
+    }
     else if (!strcmp(a, "desktop_permissions"))
         ok = desktop_permissions(g, q, &e);
     else if (!strcmp(a, "desktop-connect") || !strcmp(a, "desktop-pause") || !strcmp(a, "desktop-resume")) {

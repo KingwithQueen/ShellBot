@@ -62,7 +62,7 @@ static void putText(NSTextView *view, NSString *text) {
 @property NSStatusItem *statusItem;
 @property NSTableView *projects, *requests;
 @property NSTextView *detail, *requestDetail, *desktopStatus;
-@property NSTextField *summary, *message, *port, *url;
+@property NSTextField *summary, *message, *port, *url, *startupStatus;
 @property NSButton *http, *oauth, *persistent;
 @property NSMutableArray<NSDictionary *> *projectRows, *requestRows;
 @property NSString *selected, *requestID, *requestType, *smoke;
@@ -215,10 +215,15 @@ static void putText(NSTextView *view, NSString *text) {
     self.port = [NSTextField textFieldWithString:@"8765"];
     self.url = [NSTextField textFieldWithString:@""];
     self.url.placeholderString = @"https://shellbot.example.com";
+    self.startupStatus=label(@"登录自启：正在检查");
     NSStackView *settings = stack(YES, @[
         self.http, label(@"本机端口"), self.port, label(@"公网 HTTPS 地址（隧道由你配置）"), self.url,
         self.oauth, label(@"凭据由系统钥匙串保护。保存前请停止后台；修改后手动启动后台和项目。"),
-        [self special:@"保存连接设置" selector:@selector(saveSettings:)]
+        [self special:@"保存连接设置" selector:@selector(saveSettings:)],
+        self.startupStatus,
+        label(@"登录自启只打开管理界面；独立后台服务请按 POSIX_STARTUP.md 安装。"),
+        [self special:@"启用登录自启" selector:@selector(enableStartup:)],
+        [self special:@"取消登录自启" selector:@selector(disableStartup:)]
     ]);
     [self.port.widthAnchor constraintEqualToConstant:180].active = YES;
     [self.url.widthAnchor constraintEqualToConstant:640].active = YES;
@@ -385,6 +390,8 @@ static void putText(NSTextView *view, NSString *text) {
     BOOL active = sb_gui_bool(yyjson_doc_get_root(self.model), "online");
     self.summary.stringValue = active ? @"后台运行中 · 项目独立运行" : @"后台已停止 · 启动后台后可启动项目";
     self.message.stringValue = str(sb_gui_string(yyjson_doc_get_root(self.model), "message"));
+    self.startupStatus.stringValue= *sb_gui_string([self value:"startup"],"error")?@"登录自启：配置需要检查":
+        sb_gui_bool([self value:"startup"],"installed")?@"登录自启：已启用":@"登录自启：未启用";
     char *desktopText = sb_gui_desktop_text([self value:"desktop"]);
     putText(self.desktopStatus, str(desktopText));
     free(desktopText);
@@ -698,6 +705,8 @@ static void putText(NSTextView *view, NSString *text) {
         @"oauth" : @(self.oauth.state == NSControlStateValueOn)
     }];
 }
+- (void)enableStartup:(id)sender { (void)sender;[self send:@{@"action":@"startup_install"}]; }
+- (void)disableStartup:(id)sender { (void)sender;[self send:@{@"action":@"startup_uninstall"}]; }
 - (void)tick:(NSTimer *)timer {
     (void)timer;
     if (sb_desktop_raise(self.desktop))
