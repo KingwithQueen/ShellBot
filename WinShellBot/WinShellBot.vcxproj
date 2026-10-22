@@ -192,6 +192,8 @@
     <ClCompile Include="platform\oauth_ui.c" />
     <ClInclude Include="platform\oauth.h" />
     <ClCompile Include="platform\desktop_dialog.c" />
+    <ClCompile Include="platform\folder_dialog.c" />
+    <ClInclude Include="platform\folder_dialog.h" />
     <ClCompile Include="platform\desktop_store.c" />
     <ClCompile Include="platform\portable.c" />
     <ClInclude Include="platform\desktop_app.h" />

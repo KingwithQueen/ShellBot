@@ -399,14 +399,17 @@ bool sb_platform_prepare_runtime(const char *directory,sb_error *error) {
     if(!sb_platform_storage_path(directory,error))return false;
     static const struct {const wchar_t *name,*leaf;} items[]={
         {L"TEMP",L"Temp"},{L"TMP",L"Temp"},{L"APPDATA",L"Roaming"},
-        {L"LOCALAPPDATA",L"Local"},{L"XDG_CACHE_HOME",L"Cache"},{L"HOME",L"Home"},{L"USERPROFILE",L"Home"}};
+        {L"LOCALAPPDATA",L"Local"},{L"XDG_CACHE_HOME",L"Cache"},{L"HOME",L"Home"},{L"USERPROFILE",L"Home"},
+        /* Explorer resolves Desktop below USERPROFILE even with SetFolder. */
+        {NULL,L"Home\\Desktop"}};
     wchar_t *base=wide(directory);bool ok=base!=NULL;
     for(size_t i=0;ok && i<sizeof(items)/sizeof(items[0]);++i){
         size_t n=wcslen(base)+wcslen(items[i].leaf)+12;wchar_t *path=calloc(n,sizeof(*path));
         if(path)swprintf(path,n,L"%ls\\Runtime\\%ls",base,items[i].leaf);
         char *narrow=path?utf8(path):NULL;bool permitted=narrow && sb_platform_storage_path(narrow,error);free(narrow);
         int created=permitted ? SHCreateDirectoryExW(NULL,path,NULL) : ERROR_ACCESS_DENIED;
-        ok=path && (created==ERROR_SUCCESS || created==ERROR_ALREADY_EXISTS || created==ERROR_FILE_EXISTS) && !_wputenv_s(items[i].name,path);
+        ok=path && (created==ERROR_SUCCESS || created==ERROR_ALREADY_EXISTS || created==ERROR_FILE_EXISTS) &&
+            (!items[i].name || !_wputenv_s(items[i].name,path));
         free(path);
     }
     free(base);if(!ok)sb_fail(error,"无法准备非 C 盘临时目录；未使用系统临时目录。");return ok;

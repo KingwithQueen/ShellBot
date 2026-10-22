@@ -1,7 +1,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <commctrl.h>
-#include <shlobj.h>
+#include "folder_dialog.h"
 #include "desktop_app.h"
 #include "project_settings.h"
 #include "native_ui.h"
@@ -137,8 +137,8 @@ static LRESULT CALLBACK procedure(HWND window,UINT message,WPARAM wp,LPARAM lp) 
         if (LOWORD(wp)==D_SAVE) { begin_save(d);return 0; }
         if (LOWORD(wp)==D_CANCEL && !d->busy) { DestroyWindow(window);return 0; }
         if (LOWORD(wp)==D_BROWSE && !d->busy) {
-            BROWSEINFOW info={0};info.hwndOwner=window;info.lpszTitle=L"选择此项目独立的存储目录（新项目使用空目录）";info.ulFlags=BIF_RETURNONLYFSDIRS|BIF_NEWDIALOGSTYLE;
-            PIDLIST_ABSOLUTE item=SHBrowseForFolderW(&info);wchar_t path[MAX_PATH];if (item && SHGetPathFromIDListW(item,path)) {SetWindowTextW(GetDlgItem(window,D_DIRECTORY),path);if(!d->storage)synchronize_directory(d);}CoTaskMemFree(item);return 0;
+            if(sb_choose_directory(window,GetDlgItem(window,D_DIRECTORY),d->storage ? L"选择 ShellBot 数据目录" : L"选择此项目独立的存储目录（新项目使用空目录）") && !d->storage)synchronize_directory(d);
+            return 0;
         }
         if (LOWORD(wp)==D_ADVANCED && !d->busy && read_draft(d)) {
             yyjson_doc *project=yyjson_read(d->draft.definition,strlen(d->draft.definition),0);yyjson_mut_doc *doc=yyjson_mut_doc_new(NULL);

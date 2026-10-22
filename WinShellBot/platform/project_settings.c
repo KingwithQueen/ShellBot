@@ -8,6 +8,7 @@
 #include "execution.h"
 #include "desktop_app.h"
 #include "native_ui.h"
+#include "folder_dialog.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -86,9 +87,7 @@ static LRESULT CALLBACK modal_proc(HWND window,UINT message,WPARAM wp,LPARAM lp)
     }
     if (message==WM_COMMAND) {
         if (LOWORD(wp)==4304) {
-            BROWSEINFOW browse={0}; browse.hwndOwner=window; browse.lpszTitle=L"选择允许访问的目录"; browse.ulFlags=BIF_RETURNONLYFSDIRS|BIF_NEWDIALOGSTYLE;
-            PIDLIST_ABSOLUTE item=SHBrowseForFolderW(&browse); wchar_t path[MAX_PATH];
-            if (item && SHGetPathFromIDListW(item,path)) SetWindowTextW(m->edit,path); CoTaskMemFree(item); return 0;
+            sb_choose_directory(window,m->edit,L"选择允许访问的目录");return 0;
         }
         if (LOWORD(wp)==IDOK) {
             char *value=text(m->edit),*name=m->json ? NULL : text(m->id);

@@ -24,7 +24,7 @@ $releaseNotes="RELEASE_NOTES_$version.md"
 Require (Test-Path -LiteralPath (Join-Path $root ('docs\'+$releaseNotes))) 'Current release notes are required.'
 $runtime=@('ShellBot.exe','WinShellBot.exe','ShellBot-SandboxProbe.exe','pdfium.dll')
 $artifacts=[ordered]@{};$reports=@()
-$stages=@{'layout'='M21-layout';'refresh'='M14-manager-refresh';'native-ui'='M20-native-ui';'oauth'='M15-OAuth';'native-dialogs'='M20-native-dialogs';'desktop'='M14-desktop';'entry'='M14-entry';'exit'='M14-exit';'oauth-ui'='M15-OAuth-UI';'portable'='M16-portable';'files'='M13-files';'settings'='M13-settings';'images'='M9';'documents'='M10';'document-backend'='M10_PDF_dependency';'transfers'='M11';'gateway'='M3';'eof'='HTTP-EOF';'single-tray'='single-tray'}
+$stages=@{'layout'='M21-layout';'refresh'='M14-manager-refresh';'native-ui'='M20-native-ui';'oauth'='M15-OAuth';'native-dialogs'='M20-native-dialogs';'desktop'='M14-desktop';'entry'='M14-entry';'exit'='M14-exit';'oauth-ui'='M15-OAuth-UI';'portable'='M16-portable';'files'='M13-files';'settings'='M13-settings';'images'='M9';'documents'='M10';'document-backend'='M10_PDF_dependency';'transfers'='M11';'gateway'='M3';'eof'='HTTP-EOF';'single-tray'='single-tray';'folder-picker'='folder-picker'}
 foreach($configuration in @('Debug','Release')){
     $binaries=[ordered]@{}
     foreach($name in $runtime){
@@ -37,7 +37,7 @@ foreach($configuration in @('Debug','Release')){
         }
     }
     $artifacts[$configuration]=$binaries
-    $names=@('core','layout','refresh','native-ui','oauth','single-tray')
+    $names=@('core','layout','refresh','native-ui','oauth','single-tray','folder-picker')
     if($configuration -eq 'Release'){$names+=@('native-dialogs','desktop','entry','exit','oauth-ui','portable','files','settings','images','documents','document-backend','transfers','project','gateway','eof')}
     foreach($name in $names){
         $stem=$configuration.ToLower()+'-'+$name
@@ -55,6 +55,12 @@ foreach($configuration in @('Debug','Release')){
         if($name -eq 'entry'){Require ($value.entry_sha256 -ceq $binaries['ShellBot.exe'].sha256) 'Launcher report is stale.'}
         if($name -eq 'project'){Require ($value.scope -ceq 'M1_configuration_policy_and_migration' -and $value.policy_test_artifact.sha256 -ceq (Digest (Join-Path $root 'out\x64\Release\ShellBot-ProjectPolicyTests.exe'))) 'Policy test artifact mismatch.'}
         if($name -eq 'eof'){Require ($value.clean_exit -ceq $true -and @($value.groups).Count -eq 4 -and @($value.failures).Count -eq 0 -and @($value.groups|Where-Object {$_.calls -lt 100 -or $_.failures -ne 0}).Count -eq 0) 'Strict EOF evidence required.'}
+        if($name -eq 'folder-picker'){
+            Require ($value.assertions -eq @($value.checks).Count -and $value.assertions -ge 30) 'Complete folder picker evidence required.'
+            foreach($required in @('portable Desktop exists before Shell initialization','new project picker enumerates real child directories','project selection returns complete Unicode filesystem path','custom workspace survives storage selection','permissions returns complete Unicode filesystem path','application storage returns complete Unicode filesystem path','application exits after repeated Shell dialog use')){
+                Require (@($value.checks|Where-Object {$_.name -ceq $required -and $_.passed -ceq $true}).Count -eq 1) "Missing folder picker evidence: $required"
+            }
+        }
         if($name -eq 'single-tray'){
             Require ($value.assertions -eq @($value.checks).Count -and $value.assertions -ge 33) 'Complete single-tray integration evidence required.'
             foreach($required in @('two real desktop workers have no notification icons','tray desktop pause preserves all project workers','confirmed resume succeeds through real owner channel after safety delay','client can renew a valid desktop lease','one session remains exclusive across projects after removing worker icons','lease expires while manager window is hidden and workers have no tray icons','taskbar recovery recreates only the manager icon','tray exit removes every project desktop backend')){

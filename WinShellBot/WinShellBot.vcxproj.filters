@@ -33,6 +33,8 @@
     <ClCompile Include="platform\oauth_ui.c"><Filter>源文件</Filter></ClCompile>
     <ClInclude Include="platform\oauth.h"><Filter>头文件</Filter></ClInclude>
     <ClCompile Include="platform\desktop_dialog.c"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="platform\folder_dialog.c"><Filter>源文件</Filter></ClCompile>
+    <ClInclude Include="platform\folder_dialog.h"><Filter>头文件</Filter></ClInclude>
     <ClCompile Include="platform\desktop_store.c"><Filter>源文件</Filter></ClCompile>
     <ClCompile Include="platform\portable.c"><Filter>源文件</Filter></ClCompile>
     <ClInclude Include="platform\desktop_app.h"><Filter>头文件</Filter></ClInclude>
