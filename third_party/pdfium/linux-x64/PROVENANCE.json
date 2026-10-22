@@ -1,0 +1,10 @@
+{
+  "release": "chromium/8086",
+  "publisher": "bblanchon/pdfium-binaries (independent of upstream Google/Foxit)",
+  "version": "157.0.8086.0",
+  "url": "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8086/pdfium-linux-x64.tgz",
+  "archive_sha256": "588577cf52dabc1a444988bac841920df54cc2f141801424de97ab04f4fbb935",
+  "library_sha256": "e995a89f11d48605a79a0e44f101ca3a621e5c3ef9ee311a1405e03b44dc5b19",
+  "v8": false,
+  "xfa": false
+}

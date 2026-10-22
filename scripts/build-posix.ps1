@@ -26,6 +26,11 @@ $files+='docs/POSIX_DESKTOP.md'
 $files+='docs/POSIX_REMOTE_DESKTOP.md';$files+='config/posix-desktop.example.json'
 if($WithTests){$files+='tests/posix_integration.py';$files+='tests/posix_phase2.py';$files+='tests/posix_oauth.py';$files+='tests/posix_clock.c';$files+='tests/posix_desktop.py';$files+='tests/posix_tray.py'}
 if($WithTests){$files+='tests/posix_remote.py';$files+='tests/posix_remote_fixture.c'}
+$files+='third_party/stb/stb_image.h';$files+='third_party/stb/LICENSE';$files+='third_party/stb/PROVENANCE.json'
+$files+='third_party/pdfium/include/fpdfview.h';$files+='third_party/pdfium/include/fpdf_text.h'
+foreach($platform in @('linux-x64','mac-x64')){foreach($item in Get-ChildItem -LiteralPath (Join-Path $repo ('third_party/pdfium/'+$platform)) -Recurse -File){$files+=[IO.Path]::GetRelativePath($repo,$item.FullName).Replace('\','/')}}
+$files+='docs/POSIX_MEDIA.md';$files+='config/posix-media.example.json'
+if($WithTests){$files+='tests/posix_media.py'}
 $files=@($files|Sort-Object -Unique)
 $hashes=foreach($file in $files){$path=Join-Path $repo $file;if(!(Test-Path -LiteralPath $path -PathType Leaf)){throw "Missing input: $file"};((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()+'  '+$file)}
 [IO.File]::WriteAllText((Join-Path $runDir 'SOURCE_SHA256SUMS'),($hashes -join "`n")+"`n",[Text.UTF8Encoding]::new($false))
@@ -90,6 +95,12 @@ fi
             if($LASTEXITCODE -ne 0){$testVerified=$false}else{
                 $desktopResult=Get-Content -LiteralPath $desktopReport -Raw|ConvertFrom-Json
                 $testVerified=$testVerified -and $desktopResult.status -ceq 'passed' -and $desktopResult.sha256 -ceq $testResult.sha256
+            }
+            $mediaReport=Join-Path $runDir ($connection.name+'-media-report.json')
+            & $scp @options ($connection.hostName+':'+$snapshot+'/build/media-test-report.json') $mediaReport
+            if($LASTEXITCODE -ne 0){$testVerified=$false}else{
+                $mediaResult=Get-Content -LiteralPath $mediaReport -Raw|ConvertFrom-Json
+                $testVerified=$testVerified -and $mediaResult.status -ceq 'passed' -and $mediaResult.sha256 -ceq $testResult.sha256
             }
             $remoteReport=Join-Path $runDir ($connection.name+'-remote-desktop-report.json')
             & $scp @options ($connection.hostName+':'+$snapshot+'/build/remote-desktop-test-report.json') $remoteReport

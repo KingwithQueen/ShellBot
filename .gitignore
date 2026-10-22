@@ -29,6 +29,8 @@
 *.so
 *.so.*
 *.dylib
+!/third_party/pdfium/linux-x64/libpdfium.so
+!/third_party/pdfium/mac-x64/libpdfium.dylib
 
 # Executables
 *.exe

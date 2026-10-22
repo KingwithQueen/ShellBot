@@ -614,6 +614,11 @@ static bool edit(sb_native_manager *g, yyjson_val *q, sb_error *e) {
             "task_status", "task_output",       "task_input",      "task_cancel"};
         for (unsigned i = 0; i < (mode == 2 ? 19u : 14u); i++)
             yyjson_mut_arr_add_str(d, tools, names[i]);
+        const char *media[] = {"image_view", "document_info", "document_read", "document_preview", "artifact_download"};
+        for (unsigned i = 0; i < sizeof(media)/sizeof(media[0]); i++)
+            yyjson_mut_arr_add_str(d, tools, media[i]);
+        if (mode != 0)
+            yyjson_mut_arr_add_str(d, tools, "artifact_upload");
         /* Ordinary directory edits preserve the independent desktop permission and tool switches. */
         yyjson_val *previous = yyjson_obj_get(existing, "policy"),
                    *desktop = yyjson_obj_get(previous, "desktop");

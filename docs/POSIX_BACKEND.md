@@ -1,4 +1,4 @@
-# Linux / macOS 后台开发版：第四阶段
+# Linux / macOS 后台开发版：第六阶段
 
 这是独立的 C17 POSIX 后台入口，不是 Windows 正式包或完整桌面版。正式 Windows 1.0.3 的 MSBuild 入口和 Win32 后端继续使用原有构建方式。当前已使用 Linux x86_64 和 Intel macOS 实机通过 SSH 编译运行；不能据此宣称所有发行版、旧系统或 Apple Silicon 已验收。
 
@@ -13,7 +13,7 @@
 - 本地项目列表、新增/配置/删除导出、启停、暂停/恢复与状态；管理器为每个启动的项目创建独立工作进程，统一回环 HTTP 按项目路由、分别认证。
 - 普通当前账户命令：启动、状态、二进制输出分页、标准输入及 EOF、取消、超时、输出限制、任务历史和输入回执。
 
-第五阶段加入独立项目授权的远程桌面，参见 [远程桌面](POSIX_REMOTE_DESKTOP.md)。受限/管理员进程、产物传输、图像/PDF/Office、自启和服务安装尚未实现。媒体工具继续隐藏；受限执行和管理员配置在启动时拒绝。普通命令须由项目显式开启；注册项目不会自动启动，异常退出的工作进程也不会自动重启。
+第五阶段加入独立项目授权的远程桌面，参见 [远程桌面](POSIX_REMOTE_DESKTOP.md)。第六阶段加入产物上传下载、PNG/JPEG 查看与 PDF/DOCX/XLSX/PPTX 读取和预览，参见 [媒体与产物](POSIX_MEDIA.md)。受限/管理员进程、自启和服务安装尚未实现；受限执行和管理员配置在启动时拒绝。普通命令须由项目显式开启；注册项目不会自动启动，异常退出的工作进程也不会自动重启。
 
 第三阶段加入 Keychain / Secret Service 加密凭据、显式私有密钥文件模式和管理器 OAuth；参见 [凭据存储与 OAuth](POSIX_OAUTH.md)。
 
@@ -21,7 +21,7 @@
 
 ## 原生构建
 
-依赖：C17 编译器、CMake 3.21 或更新版本、线程库，推荐 Ninja。Linux 另需 OpenSSL 3 和 libsecret 的开发包与运行库，界面需 GTK 4.10+；Mac 使用系统 Security/CoreFoundation/CommonCrypto，界面另用 Cocoa 和 Objective-C 编译器。yyjson 和现有带本地补丁的 CivetWeb 直接从仓库编译，不下载运行依赖，也不使用 Windows PDFium DLL。
+依赖：C17 编译器、CMake 3.21 或更新版本、线程库、zlib、Expat，推荐 Ninja。Linux 另需 OpenSSL 3 和 libsecret 的开发包与运行库，界面需 GTK 4.10+；Mac 使用系统 Security/CoreFoundation/CommonCrypto，界面另用 Cocoa 和 Objective-C 编译器。yyjson 和现有带本地补丁的 CivetWeb 直接从仓库编译，不在构建时下载运行依赖；PDF 使用独立的固定版本 Linux/Mac PDFium 运行库。
 
 ```sh
 cmake -S . -B build/posix-native -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -141,7 +141,7 @@ POSIX `flock` 是协作式锁。目录定位与版本复核是文件工具的访
 .\scripts\build-posix.ps1 -ConnectionFile .\config\remote-build.local.json -Configuration Release
 ```
 
-脚本仅选择 CMake、POSIX 后端、共享 C 源码及两个源码依赖，包含本机未提交的这些源码改动；不复制 `.git`、Windows 产物、Data 或 SSH 密钥。每次在远端指定根目录的 `.native-build/时间-随机值` 下新建源码和构建快照，核对逐文件 SHA-256 后编译，不覆盖现有文件，不运行安装操作。结果和取回的二进制保存在本机 `build/posix`，历史失败保留。
+脚本仅选择 CMake、POSIX 后端、共享 C 源码、源码依赖及已校验的 POSIX 媒体运行库，包含本机未提交的这些源码改动；不复制 `.git`、Windows 产物、Data 或 SSH 密钥。每次在远端指定根目录的 `.native-build/时间-随机值` 下新建源码和构建快照，核对逐文件 SHA-256 后编译，不覆盖现有文件，不运行安装操作。结果和取回的二进制保存在本机 `build/posix`，历史失败保留。
 
 现有约定将测试源保留在本机而不纳入 Git。恢复本地 `tests/posix_integration.py`、`posix_phase2.py`、`posix_oauth.py`、`posix_clock.c`、`posix_desktop.py`、`posix_tray.py`、`posix_remote.py` 和 `posix_remote_fixture.c` 后可增加 `-WithTests`。后台与界面控制器测试仅在远端项目下独立夹具中读写，保留报告和备份，退出自己启动的进程；托盘模拟和原生窗口检查单独运行。三份功能报告摘要须与取回的程序一致才视为通过。`-Sanitizers` 对后台、控制器与共享核心启用地址/未定义行为检查；不声称系统界面库及第三方静态库已插桩。
 

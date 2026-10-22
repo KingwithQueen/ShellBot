@@ -1,0 +1,9 @@
+{
+  "repository": "https://github.com/nothings/stb",
+  "commit": "a7d4c2175630e1ea5b6f8dd00ab96fed0b97b96d",
+  "files": {
+    "stb_image.h": "594c2fe35d49488b4382dbfaec8f98366defca819d916ac95becf3e75f4200b3",
+    "LICENSE": "bebfe904b14301657e4e5d655c811d51fd31b97c455b9cc2d8600d6bac6cff63"
+  },
+  "configuration": "PNG/JPEG only, memory input, no file access"
+}

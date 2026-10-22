@@ -1,0 +1,10 @@
+{
+  "release": "chromium/8086",
+  "publisher": "bblanchon/pdfium-binaries (independent of upstream Google/Foxit)",
+  "version": "157.0.8086.0",
+  "url": "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8086/pdfium-mac-x64.tgz",
+  "archive_sha256": "933a85a138f6027243c56bff8676375c33ceeb767401389415ffc44d689ca85d",
+  "library_sha256": "94e955ba3a27ce93a602f43629fe55ebfa7658def9d367a36a614c9d8a75f088",
+  "v8": false,
+  "xfa": false
+}

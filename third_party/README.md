@@ -26,3 +26,9 @@ PDFium DLL 来自 bblanchon/pdfium-binaries 的固定 chromium/8086 发布；发
 Office 使用 Windows 系统 OPC / XmlLite 和既有 WIC / GDI，未增加 Office 自动化或外部格式转换程序。PDFium 没有创建 JavaScript 或交互表单环境；文档解析仍在现有文件后端进程内，资源预算不等于独立解码进程隔离，边界见 [文档阅读](../docs/DOCUMENT_READING.md)。
 
 M13 收尾补丁：CivetWeb Windows 关闭连接前先有界接收对端结束，随后发送 FIN，避免已写响应在过早关闭时被重置；保留固定版本与许可，临时诊断及无效的 TCP 参数实验未进入最终源码。当前 TCP 对照、连接预算和限制见 docs/HTTP_DIAGNOSTICS.md。
+
+## POSIX media dependencies
+
+Linux/macOS x86_64 use the separate PDFium 157.0.8086.0 no-V8/no-XFA artifacts under `pdfium/linux-x64` and `pdfium/mac-x64`. Each folder retains its publisher provenance (bblanchon, independently built from upstream PDFium), archive SHA-256, library SHA-256, build arguments and complete license set. The shared public headers match both publisher archives. CMake and the runtime verify fixed library hashes; Windows artifacts are unchanged.
+
+`stb/stb_image.h` is pinned to nothings/stb commit `a7d4c2175630e1ea5b6f8dd00ab96fed0b97b96d`, with exact hashes in `stb/PROVENANCE.json` and the upstream dual MIT/public-domain license. POSIX builds enable only memory PNG/JPEG decoding. System Expat (MIT), zlib, and Linux Pango/Cairo or Mac CoreText provide bounded XML parsing and text rasterization. These system dependencies are not redistributed here. See [media tools](../docs/POSIX_MEDIA.md).

@@ -48,7 +48,7 @@ static size_t tool_count(void) { return sizeof(definitions) / sizeof(definitions
 
 static bool platform_tool_available(const char *name) {
 #ifdef SB_POSIX
-    return name && (!strncmp(name,"fs_",3) || !strncmp(name,"host_",5) || !strncmp(name,"approval_",9) || !strncmp(name,"task_",5) || sb_desktop_tool(name));
+    return name && (!strncmp(name,"fs_",3) || !strncmp(name,"host_",5) || !strncmp(name,"approval_",9) || !strncmp(name,"task_",5) || sb_desktop_tool(name) || sb_document_tool(name) || !strcmp(name,"image_view") || !strcmp(name,"artifact_download") || !strcmp(name,"artifact_upload"));
 #else
     (void)name; return true;
 #endif
@@ -253,7 +253,7 @@ static yyjson_mut_val *tool_call_inner(sb_host *host, const char *actor, const c
     }
     if (!strcmp(name, "host_capabilities")) {
 #ifdef SB_POSIX
-        const bool media_available = false;
+        const bool media_available = true;
         const bool account_files_available = true;
 #else
         const bool media_available = true;

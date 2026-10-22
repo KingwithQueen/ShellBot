@@ -367,8 +367,26 @@ bool sb_platform_fs_execute(sb_fs_plan *p,sb_lease *l,sb_fs_backup_receipt recei
     sb_fail(e,"Unsupported file management operation.");return false;
 }
 void sb_platform_fs_close(sb_fs_plan *p){if(p){sb_platform_close(p->source);sb_platform_create_close(p->destination);if(p->parent>=0)close(p->parent);free(p->path);free(p->leaf);free(p);}}
-sb_file *sb_platform_transfer_spool(sb_lease *l,sb_error *e){(void)l;sb_fail(e,"Artifact transfers are unavailable in this milestone.");return NULL;}
-bool sb_platform_spool_append(sb_file *f,const unsigned char *bytes,size_t length,sb_error *e){(void)f;(void)bytes;(void)length;sb_fail(e,"Artifact transfers are unavailable.");return false;}
+sb_file *sb_platform_transfer_spool(sb_lease *l,sb_error *e){
+    unsigned char nonce[16];char name[48]="transfer-";
+    if(!l || !sb_platform_random(nonce,sizeof(nonce),e))return NULL;
+    for(unsigned i=0;i<16;i++)snprintf(name+9+i*2,3,"%02x",nonce[i]);
+    int fd=openat(l->root->fd,name,O_RDWR|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);
+    if(fd<0){sb_posix_error(e,"Create private upload spool");return NULL;}
+    /* Unlink immediately: no retained partial uploads, even after a crash. */
+    if(unlinkat(l->root->fd,name,0)){sb_posix_error(e,"Unlink upload spool");close(fd);return NULL;}
+    sb_file *f=calloc(1,sizeof(*f));
+    if(!f){close(fd);sb_fail(e,"Out of memory.");return NULL;}
+    f->fd=fd;
+    if(fstat(fd,&f->initial)){sb_posix_error(e,"Inspect upload spool");sb_platform_close(f);return NULL;}
+    return f;
+}
+bool sb_platform_spool_append(sb_file *f,const unsigned char *bytes,size_t length,sb_error *e){
+    if(!f || !unchanged(f->fd,&f->initial,e) || f->initial.st_nlink ||
+       f->initial.st_uid!=geteuid() || (f->initial.st_mode&077) ||
+       (uint64_t)f->initial.st_size+length>SB_TRANSFER_LIMIT){sb_fail(e,"Invalid private upload spool or size.");return false;}
+    return sb_posix_write(f->fd,bytes,length,e) && !fsync(f->fd) && !fstat(f->fd,&f->initial);
+}
 static bool export_one(const char *path,const char *bytes,size_t n,sb_error *e){
     char *leaf=NULL;sb_root *r=sb_platform_account_parent(path,&leaf,e);if(!r)return false;
     int fd=openat(r->fd,leaf,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);bool ok=fd>=0&&sb_posix_write(fd,bytes,n,e)&&!fsync(fd);

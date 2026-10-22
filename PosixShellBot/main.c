@@ -1,4 +1,5 @@
 #include "posix.h"
+#include "media.h"
 #include "desktop.h"
 #ifdef SB_NATIVE_DESKTOP
 #include "native.h"
@@ -12,7 +13,7 @@
 #include <fcntl.h>
 volatile sig_atomic_t sb_posix_signal=0;
 static void interrupt(int signal_number){sb_posix_signal=signal_number;}
-static void usage(void){puts("ShellBot POSIX phase 5 (C17)\n"
+static void usage(void){puts("ShellBot POSIX phase 6 (C17)\n"
     "  ShellBot --desktop [--data-dir PRIVATE_DESKTOP_DIR] [--credential-key-file KEY]\n"
     "  ShellBot --stdio|--http --config FILE [--data-dir ABSOLUTE_DIR] [--port 1..65535]\n"
     "  ShellBot --stdio|--http --projects REGISTRY --project ID [--port 1..65535]\n"
@@ -66,7 +67,7 @@ int main(int argc,char **argv){
     sb_error error={0};
     if(argc==2&&!strcmp(argv[1],"--help")){usage();return 0;}
     if(argc==2&&!strcmp(argv[1],"--desktop-permissions")){yyjson_mut_doc *doc=yyjson_mut_doc_new(NULL);char *text=sb_posix_json(doc,sb_os_desktop_permissions(doc));if(!text)return 2;puts(text);free(text);return 0;}
-    if(argc==2&&!strcmp(argv[1],"--version")){puts("ShellBot " SB_VERSION " (C17; POSIX phase 5)");return 0;}
+    if(argc==2&&!strcmp(argv[1],"--version")){puts("ShellBot " SB_VERSION " (C17; POSIX phase 6)");return 0;}
     if(argc==2&&!strcmp(argv[1],"--generate-token")){unsigned char b[32];if(!sb_platform_random(b,sizeof(b),&error))return 2;for(unsigned i=0;i<32;i++)printf("%02x",b[i]);puts("");memset(b,0,sizeof(b));return 0;}
     sb_host host={0};sb_config_defaults(&host.config);host.started_ms=sb_platform_millis();sb_project_registry registry={0};
     const char *config=NULL,*root=NULL,*data=NULL,*projects=NULL,*project_id=NULL,*port=NULL,*command=NULL,*id=NULL,*requestfile=NULL;
@@ -115,6 +116,7 @@ int main(int argc,char **argv){
     host.audit=sb_audit_new(host.lease,host.config.audit_max_bytes,&error);if(!host.audit)goto done;
     host.policy=sb_policy_new(host.config.approval_ttl_seconds,host.audit,&error);if(!host.policy)goto done;
     if(host.project){host.store=sb_store_new(host.lease,host.project->id,host.project->policy_revision,sb_execution_instance(host.execution),"ordinary",&error);if(!host.store)goto done;sb_policy_store(host.policy,host.store);sb_policy_limit(host.policy,host.config.limits.approval_records);}
+    host.transfers=sb_transfers_new(&error);if(!host.transfers)goto done;
     if(!sb_posix_execution_bind(host.execution,&host,&error))goto done;
     if(host.project&&host.project->policy.desktop.enabled){host.desktop=sb_posix_desktop_new(&host,&error);if(!host.desktop)goto done;}
     host.owner=sb_owner_start(&host,&error);if(!host.owner)goto done;
@@ -123,5 +125,5 @@ int main(int argc,char **argv){
 bad:sb_fail(&error,"Invalid, duplicate or incompatible arguments. Use --help.");
 done:
     if(result&&*error.text)fprintf(stderr,"ShellBot: %s\n",error.text);
-    sb_owner_stop(host.owner);sb_posix_desktop_free(host.desktop);sb_execution_free(host.execution);sb_policy_free(host.policy);sb_store_free(host.store);sb_audit_free(host.audit);sb_platform_lease_close(host.lease);sb_config_free(&host.config);sb_projects_free(&registry);return result;
+    sb_owner_stop(host.owner);sb_posix_desktop_free(host.desktop);sb_transfers_free(host.transfers);sb_execution_free(host.execution);sb_policy_free(host.policy);sb_store_free(host.store);sb_audit_free(host.audit);sb_platform_lease_close(host.lease);sb_config_free(&host.config);sb_projects_free(&registry);sb_media_shutdown();return result;
 }
