@@ -3,9 +3,11 @@ param(
     [string]$ConnectionFile,
     [ValidateSet('Debug','Release')][string]$Configuration='Debug',
     [switch]$WithTests,
-    [switch]$Sanitizers
+    [switch]$Sanitizers,
+    [ValidateSet('all','project-profile')][string]$TestScope='all'
 )
 $ErrorActionPreference='Stop'
+if($TestScope -ne 'all' -and !$WithTests){throw 'TestScope requires -WithTests.'}
 if($PSVersionTable.PSVersion -lt [version]'7.3'){throw 'Use PowerShell 7.3 or newer for native SSH argument handling.'}
 $PSNativeCommandArgumentPassing='Standard'
 $PSNativeCommandUseErrorActionPreference=$false
@@ -32,8 +34,10 @@ foreach($platform in @('linux-x64','mac-x64')){foreach($item in Get-ChildItem -L
 $files+='docs/POSIX_STARTUP.md';$files+='docs/POSIX_MEDIA.md';$files+='config/posix-media.example.json'
 if($WithTests){$files+='tests/posix_media.py';$files+='tests/posix_startup.py'}
 $files+='docs/POSIX_COMMANDS.md'
+$files+='docs/POSIX_PROJECTS.md'
 $files+='config/posix-restricted.example.json';$files+='config/posix-admin.example.json'
 if($WithTests){$files+='tests/posix_commands.py';$files+='tests/posix_command_fixture.c'}
+if($WithTests){$files+='tests/posix_profile.py'}
 $files=@($files|Sort-Object -Unique)
 $hashes=foreach($file in $files){$path=Join-Path $repo $file;if(!(Test-Path -LiteralPath $path -PathType Leaf)){throw "Missing input: $file"};((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()+'  '+$file)}
 [IO.File]::WriteAllText((Join-Path $runDir 'SOURCE_SHA256SUMS'),($hashes -join "`n")+"`n",[Text.UTF8Encoding]::new($false))
@@ -76,17 +80,27 @@ if cmake -S src -B build -G Ninja -DCMAKE_BUILD_TYPE=__CONFIG__ -DSHELLBOT_TESTS
 if cmake --build build --parallel 4 > build.log 2>&1; then cat build.log; else cat build.log; exit 1; fi
 build/ShellBot --version
 if [ __TESTS__ = ON ]; then
-    if ctest --test-dir build --output-on-failure > test.log 2>&1; then cat test.log; else cat test.log; exit 1; fi
+    if ctest --test-dir build __TEST_SELECTION__ --output-on-failure > test.log 2>&1; then cat test.log; else cat test.log; exit 1; fi
 fi
 '@
-    $remote=$remote.Replace('__SNAPSHOT__',$snapshotQuoted).Replace('__CONFIG__',$Configuration).Replace('__TESTS__',$testFlag).Replace('__SANITIZERS__',$sanitizerFlag).Replace("`r`n","`n")
+    $selection=if($TestScope -eq 'all'){''}else{"-R '^project-profile$'"}
+    $remote=$remote.Replace('__SNAPSHOT__',$snapshotQuoted).Replace('__CONFIG__',$Configuration).Replace('__TESTS__',$testFlag).Replace('__SANITIZERS__',$sanitizerFlag).Replace('__TEST_SELECTION__',$selection).Replace("`r`n","`n")
     $log=Join-Path $runDir ($connection.name+'-build.log')
     & $ssh @options -T $connection.hostName ('sh -c '+(Quote-Sh $remote)) 2>&1 | Tee-Object -FilePath $log
     $buildExit=$LASTEXITCODE
     & $scp @options ($connection.hostName+':'+$snapshot+'/build/ShellBot') (Join-Path $runDir ($connection.name+'-ShellBot'))
     $artifactExit=$LASTEXITCODE
     $testVerified=$null
-    if($WithTests){
+    if($WithTests -and $TestScope -eq 'project-profile'){
+        $profileReport=Join-Path $runDir ($connection.name+'-profile-report.json')
+        & $scp @options ($connection.hostName+':'+$snapshot+'/build/profile-test-report.json') $profileReport
+        $testVerified=$false
+        if($LASTEXITCODE -eq 0 -and $artifactExit -eq 0){
+            $profileResult=Get-Content -LiteralPath $profileReport -Raw|ConvertFrom-Json
+            $testVerified=$profileResult.status -ceq 'passed' -and $profileResult.sha256 -ceq (Get-FileHash -LiteralPath (Join-Path $runDir ($connection.name+'-ShellBot')) -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+    }
+    if($WithTests -and $TestScope -eq 'all'){
         $testReport=Join-Path $runDir ($connection.name+'-test-report.json')
         & $scp @options ($connection.hostName+':'+$snapshot+'/build/posix-test-report.json') $testReport
         $testVerified=$false
@@ -94,6 +108,12 @@ fi
             $testResult=Get-Content -LiteralPath $testReport -Raw | ConvertFrom-Json
             $testVerified=$testResult.status -ceq 'passed' -and $testResult.sha256 -ceq (Get-FileHash -LiteralPath (Join-Path $runDir ($connection.name+'-ShellBot')) -Algorithm SHA256).Hash.ToLowerInvariant()
             $desktopReport=Join-Path $runDir ($connection.name+'-desktop-report.json')
+            $profileReport=Join-Path $runDir ($connection.name+'-profile-report.json')
+            & $scp @options ($connection.hostName+':'+$snapshot+'/build/profile-test-report.json') $profileReport
+            if($LASTEXITCODE -ne 0){$testVerified=$false}else{
+                $profileResult=Get-Content -LiteralPath $profileReport -Raw|ConvertFrom-Json
+                $testVerified=$testVerified -and $profileResult.status -ceq 'passed' -and $profileResult.sha256 -ceq $testResult.sha256
+            }
             & $scp @options ($connection.hostName+':'+$snapshot+'/build/desktop-test-report.json') $desktopReport
             if($LASTEXITCODE -ne 0){$testVerified=$false}else{
                 $desktopResult=Get-Content -LiteralPath $desktopReport -Raw|ConvertFrom-Json
@@ -125,7 +145,7 @@ fi
             }
         }
     }
-    $results+=[ordered]@{target=$connection.name;remote_snapshot=$snapshot;build_exit=$buildExit;artifact_copied=($artifactExit -eq 0);tests_requested=[bool]$WithTests;test_report_verified=$testVerified;configuration=$Configuration;sanitizers=[bool]$Sanitizers}
+    $results+=[ordered]@{target=$connection.name;remote_snapshot=$snapshot;build_exit=$buildExit;artifact_copied=($artifactExit -eq 0);tests_requested=[bool]$WithTests;test_scope=$TestScope;test_report_verified=$testVerified;configuration=$Configuration;sanitizers=[bool]$Sanitizers}
 }
 $receipt=[ordered]@{run_id=$runId;source_archive_sha256=(Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash;input_count=$files.Count;results=$results}
 $receipt | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $runDir 'receipt.json') -Encoding utf8

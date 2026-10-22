@@ -1,4 +1,6 @@
 #include "native.h"
+#include "credentials.h"
+#include "project_form.h"
 #include <gtk/gtk.h>
 #include <gdk-pixbuf/gdk-pixbuf.h>
 #include <stdio.h>
@@ -10,7 +12,7 @@ typedef struct {
     sb_native_manager *desktop;
     GtkApplication *app;
     GtkWidget *window, *projects, *requests, *details, *request_detail, *message, *summary, *tray_label;
-    GtkWidget *http, *oauth, *port, *url, *persistent, *desktop_status, *startup_status;
+    GtkWidget *http, *oauth, *port, *url, *persistent, *desktop_status, *startup_status, *remote_owner, *owner_env, *default_project;
     yyjson_doc *model;
     char project[64], request_id[65], request_type[32];
     bool busy, rendering, tray, quitting, settings_loaded;
@@ -147,6 +149,9 @@ static void render(void) {
         gtk_editable_set_text(GTK_EDITABLE(ui.url), sb_gui_string(gateway, "public_url"));
         gtk_check_button_set_active(GTK_CHECK_BUTTON(ui.http), sb_gui_bool(opts, "http"));
         gtk_check_button_set_active(GTK_CHECK_BUTTON(ui.oauth), sb_gui_bool(opts, "oauth"));
+        gtk_check_button_set_active(GTK_CHECK_BUTTON(ui.remote_owner), *sb_gui_string(gateway,"owner_token_env")!=0);
+        gtk_editable_set_text(GTK_EDITABLE(ui.owner_env),sb_gui_string(gateway,"owner_token_env"));
+        gtk_editable_set_text(GTK_EDITABLE(ui.default_project),sb_gui_string(gateway,"default_project_id"));
         ui.settings_loaded = true;
     }
     clear_list(ui.projects);
@@ -165,7 +170,8 @@ static void render(void) {
             : sb_gui_bool(v, "running") ? "运行中"
                                         : "已停止";
         char line[180];
-        snprintf(line, sizeof(line), "%s\n%s", id, state);
+        const char *name=sb_gui_string(yyjson_obj_get(yyjson_obj_get(model("settings"),"project_options"),id),"display_name");
+        snprintf(line, sizeof(line), "%s\n%s · %s", *name?name:id,id,state);
         row_add(ui.projects, line, id, NULL, !strcmp(id, ui.project));
     }
     yyjson_val *cfg = project_config();
@@ -209,7 +215,10 @@ static void done(GObject *source, GAsyncResult *result, gpointer data) {
     if (json) {
         yyjson_doc_free(ui.model);
         ui.model = yyjson_read(json, strlen(json), 0);
+        sb_posix_wipe(json,strlen(json));
         free(json);
+        const char *secret=sb_gui_string(yyjson_doc_get_root(ui.model),"clipboard");
+        if(*secret){gdk_clipboard_set_text(gdk_display_get_clipboard(gtk_widget_get_display(ui.window)),secret);sb_posix_wipe((void *)secret,strlen(secret));}
         render();
     }
     if (ui.quitting) {
@@ -337,10 +346,6 @@ static gboolean closing(GtkWindow *window, gpointer data) {
         alert("当前桌面没有可用的托盘。窗口会继续保留，可最小化；需要结束程序时请点击退出。");
     return TRUE;
 }
-typedef struct {
-    GtkWidget *dialog, *id, *path, *access;
-    bool editing;
-} editor;
 static void folder_chosen(GObject *source, GAsyncResult *result, gpointer data) {
     GError *e = NULL;
     GFile *file = gtk_file_dialog_select_folder_finish(GTK_FILE_DIALOG(source), result, &e);
@@ -360,81 +365,7 @@ static void choose_folder(GtkButton *b, gpointer entry) {
     gtk_file_dialog_select_folder(d, GTK_WINDOW(ui.window), NULL, folder_chosen, g_object_ref(entry));
     g_object_unref(d);
 }
-static void editor_response(GtkButton *button, gpointer data) {
-    editor *ed = data;
-    if (GPOINTER_TO_INT(g_object_get_data(G_OBJECT(button), "save"))) {
-        yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
-        yyjson_mut_val *q = yyjson_mut_obj(d);
-        yyjson_mut_obj_add_str(d, q, "action", ed->editing ? "edit" : "add");
-        yyjson_mut_obj_add_strcpy(d, q, "id", gtk_editable_get_text(GTK_EDITABLE(ed->id)));
-        yyjson_mut_obj_add_strcpy(d, q, "path", gtk_editable_get_text(GTK_EDITABLE(ed->path)));
-        yyjson_mut_obj_add_uint(d, q, "access", gtk_drop_down_get_selected(GTK_DROP_DOWN(ed->access)));
-        send_doc(d, q);
-    }
-    gtk_window_destroy(GTK_WINDOW(ed->dialog));
-}
-static void edit_clicked(GtkButton *b, gpointer editing) {
-    (void)b;
-    if (ui.busy)
-        return;
-    if (sb_gui_bool(yyjson_doc_get_root(ui.model), "online")) {
-        alert("请先停止后台，再修改项目。现有任务将随后台停止。");
-        return;
-    }
-    editor *ed = g_new0(editor, 1);
-    ed->editing = GPOINTER_TO_INT(editing);
-    ed->dialog = gtk_window_new();
-    gtk_window_set_title(GTK_WINDOW(ed->dialog), ed->editing ? "编辑项目" : "添加项目");
-    gtk_window_set_transient_for(GTK_WINDOW(ed->dialog), GTK_WINDOW(ui.window));
-    gtk_window_set_modal(GTK_WINDOW(ed->dialog), TRUE);
-    gtk_window_set_default_size(GTK_WINDOW(ed->dialog), 620, 340);
-    GtkWidget *content = box(true, 10);
-    gtk_widget_set_margin_start(content, 16);
-    gtk_widget_set_margin_end(content, 16);
-    gtk_widget_set_margin_top(content, 16);
-    gtk_widget_set_margin_bottom(content, 16);
-    gtk_window_set_child(GTK_WINDOW(ed->dialog), content);
-    g_object_set_data_full(G_OBJECT(ed->dialog), "editor", ed, g_free);
-    ed->id = gtk_entry_new();
-    ed->path = gtk_entry_new();
-    const char *options[] = {"只读所选目录", "可修改所选目录（每次审批）",
-                             "当前账户文件与普通命令（每次审批）", NULL};
-    ed->access = gtk_drop_down_new_from_strings(options);
-    append(content, label("项目标识"));
-    append(content, ed->id);
-    append(content, label("工作目录"));
-    GtkWidget *line = box(false, 6);
-    append(line, ed->path);
-    gtk_widget_set_hexpand(ed->path, TRUE);
-    GtkWidget *choose = gtk_button_new_with_label("选择目录…");
-    append(line, choose);
-    g_signal_connect(choose, "clicked", G_CALLBACK(choose_folder), ed->path);
-    append(content, line);
-    append(content, label("访问范围"));
-    append(content, ed->access);
-    append(content, label("普通命令以当前账户运行，可访问该账户的文件。连接授权与每次操作审批独立；不会获得管"
-                          "理员权限。编辑将使用上面选定的权限方案。"));
-    if (ed->editing) {
-        yyjson_val *p = project_config(), *w = yyjson_arr_get(yyjson_obj_get(p, "workspaces"), 0),
-                   *policy = yyjson_obj_get(p, "policy");
-        gtk_editable_set_text(GTK_EDITABLE(ed->id), ui.project);
-        gtk_widget_set_sensitive(ed->id, FALSE);
-        gtk_editable_set_text(GTK_EDITABLE(ed->path), sb_gui_string(w, "path"));
-        gtk_drop_down_set_selected(GTK_DROP_DOWN(ed->access),
-                                   sb_gui_bool(yyjson_obj_get(policy, "execution"), "enabled") ? 2
-                                   : sb_gui_bool(w, "read_only")                               ? 0
-                                                                                               : 1);
-    }
-    GtkWidget *buttons = box(false, 8), *cancel = gtk_button_new_with_label("取消"),
-              *save = gtk_button_new_with_label("保存");
-    append(buttons, cancel);
-    append(buttons, save);
-    append(content, buttons);
-    g_object_set_data(G_OBJECT(save), "save", GINT_TO_POINTER(1));
-    g_signal_connect(save, "clicked", G_CALLBACK(editor_response), ed);
-    g_signal_connect(cancel, "clicked", G_CALLBACK(editor_response), ed);
-    gtk_window_present(GTK_WINDOW(ed->dialog));
-}
+#include "gtk_project.inl"
 static void remove_response(GObject *dialog, GAsyncResult *result, gpointer data) {
     int response = gtk_alert_dialog_choose_finish(GTK_ALERT_DIALOG(dialog), result, NULL);
     if (response == 0) {
@@ -495,7 +426,28 @@ static void settings_save(GtkButton *b, gpointer unused) {
     yyjson_mut_obj_add_strcpy(d, q, "url", gtk_editable_get_text(GTK_EDITABLE(ui.url)));
     yyjson_mut_obj_add_bool(d, q, "http", gtk_check_button_get_active(GTK_CHECK_BUTTON(ui.http)));
     yyjson_mut_obj_add_bool(d, q, "oauth", gtk_check_button_get_active(GTK_CHECK_BUTTON(ui.oauth)));
+    yyjson_mut_obj_add_bool(d,q,"remote_owner",gtk_check_button_get_active(GTK_CHECK_BUTTON(ui.remote_owner)));
+    yyjson_mut_obj_add_strcpy(d,q,"owner_env",gtk_editable_get_text(GTK_EDITABLE(ui.owner_env)));
+    yyjson_mut_obj_add_strcpy(d,q,"default_project_id",gtk_editable_get_text(GTK_EDITABLE(ui.default_project)));
     send_doc(d, q);
+}
+static void migration_chosen(GObject *source,GAsyncResult *result,gpointer data){
+    GFile *file=gtk_file_dialog_select_folder_finish(GTK_FILE_DIALOG(source),result,NULL);
+    if(file){char *path=g_file_get_path(file);if(path){yyjson_mut_doc *d=yyjson_mut_doc_new(NULL);yyjson_mut_val *q=yyjson_mut_obj(d);yyjson_mut_obj_add_strcpy(d,q,"action",data);yyjson_mut_obj_add_strcpy(d,q,"path",path);send_doc(d,q);}g_free(path);g_object_unref(file);}g_free(data);
+}
+static void migrate_clicked(GtkButton *b,gpointer data){
+    (void)b;if(ui.busy)return;
+    if(sb_gui_bool(yyjson_doc_get_root(ui.model),"online")){alert("请先停止后台。迁移应用数据还需取消登录自启；独立后台服务请先卸载，完成后重新登记。");return;}
+    GtkFileDialog *d=gtk_file_dialog_new();gtk_file_dialog_set_title(d,"选择空的私有目标目录：校验后切换，原目录保留");gtk_file_dialog_select_folder(d,GTK_WINDOW(ui.window),NULL,migration_chosen,g_strdup(data));g_object_unref(d);
+}
+static void migration_cancel(GtkButton *b,gpointer unused){(void)b;(void)unused;sb_desktop_cancel(ui.desktop);}
+static void recover_confirmed(GObject *object,GAsyncResult *result,gpointer unused){
+    (void)unused;if(gtk_alert_dialog_choose_finish(GTK_ALERT_DIALOG(object),result,NULL)!=0)return;
+    yyjson_mut_doc *d=yyjson_mut_doc_new(NULL);yyjson_mut_val *q=yyjson_mut_obj(d);yyjson_mut_obj_add_str(d,q,"action","recover_migration");yyjson_mut_obj_add_strcpy(d,q,"migration_id",sb_gui_string(model("migration_pending"),"migration_id"));send_doc(d,q);
+}
+static void recover_clicked(GtkButton *b,gpointer unused){
+    (void)b;(void)unused;if(ui.busy)return;
+    GtkAlertDialog *d=gtk_alert_dialog_new("取消尚未发布的迁移，恢复原数据位置？原数据和目标准备文件都保留。已发布的迁移不会撤销。");const char *buttons[]={"取消未完成迁移","返回",NULL};gtk_alert_dialog_set_buttons(d,buttons);gtk_alert_dialog_set_default_button(d,1);gtk_alert_dialog_set_cancel_button(d,1);gtk_alert_dialog_choose(d,GTK_WINDOW(ui.window),NULL,recover_confirmed,NULL);g_object_unref(d);
 }
 static void decision(GtkButton *b, gpointer data) {
     (void)b;
@@ -902,6 +854,7 @@ static void activate(GtkApplication *app, gpointer data) {
     button(toolbar, "启动后台", "start_manager");
     button(toolbar, "停止后台", "stop_manager");
     button(toolbar, "刷新", "refresh");
+    GtkWidget *cancel_migration=gtk_button_new_with_label("取消迁移");g_signal_connect(cancel_migration,"clicked",G_CALLBACK(migration_cancel),NULL);append(toolbar,cancel_migration);
     GtkWidget *exit = gtk_button_new_with_label("退出 ShellBot");
     g_signal_connect(exit, "clicked", G_CALLBACK(quit_clicked), NULL);
     append(toolbar, exit);
@@ -932,6 +885,7 @@ static void activate(GtkApplication *app, gpointer data) {
     b = gtk_button_new_with_label("导入现有项目配置…");
     g_signal_connect(b, "clicked", G_CALLBACK(import_clicked), NULL);
     append(left, b);
+    b=gtk_button_new_with_label("迁移项目数据…");g_signal_connect(b,"clicked",G_CALLBACK(migrate_clicked),"migrate_project");append(right,b);
     GtkWidget *actions = box(false, 6);
     button(actions, "启动项目", "start");
     button(actions, "停止项目", "stop_project");
@@ -984,6 +938,7 @@ static void activate(GtkApplication *app, gpointer data) {
     GtkWidget *settings_box = box(true, 12);
     ui.http = gtk_check_button_new_with_label("启用本机 HTTP 网关（仅监听回环地址）");
     ui.oauth = gtk_check_button_new_with_label("启用 OAuth 连接授权");
+    ui.remote_owner=gtk_check_button_new_with_label("启用远程所有者操作审批（独立凭据）");ui.owner_env=gtk_entry_new();ui.default_project=gtk_entry_new();
     ui.port = gtk_spin_button_new_with_range(1, 65535, 1);
     ui.url = gtk_entry_new();
     gtk_entry_set_placeholder_text(GTK_ENTRY(ui.url), "https://shellbot.example.com");
@@ -993,6 +948,9 @@ static void activate(GtkApplication *app, gpointer data) {
     append(settings_box, label("公网 HTTPS 地址（隧道由你配置）"));
     append(settings_box, ui.url);
     append(settings_box, ui.oauth);
+    append(settings_box,ui.remote_owner);append(settings_box,label("所有者凭据引用（留空由程序管理）"));append(settings_box,ui.owner_env);
+    append(settings_box,label("兼容 /mcp 的默认项目标识（可留空）"));append(settings_box,ui.default_project);
+    button(settings_box,"复制独立审批凭据","copy_owner_token");
     append(settings_box,
            label("凭据由系统钥匙串保护。保存前请停止后台；修改后点击启动后台，不会自动启动项目。"));
     b = gtk_button_new_with_label("保存连接设置");
@@ -1002,7 +960,9 @@ static void activate(GtkApplication *app, gpointer data) {
     append(settings_box,label("登录自启只打开管理界面；独立后台服务请按 POSIX_STARTUP.md 安装。"));
     b=gtk_button_new_with_label("启用登录自启");g_signal_connect(b,"clicked",G_CALLBACK(startup_clicked),"startup_install");append(settings_box,b);
     b=gtk_button_new_with_label("取消登录自启");g_signal_connect(b,"clicked",G_CALLBACK(startup_clicked),"startup_uninstall");append(settings_box,b);
-    gtk_notebook_append_page(GTK_NOTEBOOK(tabs), settings_box, gtk_label_new("连接设置"));
+    b=gtk_button_new_with_label("迁移应用数据…");g_signal_connect(b,"clicked",G_CALLBACK(migrate_clicked),"migrate_application");append(settings_box,b);
+    b=gtk_button_new_with_label("取消未完成的迁移…");g_signal_connect(b,"clicked",G_CALLBACK(recover_clicked),NULL);append(settings_box,b);
+    gtk_notebook_append_page(GTK_NOTEBOOK(tabs), scroll(settings_box), gtk_label_new("连接设置"));
     ui.tray_label = label("正在连接系统托盘…");
     ui.message = label("");
     append(root, ui.tray_label);

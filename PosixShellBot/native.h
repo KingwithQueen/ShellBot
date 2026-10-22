@@ -8,6 +8,7 @@ char *sb_desktop_work(sb_native_manager *desktop, const char *request);
 void sb_desktop_close(sb_native_manager *desktop);
 const char *sb_desktop_directory(sb_native_manager *desktop);
 bool sb_desktop_raise(sb_native_manager *desktop);
+void sb_desktop_cancel(sb_native_manager *desktop);
 int sb_native_main(int argc, char **argv);
 const char *sb_gui_string(yyjson_val *object, const char *key);
 bool sb_gui_bool(yyjson_val *object, const char *key);

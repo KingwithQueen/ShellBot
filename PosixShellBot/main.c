@@ -2,6 +2,7 @@
 #include "media.h"
 #include "startup.h"
 #include "admin.h"
+#include "migration.h"
 #include "desktop.h"
 #ifdef SB_NATIVE_DESKTOP
 #include "native.h"
@@ -15,7 +16,7 @@
 #include <fcntl.h>
 volatile sig_atomic_t sb_posix_signal=0;
 static void interrupt(int signal_number){sb_posix_signal=signal_number;}
-static void usage(void){puts("ShellBot POSIX phase 8 (C17)\n"
+static void usage(void){puts("ShellBot POSIX phase 9 (C17)\n"
     "  sudo ShellBot --admin-agent --projects ROOT_OWNED_REGISTRY --project ID --owner-uid UID --admin-dir ROOT_PRIVATE_DIR\n"
     "  ShellBot --startup-plan|--startup-install --kind desktop|user-service|system-service --name ID --startup-dir ABS [runtime options]\n"
     "  ShellBot --startup-status|--startup-start|--startup-stop|--startup-uninstall --startup-dir ABS\n"
@@ -75,7 +76,7 @@ int main(int argc,char **argv){
     sb_error error={0};
     if(argc==2&&!strcmp(argv[1],"--help")){usage();return 0;}
     if(argc==2&&!strcmp(argv[1],"--desktop-permissions")){yyjson_mut_doc *doc=yyjson_mut_doc_new(NULL);char *text=sb_posix_json(doc,sb_os_desktop_permissions(doc));if(!text)return 2;puts(text);free(text);return 0;}
-    if(argc==2&&!strcmp(argv[1],"--version")){puts("ShellBot " SB_VERSION " (C17; POSIX phase 8)");return 0;}
+    if(argc==2&&!strcmp(argv[1],"--version")){puts("ShellBot " SB_VERSION " (C17; POSIX phase 9)");return 0;}
     if(argc==2&&!strcmp(argv[1],"--generate-token")){unsigned char b[32];if(!sb_platform_random(b,sizeof(b),&error))return 2;for(unsigned i=0;i<32;i++)printf("%02x",b[i]);puts("");memset(b,0,sizeof(b));return 0;}
     sb_host host={0};sb_config_defaults(&host.config);host.started_ms=sb_platform_millis();sb_project_registry registry={0};
     const char *config=NULL,*root=NULL,*data=NULL,*projects=NULL,*project_id=NULL,*port=NULL,*command=NULL,*id=NULL,*requestfile=NULL;
@@ -117,7 +118,7 @@ int main(int argc,char **argv){
     if(data){if(projects){sb_fail(&error,"Project data_dir is fixed by its registry; do not override it.");goto done;}free(host.config.data_dir);host.config.data_dir=sb_strdup(data);}
     if(!host.config.data_dir||!sb_platform_storage_path(host.config.data_dir,&error)){sb_fail(&error,"Set an absolute private data_dir explicitly.");goto done;}
     if(port&&!port_number(port,&host.config.port))goto bad;
-    host.http_mode=http;host.lease=sb_platform_lease(host.config.data_dir,&error);if(!host.lease)goto done;
+    host.http_mode=http;host.lease=sb_platform_lease(host.config.data_dir,&error);if(!host.lease||!sb_migration_can_start(host.lease,&error))goto done;
     for(size_t i=0;i<host.config.workspace_count;i++)if(sb_platform_roots_overlap(host.lease->root,host.config.workspaces[i].root)){sb_fail(&error,"Private data directory must not overlap an exposed file root.");goto done;}
     for(size_t i=0;i<host.config.workspace_count;i++)for(size_t j=0;j<i;j++)if(sb_platform_roots_overlap(host.config.workspaces[i].root,host.config.workspaces[j].root)){sb_fail(&error,"Configured roots physically overlap or alias one another.");goto done;}
     host.execution=sb_execution_new(&host.config,&error);if(!host.execution)goto done;

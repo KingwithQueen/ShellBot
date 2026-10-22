@@ -1,5 +1,8 @@
 #include "native.h"
 #include "sb_projects.h"
+#include "project_form.h"
+#include "migration.h"
+#include "oauth.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -12,6 +15,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <stdarg.h>
+#include <dirent.h>
 
 extern char **environ;
 struct sb_native_manager {
@@ -21,6 +25,9 @@ struct sb_native_manager {
     yyjson_doc *inspected;
     pid_t child;
     bool last_ok;
+    atomic_bool cancel;
+    pthread_mutex_t location_mutex;
+    char *clipboard;
 };
 const char *sb_gui_string(yyjson_val *o, const char *key) {
     const char *s = yyjson_get_str(yyjson_obj_get(o, key));
@@ -230,7 +237,7 @@ static bool save_registry(sb_native_manager *g, const char *json, sb_error *e) {
     sb_project_registry r = {0};
     bool ok = sb_projects_parse(&r, json, strlen(json), e);
     sb_projects_free(&r);
-    return ok && save(g, "projects.json", json, e);
+    return ok && save(g, strrchr(g->registry, '/') + 1, json, e);
 }
 static yyjson_doc *settings(sb_native_manager *g) {
     char path[SB_PATH_CAP];
@@ -411,6 +418,19 @@ static bool credentials(sb_native_manager *g, yyjson_val *projects, sb_error *e)
         }
     }
     yyjson_doc_free(catalog);
+    yyjson_doc *cfg = registry(g);
+    const char *owner_env = sb_gui_string(yyjson_obj_get(yyjson_doc_get_root(cfg), "gateway"), "owner_token_env");
+    if (*owner_env) {
+        sb_lease *l = sb_platform_lease(g->data, e);
+        sb_secret_options opts = {.key_file=*g->key?g->key:NULL};
+        sb_secrets *s = l ? sb_secrets_open(l,&opts,e) : NULL;
+        char *bearer = s ? sb_owner_bearer(s,owner_env,true,e) : NULL;
+        bool ready = bearer != NULL;
+        if(bearer){sb_posix_wipe(bearer,strlen(bearer));free(bearer);}
+        sb_secrets_close(s);sb_platform_lease_close(l);
+        yyjson_doc_free(cfg);return ready;
+    }
+    yyjson_doc_free(cfg);
     return true;
 }
 static bool launch(sb_native_manager *g, sb_error *e) {
@@ -433,7 +453,7 @@ static bool launch(sb_native_manager *g, sb_error *e) {
     }
     if (http && !credentials(g, projects, e))
         goto done;
-    char *args[16] = {(char *)sb_posix_program(), "--manager", "--projects", g->registry,
+    char *args[52] = {(char *)sb_posix_program(), "--manager", "--projects", g->registry,
                       "--manager-data-dir",       g->data,     NULL};
     unsigned n = 6;
     if (http) {
@@ -445,6 +465,15 @@ static bool launch(sb_native_manager *g, sb_error *e) {
     if (*g->key) {
         args[n++] = "--credential-key-file";
         args[n++] = g->key;
+    }
+    yyjson_val *automatic = yyjson_obj_get(opts, "project_options");
+    size_t ai, an; yyjson_val *ap;
+    yyjson_arr_foreach(projects, ai, an, ap) {
+        const char *pid = sb_gui_string(ap, "id");
+        if (sb_gui_bool(yyjson_obj_get(automatic, pid), "auto_start") &&
+            (!yyjson_obj_get(ap, "enabled") || sb_gui_bool(ap, "enabled"))) {
+            args[n++] = "--start-project"; args[n++] = (char *)pid;
+        }
     }
     args[n] = NULL;
     char *r = run(g, args, true, e);
@@ -740,6 +769,7 @@ static bool configure(sb_native_manager *g, yyjson_val *q, sb_error *e) {
         return false;
     }
     bool oauth = sb_gui_bool(q, "oauth"), http = sb_gui_bool(q, "http");
+    if(sb_gui_bool(q,"remote_owner")&&!http){sb_fail(e,"远程所有者审批需要启用本机 HTTP 网关。");return false;}
     sb_config probe;
     sb_config_defaults(&probe);
     bool valid = !*url || sb_config_public_url(&probe, url, e);
@@ -756,10 +786,21 @@ static bool configure(sb_native_manager *g, yyjson_val *q, sb_error *e) {
         return false;
     }
     yyjson_mut_doc *d = yyjson_doc_mut_copy(old, NULL);
-    yyjson_mut_val *root = yyjson_mut_doc_get_root(d), *gateway = yyjson_mut_obj(d);
+    yyjson_mut_val *root = yyjson_mut_doc_get_root(d), *gateway = yyjson_mut_obj_get(root,"gateway");
+    if(!gateway)gateway=yyjson_mut_obj(d);
+    yyjson_mut_obj_remove_key(gateway,"port");yyjson_mut_obj_remove_key(gateway,"public_url");
     yyjson_mut_obj_add_uint(d, gateway, "port", port);
     if (*url)
         yyjson_mut_obj_add_str(d, gateway, "public_url", url);
+    yyjson_mut_obj_remove_key(gateway,"owner_token_env");
+    if(sb_gui_bool(q,"remote_owner")) {
+        const char *env=sb_gui_string(q,"owner_env");
+        yyjson_mut_obj_add_strcpy(d,gateway,"owner_token_env",*env?env:"SHELLBOT_OWNER_TOKEN");
+    }
+    if(yyjson_obj_get(q,"default_project_id")){
+        yyjson_mut_obj_remove_key(gateway,"default_project_id");
+        if(*sb_gui_string(q,"default_project_id"))yyjson_mut_obj_add_strcpy(d,gateway,"default_project_id",sb_gui_string(q,"default_project_id"));
+    }
     yyjson_mut_obj_remove_key(root, "gateway");
     yyjson_mut_obj_add_val(d, root, "gateway", gateway);
     char *json = sb_posix_json(d, root);
@@ -767,12 +808,13 @@ static bool configure(sb_native_manager *g, yyjson_val *q, sb_error *e) {
     free(json);
     yyjson_doc_free(old);
     if (ok) {
-        d = yyjson_mut_doc_new(NULL);
-        root = yyjson_mut_obj(d);
+        yyjson_doc *s=settings(g);d=yyjson_doc_mut_copy(s,NULL);root=yyjson_mut_doc_get_root(d);
+        yyjson_mut_obj_remove_key(root,"http");yyjson_mut_obj_remove_key(root,"oauth");
         yyjson_mut_obj_add_bool(d, root, "http", http);
         yyjson_mut_obj_add_bool(d, root, "oauth", oauth);
         json = sb_posix_json(d, root);
         ok = save(g, "desktop.json", json, e);
+        yyjson_doc_free(s);
         free(json);
     }
     return ok;
@@ -782,6 +824,7 @@ static void copy_doc(yyjson_mut_doc *d, yyjson_mut_val *root, const char *key, y
     if (v)
         yyjson_mut_obj_add_val(d, root, key, v);
 }
+#include "profile.inl"
 static char *snapshot(sb_native_manager *g) {
     yyjson_doc *cfg = registry(g), *state = exchange(g, "status", NULL, NULL), *s = settings(g),
                *oauth = NULL, *approvals = NULL, *desktop = NULL;
@@ -800,12 +843,17 @@ static char *snapshot(sb_native_manager *g) {
     yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
     yyjson_mut_val *v = yyjson_mut_obj(d);
     copy_doc(d, v, "config", cfg);
+    char *registry_bytes = load(g->registry); char registry_hash[65] = {0}; sb_error hash_error = {0};
+    if (registry_bytes) sb_platform_sha256(registry_bytes, strlen(registry_bytes), registry_hash, &hash_error);
+    free(registry_bytes);
+    yyjson_mut_obj_add_strcpy(d, v, "registry_sha256", registry_hash);
     copy_doc(d, v, "settings", s);
     copy_doc(d, v, "status", state);
     copy_doc(d, v, "oauth", oauth);
     copy_doc(d, v, "approvals", approvals);
     copy_doc(d, v, "desktop", desktop);
     copy_doc(d, v, "startup", autostart);
+    yyjson_doc *pending=pending_migration(g);copy_doc(d,v,"migration_pending",pending);yyjson_doc_free(pending);
     yyjson_doc_free(autostart);
     copy_doc(d, v, "inspected", g->inspected);
     yyjson_mut_obj_add_bool(d, v, "online", active);
@@ -814,6 +862,11 @@ static char *snapshot(sb_native_manager *g) {
     yyjson_mut_obj_add_strcpy(d, v, "selected", g->selected);
     yyjson_mut_obj_add_strcpy(d, v, "message", g->message);
     yyjson_mut_obj_add_strcpy(d, v, "directory", g->directory);
+    yyjson_mut_obj_add_strcpy(d, v, "manager_directory", g->data);
+    if (g->clipboard) {
+        yyjson_mut_obj_add_strcpy(d, v, "clipboard", g->clipboard);
+        sb_posix_wipe(g->clipboard, strlen(g->clipboard)); free(g->clipboard); g->clipboard = NULL;
+    }
     yyjson_doc_free(cfg);
     yyjson_doc_free(s);
     yyjson_doc_free(state);
@@ -829,6 +882,7 @@ char *sb_desktop_work(sb_native_manager *g, const char *request) {
                *project = sb_gui_string(q, "project");
     sb_error e = {0};
     bool ok = true;
+    atomic_store(&g->cancel, false);
     if (g->child && waitpid(g->child, NULL, WNOHANG) == g->child)
         g->child = 0;
     if (*project && strcmp(g->selected, project)) {
@@ -848,6 +902,14 @@ char *sb_desktop_work(sb_native_manager *g, const char *request) {
         ok = edit(g, q, &e);
     else if (!strcmp(a, "settings"))
         ok = configure(g, q, &e);
+    else if (!strcmp(a, "configure_project"))
+        ok = configure_project(g, q, &e);
+    else if (!strcmp(a, "migrate_application") || !strcmp(a, "migrate_project"))
+        ok = migrate_profile(g, q, !strcmp(a, "migrate_application"), &e);
+    else if(!strcmp(a,"recover_migration"))
+        ok=recover_migration(g,q,&e);
+    else if (!strcmp(a, "copy_owner_token"))
+        ok = owner_credential(g, &e);
     else if (!strcmp(a,"startup_install") || !strcmp(a,"startup_uninstall")) {
         yyjson_doc *r=startup(g,!strcmp(a,"startup_install")?"--startup-install":"--startup-uninstall",&e);
         ok=r&&!*sb_gui_string(yyjson_doc_get_root(r),"error");
@@ -927,7 +989,7 @@ char *sb_desktop_work(sb_native_manager *g, const char *request) {
         ok = false;
         sb_fail(&e, "Unknown desktop action.");
     }
-    if (strcmp(a, "refresh"))
+    if (strcmp(a, "refresh") && !(ok && (!strcmp(a,"migrate_application") || !strcmp(a,"migrate_project"))))
         snprintf(g->message, sizeof(g->message), "%s",
                  ok ? "操作已完成。" : (*e.text ? e.text : "操作未完成。"));
     g->last_ok = ok;
@@ -941,6 +1003,9 @@ sb_native_manager *sb_desktop_open(const char *directory, const char *key, sb_er
     }
     if (!private_dir(directory, e))
         return NULL;
+    char redirected[256];
+    if(!follow_location(directory,redirected,sizeof(redirected),e))return NULL;
+    directory=redirected;
     sb_lease *lease = sb_platform_lease(directory, e);
     if (!lease) {
         sb_root *r = sb_platform_root(directory, e);
@@ -959,11 +1024,14 @@ sb_native_manager *sb_desktop_open(const char *directory, const char *key, sb_er
         return NULL;
     }
     g->lease = lease;
+    atomic_init(&g->cancel, false);
+    pthread_mutex_init(&g->location_mutex,NULL);
     snprintf(g->directory, sizeof(g->directory), "%s", lease->root->path);
     snprintf(g->registry, sizeof(g->registry), "%s/projects.json", g->directory);
     snprintf(g->data, sizeof(g->data), "%s/manager", g->directory);
     if (key)
         snprintf(g->key, sizeof(g->key), "%s", key);
+    if (!active_profile(g, e)) goto fail;
     char sock[SB_PATH_CAP];
     if (!sb_posix_socket_path(g->data, sock, 104, e) || !private_dir(g->data, e))
         goto fail;
@@ -996,11 +1064,14 @@ fail:
     return NULL;
 }
 const char *sb_desktop_directory(sb_native_manager *g) { return g->directory; }
-bool sb_desktop_raise(sb_native_manager *g) { return !unlinkat(g->lease->root->fd, "raise.request", 0); }
+void sb_desktop_cancel(sb_native_manager *g) { if (g) atomic_store(&g->cancel, true); }
+bool sb_desktop_raise(sb_native_manager *g) { pthread_mutex_lock(&g->location_mutex);bool raised=!unlinkat(g->lease->root->fd,"raise.request",0);pthread_mutex_unlock(&g->location_mutex);return raised; }
 void sb_desktop_close(sb_native_manager *g) {
     if (g) {
         yyjson_doc_free(g->inspected);
+        if(g->clipboard){sb_posix_wipe(g->clipboard,strlen(g->clipboard));free(g->clipboard);}
         sb_platform_lease_close(g->lease);
+        pthread_mutex_destroy(&g->location_mutex);
         free(g);
     }
 }

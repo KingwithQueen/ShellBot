@@ -47,7 +47,7 @@ add_executable(ShellBot
   PosixShellBot/manager.c PosixShellBot/credentials.c PosixShellBot/keyring.c PosixShellBot/oauth.c
   PosixShellBot/desktop.c PosixShellBot/desktop_png.c
   PosixShellBot/startup.c
-  PosixShellBot/restricted.c PosixShellBot/admin.c
+  PosixShellBot/restricted.c PosixShellBot/admin.c PosixShellBot/migration.c PosixShellBot/project_form.c
   core/config/config.c core/config/projects.c core/protocol/mcp.c
   core/policy/approval.c core/policy/audit.c core/policy/state.c core/policy/project_policy.c
   core/tools/tools.c core/tools/text.c core/tools/search.c core/tools/tasks.c
@@ -86,8 +86,8 @@ if(SHELLBOT_DESKTOP)
   target_compile_definitions(ShellBot PRIVATE SB_NATIVE_DESKTOP=1)
   if(APPLE)
     enable_language(OBJC)
-    target_sources(ShellBot PRIVATE PosixShellBot/cocoa.m)
-    set_source_files_properties(PosixShellBot/cocoa.m PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    target_sources(ShellBot PRIVATE PosixShellBot/cocoa.m PosixShellBot/cocoa_project.m)
+    set_source_files_properties(PosixShellBot/cocoa.m PosixShellBot/cocoa_project.m PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     target_link_libraries(ShellBot PRIVATE "-framework Cocoa")
     add_custom_command(TARGET ShellBot POST_BUILD
       COMMAND ${CMAKE_COMMAND} "-DOUTPUT=${CMAKE_BINARY_DIR}" "-DSOURCE=${CMAKE_SOURCE_DIR}" "-DPROGRAM=$<TARGET_FILE:ShellBot>" "-DPDFIUM=${PDFIUM_DIR}/${PDFIUM_NAME}" -P "${CMAKE_SOURCE_DIR}/PosixShellBot/bundle.cmake")
@@ -145,6 +145,8 @@ if(SHELLBOT_TESTS)
     add_test(NAME desktop-controller COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/posix_desktop.py $<TARGET_FILE:ShellBot>)
     set_tests_properties(desktop-controller PROPERTIES TIMEOUT 180)
+    add_test(NAME project-profile COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/posix_profile.py $<TARGET_FILE:ShellBot>)
+    set_tests_properties(project-profile PROPERTIES TIMEOUT 240)
   endif()
 endif()
 install(TARGETS ShellBot RUNTIME DESTINATION bin)
@@ -155,6 +157,7 @@ install(FILES third_party/stb/LICENSE DESTINATION share/ShellBot/licenses RENAME
 install(FILES docs/POSIX_MEDIA.md DESTINATION share/ShellBot)
 install(FILES docs/POSIX_STARTUP.md DESTINATION share/ShellBot)
 install(FILES docs/POSIX_COMMANDS.md DESTINATION share/ShellBot)
+install(FILES docs/POSIX_PROJECTS.md DESTINATION share/ShellBot)
 install(FILES config/posix-media.example.json DESTINATION share/ShellBot/examples)
 install(FILES LICENSE.txt DESTINATION share/ShellBot/licenses)
 install(FILES third_party/yyjson/LICENSE DESTINATION share/ShellBot/licenses RENAME yyjson-LICENSE)

@@ -16,4 +16,6 @@ bool sb_oauth_authorized(sb_oauth *oauth, const sb_oauth_project *project, const
 char *sb_oauth_challenge(sb_oauth *oauth, const char *path);
 char *sb_oauth_owner(sb_oauth *oauth, const sb_oauth_project *projects, size_t count, yyjson_val *request);
 void sb_oauth_summary(sb_oauth *oauth, yyjson_mut_doc *doc, yyjson_mut_val *root);
+bool sb_oauth_relocate(sb_secrets *source, sb_secrets *target, const char *origin,
+    const sb_oauth_project *before, const sb_oauth_project *after, size_t count, sb_error *error);
 #endif

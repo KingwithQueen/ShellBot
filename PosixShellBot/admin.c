@@ -180,7 +180,7 @@ void sb_posix_admin_close(sb_host *h) {
 char *sb_posix_administrator_call(sb_host *h, const char *actor, const char *name, yyjson_val *args) {
     bool task = !strncmp(name, "task_", 5),
          approval = !strcmp(name, "approval_status") || !strcmp(name, "approval_cancel");
-    if (!task && !approval)
+    if (!task && !approval && strcmp(name, "owner-request"))
         return sb_posix_json_error("POSIX administrator backend grants command tasks only.");
     if (!eligible(h->project) || !sb_posix_administrator_available(h))
         return sb_posix_json_error("Project administrator agent is unavailable; the local owner must "
@@ -207,6 +207,12 @@ char *sb_posix_administrator_call(sb_host *h, const char *actor, const char *nam
     return reply ? reply
                  : sb_posix_json_error("Administrator channel closed; inspect existing task effects. No "
                                        "request was replayed or downgraded.");
+}
+char *sb_posix_admin_owner(sb_host *h, const char *request) {
+    yyjson_doc *d = yyjson_read(request, strlen(request), 0);
+    char *reply = d ? sb_posix_administrator_call(h, "remote-owner", "owner-request", yyjson_doc_get_root(d)) : NULL;
+    yyjson_doc_free(d);
+    return reply;
 }
 /* Every ancestor is opened without following links. Root never creates state
    or a log underneath a user-writable directory. */
@@ -409,10 +415,21 @@ int sb_posix_admin_agent(int argc, char **argv) {
         yyjson_val *v = yyjson_doc_get_root(request);
         const char *actor = str(v, "actor"), *name = str(v, "name");
         yyjson_val *args = yyjson_obj_get(v, "args");
+        bool owner = actor && !strcmp(actor, "remote-owner") && name && !strcmp(name, "owner-request");
         bool allowed = actor && *actor && strlen(actor) < 64 && name &&
                        (!strncmp(name, "task_", 5) || !strcmp(name, "approval_status") ||
                         !strcmp(name, "approval_cancel")) &&
                        yyjson_is_obj(args);
+        if (owner && yyjson_is_obj(args)) {
+            char *operation = yyjson_val_write(args, 0, NULL);
+            wire = operation ? sb_policy_owner_request_actor(h.policy, operation, strlen(operation), "remote-owner") : NULL;
+            free(operation);
+            yyjson_doc_free(request);
+            bool sent = wire && sb_posix_frame_write(fd, wire, 5000, &e);
+            free(wire);
+            if (!sent) break;
+            continue;
+        }
         yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
         yyjson_mut_val *reply = allowed && d ? sb_tool_call(&h, actor, name, args, d) : NULL;
         wire =

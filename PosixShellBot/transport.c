@@ -2,6 +2,7 @@
 #include "sb_projects.h"
 #include "credentials.h"
 #include "civetweb.h"
+#include "owner_ui.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -130,6 +131,53 @@ static int request(struct mg_connection *c) {
         if (!strcasecmp(r->http_headers[i].name, "Authorization"))
             auth_count++;
     const char *path = r->local_uri;
+    bool owner_path = !strcmp(path, "/owner") || !strncmp(path, "/owner/", 7) ||
+                      !strcmp(path, "/owner.js") || !strcmp(path, "/owner.css");
+    if (owner_path) {
+        if (!s->routes.owner_enabled || !s->routes.owner_enabled(s->context)) return send_reply(c, 404, NULL);
+        const char *origin = mg_get_header(c, "Origin");
+        char local_origin[128];
+        snprintf(local_origin, sizeof(local_origin), "http://%s", host);
+        bool duplicate = auth_count > 1;
+        const char *critical[] = {"Host", "Origin", "Content-Type", "Content-Length", "Accept"};
+        for (unsigned k = 0; k < sizeof(critical)/sizeof(critical[0]); k++) {
+            unsigned count = 0;
+            for (int i = 0; i < r->num_headers; i++) if (!strcasecmp(r->http_headers[i].name, critical[k])) count++;
+            duplicate |= count > 1;
+        }
+        if (duplicate || r->query_string || !r->local_uri_raw || strcmp(r->local_uri_raw, path) ||
+            (origin && ((strcmp(host,local) && strcmp(host,name)) || strcmp(origin, local_origin)) &&
+             (!*s->config.public_origin || strcmp(origin, s->config.public_origin))))
+            return send_reply(c, 403, "{\"error\":\"Invalid owner origin, path or headers\"}");
+        if (strcmp(path, "/owner/api")) {
+            if (strcmp(path, "/owner") && strcmp(path, "/owner.js") && strcmp(path, "/owner.css")) return send_reply(c, 404, NULL);
+            if (strcmp(r->request_method, "GET")) return send_reply(c, 405, NULL);
+            bool js = !strcmp(path, "/owner.js"), css = !strcmp(path, "/owner.css");
+            return send_full(c, 200, js ? sb_owner_js : css ? sb_owner_css : sb_owner_html,
+                js ? "application/javascript; charset=utf-8" : css ? "text/css; charset=utf-8" : "text/html; charset=utf-8", "X-Frame-Options: DENY\r\n");
+        }
+        /* Check the independent bearer before reading any body or selecting a project. */
+        if (auth_count != 1 || !s->routes.owner_authorized ||
+            !s->routes.owner_authorized(s->context, mg_get_header(c, "Authorization")))
+            return send_full(c, 401, "{\"error\":\"Independent owner bearer required\"}", NULL, "WWW-Authenticate: Bearer realm=\"ShellBot owner\"\r\n");
+        if (strcmp(r->request_method, "POST")) return send_reply(c, 405, NULL);
+        const char *type = mg_get_header(c, "Content-Type"), *accept = mg_get_header(c, "Accept");
+        if (!type || strncasecmp(type, "application/json", 16) || (type[16] && type[16] != ';')) return send_reply(c, 415, NULL);
+        if (!accept || !strstr(accept, "application/json")) return send_reply(c, 406, NULL);
+        if (r->content_length < 0 || mg_get_header(c, "Transfer-Encoding")) return send_reply(c, 411, NULL);
+        if (r->content_length > 65536) return send_reply(c, 413, NULL);
+        size_t n = (size_t)r->content_length, at = 0;
+        char *body = malloc(n + 1);
+        if (!body) return send_reply(c, 500, NULL);
+        while (at < n) { int got = mg_read(c, body + at, n - at); if (got <= 0) break; at += (size_t)got; }
+        body[n] = 0;
+        if (at != n || memchr(body, 0, n)) { free(body); return send_reply(c, 400, NULL); }
+        int status = 500;
+        char *reply = s->routes.owner_call ? s->routes.owner_call(s->context, body, n, &status) : NULL;
+        free(body);
+        int result = send_reply(c, status, reply);
+        free(reply); return result;
+    }
     bool auxiliary = !strncmp(path, "/oauth/", 7) || !strncmp(path, "/.well-known/", 13);
     if (auxiliary && s->routes.auxiliary) {
         const char *origin = mg_get_header(c, "Origin");

@@ -3,6 +3,7 @@
 #include "desktop.h"
 #include "sb_projects.h"
 #include "oauth.h"
+#include "migration.h"
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -19,7 +20,7 @@ typedef struct {
     pid_t pid;
     int fd, status;
     bool paused;
-    char instance[33], reason[128], data_identity[50];
+    char instance[33], reason[128], data_identity[50], owner_url[640];
     char *authorization;
 } worker;
 typedef struct {
@@ -32,6 +33,7 @@ typedef struct {
     worker workers[SB_MAX_PROJECTS];
     sb_secrets *secrets;
     sb_oauth *oauth;
+    char *owner_authorization;
 } manager;
 static const char *str(yyjson_val *v, const char *key) { return sb_string(yyjson_obj_get(v, key)); }
 static char *ok(void) { return sb_strdup("{\"ok\":true}"); }
@@ -49,6 +51,7 @@ static char *worker_exchange(worker *w, const char *op, const char *wire, const 
     if (wire)
         yyjson_mut_obj_add_strcpy(d, v, "wire", wire);
     if (transport) {
+        yyjson_mut_obj_add_strcpy(d, v, "owner_url", w->owner_url);
         const char *keys[] = {"actor", "version", "method", "name"},
                    *values[] = {transport->actor, transport->version, transport->method, transport->name};
         for (unsigned i = 0; i < 4; i++)
@@ -109,6 +112,8 @@ int sb_posix_worker_run(sb_host *h, int fd) {
             if (!actor || strcmp(actor, "http-bearer"))
                 reply = sb_strdup("{\"error\":\"Invalid private actor\"}");
             else {
+                const char *url = str(root, "owner_url");
+                snprintf(h->owner_url, sizeof(h->owner_url), "%s", url ? url : "");
                 sb_request_context ctx = {.actor = actor,
                                           .project = h->project,
                                           .policy_revision = h->project->policy_revision,
@@ -118,7 +123,11 @@ int sb_posix_worker_run(sb_host *h, int fd) {
                 size_t length;
                 reply = sb_dispatch(h, NULL, wire, strlen(wire), &ctx, &length, &status);
             }
-        } else if (op && !strcmp(op, "owner") && wire)
+        } else if (op && !strcmp(op, "remote-owner") && wire)
+            reply = sb_policy_owner_request_actor(h->policy, wire, strlen(wire), "remote-owner");
+        else if (op && !strcmp(op, "remote-admin-owner") && wire)
+            reply = sb_posix_admin_owner(h, wire);
+        else if (op && !strcmp(op, "owner") && wire)
             reply = sb_posix_owner_request(h, wire, strlen(wire));
         else if (op && !strcmp(op, "pause")) {
             sb_posix_admin_close(h);
@@ -188,6 +197,10 @@ static bool start(manager *m, worker *w, sb_error *e) {
         sb_fail(e, "Project is disabled.");
         return false;
     }
+    if (m->owner_authorization)
+        snprintf(w->owner_url, sizeof(w->owner_url), "%s/owner", *m->registry.public_origin ? m->registry.public_origin : "");
+    if (m->owner_authorization && !*m->registry.public_origin)
+        snprintf(w->owner_url, sizeof(w->owner_url), "http://127.0.0.1:%u/owner", m->registry.port);
     if (!sb_audit_project(m->audit, "project_start_requested", w->project->id, w->project->policy_revision,
                           0)) {
         sb_fail(e, "Manager audit unavailable; project start blocked.");
@@ -347,7 +360,10 @@ static char *owner_request(void *context, const char *request, size_t length) {
         yyjson_mut_doc_free(d);
         return response;
     }
-    if (!strcmp(command, "status")) {
+    if (!strcmp(command,"owner-credential") && yyjson_obj_size(root)==1) {
+        if(m->owner_authorization)yyjson_mut_obj_add_strcpy(d,v,"token",m->owner_authorization+7);
+        else yyjson_mut_obj_add_str(d,v,"error","Remote owner approval is disabled.");
+    } else if (!strcmp(command, "status")) {
         yyjson_mut_val *list = yyjson_mut_arr(d);
         for (size_t i = 0; i < m->registry.project_count; i++) {
             worker *w = &m->workers[i];
@@ -411,6 +427,7 @@ invalid:
     yyjson_mut_doc_free(d);
     return sb_strdup("{\"error\":\"Invalid manager command or project id\"}");
 }
+#include "remote_owner.inl"
 static void *route_open(void *context, const char *path, const char *auth, bool *health, int *status) {
     manager *m = context;
     worker *w = NULL;
@@ -701,7 +718,7 @@ int sb_posix_manager_cli(int argc, char **argv) {
         goto cleanup;
     }
     m->lease = sb_platform_lease(data, &e);
-    if (!m->lease || !validate_directories(m, &e)) {
+    if (!m->lease || !sb_migration_can_start(m->lease,&e) || !validate_directories(m, &e)) {
         free(original);
         goto cleanup;
     }
@@ -784,6 +801,17 @@ int sb_posix_manager_cli(int argc, char **argv) {
                 }
         }
     }
+    if (http && *m->registry.owner_token_env) {
+        m->owner_authorization = sb_owner_bearer(m->secrets, m->registry.owner_token_env, false, &e);
+        if (!m->owner_authorization) goto cleanup;
+        for (size_t i = 0; i < initialized; i++) {
+            const char *token = getenv(m->workers[i].project->token_env);
+            if (sb_posix_secret(m->owner_authorization, m->workers[i].authorization) ||
+                (token && !strcmp(m->owner_authorization + 7, token))) {
+                sb_fail(&e, "Owner bearer must be independent of every project credential."); goto cleanup;
+            }
+        }
+    }
     if (oauth) {
         m->oauth = sb_oauth_new(m->secrets, m->registry.public_origin, &e);
         if (!m->oauth)
@@ -804,6 +832,9 @@ int sb_posix_manager_cli(int argc, char **argv) {
         if (*m->registry.public_origin && !sb_config_public_url(&c, m->registry.public_origin, &e))
             goto cleanup;
         sb_http_routes routes = {.open = route_open,
+                                 .owner_enabled = remote_enabled,
+                                 .owner_authorized = remote_authorized,
+                                 .owner_call = remote_call,
                                  .call = route_call,
                                  .close = route_close,
                                  .auxiliary = oauth ? oauth_http : NULL,
@@ -842,6 +873,7 @@ cleanup:
     sb_audit_free(m->audit);
     sb_oauth_free(m->oauth);
     sb_secrets_close(m->secrets);
+    if (m->owner_authorization) { sb_posix_wipe(m->owner_authorization, strlen(m->owner_authorization)); free(m->owner_authorization); }
     sb_platform_lease_close(m->lease);
     sb_projects_free(&m->registry);
     free(m->snapshot);

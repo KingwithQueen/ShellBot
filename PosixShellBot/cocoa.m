@@ -1,6 +1,8 @@
 #import <Cocoa/Cocoa.h>
 #import <objc/runtime.h>
 #include "native.h"
+#include "credentials.h"
+#import "cocoa_project.h"
 #include <sys/stat.h>
 #include <stdlib.h>
 #include <string.h>
@@ -62,8 +64,8 @@ static void putText(NSTextView *view, NSString *text) {
 @property NSStatusItem *statusItem;
 @property NSTableView *projects, *requests;
 @property NSTextView *detail, *requestDetail, *desktopStatus;
-@property NSTextField *summary, *message, *port, *url, *startupStatus;
-@property NSButton *http, *oauth, *persistent;
+@property NSTextField *summary, *message, *port, *url, *startupStatus, *ownerEnv, *defaultProject;
+@property NSButton *http, *oauth, *persistent, *remoteOwner;
 @property NSMutableArray<NSDictionary *> *projectRows, *requestRows;
 @property NSString *selected, *requestID, *requestType, *smoke;
 @property BOOL busy, rendering, quitting, settingsLoaded;
@@ -137,6 +139,7 @@ static void putText(NSTextView *view, NSString *text) {
     NSStackView *toolbar = stack(NO, @[
         [self button:@"启动后台" action:@"start_manager"],
         [self special:@"停止后台" selector:@selector(stopManager:)], [self button:@"刷新" action:@"refresh"],
+        [self special:@"取消迁移" selector:@selector(cancelMigration:)],
         [self special:@"退出 ShellBot" selector:@selector(quit:)]
     ]);
     NSTabView *tabs = [NSTabView new];
@@ -157,7 +160,7 @@ static void putText(NSTextView *view, NSString *text) {
     ]);
     self.detail = textView();
     NSScrollView *details = scrolled(self.detail);
-    NSStackView *right = stack(YES, @[ actions, details ]);
+    NSStackView *right = stack(YES, @[ actions, [self special:@"迁移项目数据…" selector:@selector(migrateProject:)], details ]);
     NSStackView *projects = stack(NO, @[ left, right ]);
     [left.heightAnchor constraintEqualToAnchor:projects.heightAnchor].active = YES;
     [right.heightAnchor constraintEqualToAnchor:projects.heightAnchor].active = YES;
@@ -212,24 +215,32 @@ static void putText(NSTextView *view, NSString *text) {
     [tabs addTabViewItem:tab];
     self.http = [NSButton checkboxWithTitle:@"启用本机 HTTP 网关（仅监听回环地址）" target:nil action:nil];
     self.oauth = [NSButton checkboxWithTitle:@"启用 OAuth 连接授权" target:nil action:nil];
+    self.remoteOwner=[NSButton checkboxWithTitle:@"启用远程所有者操作审批（独立凭据）" target:nil action:nil];
+    self.ownerEnv=[NSTextField textFieldWithString:@""];self.defaultProject=[NSTextField textFieldWithString:@""];
     self.port = [NSTextField textFieldWithString:@"8765"];
     self.url = [NSTextField textFieldWithString:@""];
     self.url.placeholderString = @"https://shellbot.example.com";
     self.startupStatus=label(@"登录自启：正在检查");
     NSStackView *settings = stack(YES, @[
         self.http, label(@"本机端口"), self.port, label(@"公网 HTTPS 地址（隧道由你配置）"), self.url,
-        self.oauth, label(@"凭据由系统钥匙串保护。保存前请停止后台；修改后手动启动后台和项目。"),
+        self.oauth, self.remoteOwner, label(@"所有者凭据引用（留空由程序管理）"), self.ownerEnv,
+        label(@"兼容 /mcp 的默认项目标识（可留空）"), self.defaultProject,
+        [self button:@"复制独立审批凭据" action:@"copy_owner_token"],
+        label(@"凭据由系统钥匙串保护。保存前请停止后台；项目自动启动选项在项目设置中选择。"),
         [self special:@"保存连接设置" selector:@selector(saveSettings:)],
         self.startupStatus,
         label(@"登录自启只打开管理界面；独立后台服务请按 POSIX_STARTUP.md 安装。"),
         [self special:@"启用登录自启" selector:@selector(enableStartup:)],
-        [self special:@"取消登录自启" selector:@selector(disableStartup:)]
+        [self special:@"取消登录自启" selector:@selector(disableStartup:)],
+        [self special:@"迁移应用数据…" selector:@selector(migrateApplication:)],
+        [self special:@"取消未完成的迁移…" selector:@selector(recoverMigration:)]
     ]);
     [self.port.widthAnchor constraintEqualToConstant:180].active = YES;
     [self.url.widthAnchor constraintEqualToConstant:640].active = YES;
     tab = [[NSTabViewItem alloc] initWithIdentifier:@"settings"];
     tab.label = @"连接设置";
-    tab.view = settings;
+    NSScrollView *settingsScroll=sb_macos_form_scroll(settings);
+    tab.view = settingsScroll;
     [tabs addTabViewItem:tab];
     NSStackView *root = stack(
         YES, @[ self.summary, toolbar, tabs, label(@"关闭窗口后可从菜单栏图标重新打开。"), self.message ]);
@@ -402,6 +413,8 @@ static void putText(NSTextView *view, NSString *text) {
         self.url.stringValue = str(sb_gui_string(gateway, "public_url"));
         self.http.state = sb_gui_bool(s, "http");
         self.oauth.state = sb_gui_bool(s, "oauth");
+        self.remoteOwner.state=*sb_gui_string(gateway,"owner_token_env")?NSControlStateValueOn:NSControlStateValueOff;
+        self.ownerEnv.stringValue=str(sb_gui_string(gateway,"owner_token_env"));self.defaultProject.stringValue=str(sb_gui_string(gateway,"default_project_id"));
         self.settingsLoaded = YES;
     }
     [self.projectRows removeAllObjects];
@@ -424,7 +437,7 @@ static void putText(NSTextView *view, NSString *text) {
             selected = self.projectRows.count;
         [self.projectRows addObject:@{
             @"id" : identifier,
-            @"title" : [NSString stringWithFormat:@"%@\n%@", identifier, state]
+            @"title" : [NSString stringWithFormat:@"%@\n%@ · %@", *sb_gui_string(yyjson_obj_get(yyjson_obj_get([self value:"settings"],"project_options"),identifier.UTF8String),"display_name")?str(sb_gui_string(yyjson_obj_get(yyjson_obj_get([self value:"settings"],"project_options"),identifier.UTF8String),"display_name")):identifier, identifier, state]
         }];
     }
     [self.projects reloadData];
@@ -482,7 +495,10 @@ static void putText(NSTextView *view, NSString *text) {
         self.busy = NO;
         yyjson_doc_free(self.model);
         self.model = reply ? yyjson_read(reply, strlen(reply), 0) : NULL;
+        if(reply)sb_posix_wipe(reply,strlen(reply));
         free(reply);
+        const char *secret=sb_gui_string(yyjson_doc_get_root(self.model),"clipboard");
+        if(*secret){NSPasteboard *pasteboard=[NSPasteboard generalPasteboard];[pasteboard clearContents];[pasteboard setString:str(secret) forType:NSPasteboardTypeString];sb_posix_wipe((void *)secret,strlen(secret));}
         [self render];
         if (self.quitting) {
             if (sb_gui_bool(yyjson_doc_get_root(self.model), "online") &&
@@ -611,55 +627,9 @@ static void putText(NSTextView *view, NSString *text) {
     [self editor:YES];
 }
 - (void)editor:(BOOL)editing {
-    if (self.busy)
-        return;
-    if (sb_gui_bool(yyjson_doc_get_root(self.model), "online")) {
-        [self alert:@"请先停止后台，再修改项目。"];
-        return;
-    }
-    NSAlert *a = [NSAlert new];
-    a.messageText = editing ? @"编辑项目" : @"添加项目";
-    a.informativeText = @"普通命令以当前账户运行，可访问该账户的文件。连接授权与每次操作审批独立，不获得管理"
-                        @"员权限。编辑会使用所选权限方案。";
-    NSTextField *identifier = [NSTextField textFieldWithString:editing ? self.selected : @""],
-                *path = [NSTextField textFieldWithString:@""];
-    identifier.enabled = !editing;
-    NSPopUpButton *access = [NSPopUpButton new];
-    [access addItemsWithTitles:@[
-        @"只读所选目录", @"可修改所选目录（每次审批）", @"当前账户文件与普通命令（每次审批）"
-    ]];
-    if (editing) {
-        yyjson_val *p = [self project], *w = yyjson_arr_get(yyjson_obj_get(p, "workspaces"), 0);
-        path.stringValue = str(sb_gui_string(w, "path"));
-        [access
-            selectItemAtIndex:sb_gui_bool(yyjson_obj_get(yyjson_obj_get(p, "policy"), "execution"), "enabled")
-                                  ? 2
-                              : sb_gui_bool(w, "read_only") ? 0
-                                                            : 1];
-    }
-    NSButton *choose = [NSButton buttonWithTitle:@"选择目录…" target:nil action:nil];
-    choose.target = self;
-    choose.action = @selector(chooseFolder:);
-    objc_setAssociatedObject(choose, @selector(chooseFolder:), path, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    NSStackView *form = stack(
-        YES,
-        @[ label(@"项目标识"), identifier, label(@"工作目录"), path, choose, label(@"访问范围"), access ]);
-    form.frame = NSMakeRect(0, 0, 600, 230);
-    [identifier.widthAnchor constraintEqualToConstant:580].active = YES;
-    [path.widthAnchor constraintEqualToConstant:580].active = YES;
-    a.accessoryView = form;
-    [a addButtonWithTitle:@"保存"];
-    [a addButtonWithTitle:@"取消"];
-    [a beginSheetModalForWindow:self.window
-              completionHandler:^(NSModalResponse response) {
-                if (response == NSAlertFirstButtonReturn)
-                    [self send:@{
-                        @"action" : editing ? @"edit" : @"add",
-                        @"id" : identifier.stringValue,
-                        @"path" : path.stringValue,
-                        @"access" : @(access.indexOfSelectedItem)
-                    }];
-              }];
+    if (self.busy) return;
+    if (sb_gui_bool(yyjson_doc_get_root(self.model), "online")) { [self alert:@"请先停止后台，再保存项目设置。"]; return; }
+    sb_macos_project_editor(self.window, editing?[self project]:NULL, [self value:"config"], [self value:"settings"], sb_gui_string(yyjson_doc_get_root(self.model),"directory"), sb_gui_string(yyjson_doc_get_root(self.model),"registry_sha256"), ^(NSDictionary *q){[self send:q];});
 }
 - (void)chooseFolder:(NSButton *)sender {
     NSTextField *path = objc_getAssociatedObject(sender, @selector(chooseFolder:));
@@ -702,11 +672,27 @@ static void putText(NSTextView *view, NSString *text) {
         @"port" : @(self.port.integerValue),
         @"url" : self.url.stringValue,
         @"http" : @(self.http.state == NSControlStateValueOn),
-        @"oauth" : @(self.oauth.state == NSControlStateValueOn)
+        @"oauth" : @(self.oauth.state == NSControlStateValueOn),
+        @"remote_owner":@(self.remoteOwner.state==NSControlStateValueOn),@"owner_env":self.ownerEnv.stringValue,@"default_project_id":self.defaultProject.stringValue
     }];
 }
 - (void)enableStartup:(id)sender { (void)sender;[self send:@{@"action":@"startup_install"}]; }
 - (void)disableStartup:(id)sender { (void)sender;[self send:@{@"action":@"startup_uninstall"}]; }
+- (void)cancelMigration:(id)sender {(void)sender;sb_desktop_cancel(self.desktop);}
+- (void)recoverMigration:(id)sender{
+    (void)sender;if(self.busy)return;
+    NSString *identifier=str(sb_gui_string([self value:"migration_pending"],"migration_id"));
+    [self confirm:@"取消尚未发布的迁移并恢复原数据位置？原数据和目标准备文件都保留。已发布的迁移不会撤销。" action:^{[self send:@{@"action":@"recover_migration",@"migration_id":identifier}];}];
+}
+- (void)migrateApplication:(id)sender {(void)sender;[self migrate:YES];}
+- (void)migrateProject:(id)sender {(void)sender;[self migrate:NO];}
+- (void)migrate:(BOOL)application {
+    if(self.busy)return;
+    if(sb_gui_bool(yyjson_doc_get_root(self.model),"online")){[self alert:@"请先停止后台。迁移应用数据还需取消登录自启；独立后台服务请先卸载，完成后重新登记。"];return;}
+    NSOpenPanel *p=[NSOpenPanel openPanel];p.canChooseFiles=NO;p.canChooseDirectories=YES;p.canCreateDirectories=YES;p.allowsMultipleSelection=NO;
+    p.message=@"选择空的私有目标目录。逐文件校验后切换，原目录保留。";
+    [p beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse response){if(response==NSModalResponseOK)[self send:@{@"action":application?@"migrate_application":@"migrate_project",@"path":p.URL.path}];}];
+}
 - (void)tick:(NSTimer *)timer {
     (void)timer;
     if (sb_desktop_raise(self.desktop))

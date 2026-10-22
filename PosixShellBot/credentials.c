@@ -175,7 +175,7 @@ static bool replace(sb_secrets *s, const char *name, const void *bytes, size_t n
     return ok;
 }
 static bool allowed(const char *name) {
-    return name && (!strcmp(name, "credentials.sealed") || !strcmp(name, "oauth.sealed"));
+    return name && (!strcmp(name, "credentials.sealed") || !strcmp(name, "oauth.sealed") || !strcmp(name, "owner.sealed"));
 }
 static bool related_files(sb_root *root, const char *name) {
     int fd = openat(root->fd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
@@ -257,7 +257,7 @@ sb_secrets *sb_secrets_open(sb_lease *lease, const sb_secret_options *options, s
         s->provider = "explicit-private-key-file";
     } else {
         bool existing =
-            related_files(s->root, "credentials.sealed") || related_files(s->root, "oauth.sealed");
+            related_files(s->root, "credentials.sealed") || related_files(s->root, "oauth.sealed") || related_files(s->root, "owner.sealed");
         if (!sb_secret_native_key(s->context, options->keychain, !existing, s->key, e))
             goto fail;
 #ifdef __APPLE__
@@ -279,6 +279,50 @@ void sb_secrets_close(sb_secrets *s) {
     }
 }
 const char *sb_secrets_provider(sb_secrets *s) { return s ? s->provider : "environment-only"; }
+bool sb_secrets_relocate(sb_lease *source, sb_lease *target, const sb_secret_options *options,
+    sb_secrets **old_secrets, sb_secrets **new_secrets, sb_error *e) {
+    *old_secrets = NULL; *new_secrets = NULL;
+    if (sb_platform_roots_overlap(source->root,target->root)) { sb_fail(e,"Credential relocation requires independent source and target directories."); return false; }
+    sb_secrets *old = sb_secrets_open(source, options, e);
+    if (!old) return false;
+    /* These are verified copies in the new, unpublished private destination.
+       Recovery ciphertext stays intact in the original source namespace. */
+    const char *names[] = {"credentials.sealed", "owner.sealed", "oauth.sealed"};
+    char *plain[3] = {0}; size_t length[3] = {0}; bool ok = true;
+    for (unsigned i = 0; i < 3 && ok; i++) {
+        bool missing;
+        plain[i] = sb_secret_read(old, names[i], &length[i], &missing, e);
+        ok = plain[i] || missing;
+    }
+    char *copies[256] = {0}; size_t count = 0;
+    int listing = ok ? openat(target->root->fd, ".", O_RDONLY|O_DIRECTORY|O_CLOEXEC) : -1;
+    DIR *d = listing >= 0 ? fdopendir(listing) : NULL;
+    if (!d) { if (listing >= 0) close(listing); ok = false; }
+    while (ok) {
+        errno = 0; struct dirent *entry = readdir(d);
+        if (!entry) { if (errno) ok = false; break; }
+        bool sealed = false;
+        for (unsigned i = 0; i < 3; i++) {
+            size_t n = strlen(names[i]);
+            sealed |= !strncmp(entry->d_name,names[i],n) && (!entry->d_name[n] || entry->d_name[n]=='.');
+        }
+        if (!sealed) continue;
+        struct stat st;
+        ok = count < 256 && !fstatat(target->root->fd,entry->d_name,&st,AT_SYMLINK_NOFOLLOW) &&
+            S_ISREG(st.st_mode) && st.st_nlink==1 && st.st_uid==geteuid() && !(st.st_mode&077);
+        if (ok) { copies[count] = sb_strdup(entry->d_name); ok = copies[count] != NULL; if (ok) count++; }
+    }
+    if (d) closedir(d);
+    for (size_t i=0;i<count;i++) { if (ok && unlinkat(target->root->fd,copies[i],0)) ok=false; free(copies[i]); }
+    if (ok && fsync(target->root->fd)) ok=false;
+    sb_secrets *next = ok ? sb_secrets_open(target, options, e) : NULL;
+    ok = next != NULL;
+    for (unsigned i = 0; i < 3 && ok; i++) if (plain[i])
+        ok = sb_secret_write(next, names[i], plain[i], length[i], e);
+    for (unsigned i = 0; i < 3; i++) if (plain[i]) { sb_posix_wipe(plain[i], length[i]); free(plain[i]); }
+    if (!ok) { sb_secrets_close(old); sb_secrets_close(next); return false; }
+    *old_secrets = old; *new_secrets = next; return true;
+}
 char *sb_secret_read(sb_secrets *s, const char *name, size_t *length, bool *missing, sb_error *e) {
     *length = 0;
     *missing = false;
@@ -402,6 +446,52 @@ static yyjson_doc *catalog(sb_secrets *s, sb_error *e) {
         return NULL;
     }
     return doc;
+}
+char *sb_owner_bearer(sb_secrets *s, const char *env, bool create, sb_error *e) {
+    const char *external = env && *env ? getenv(env) : NULL;
+    char *saved = NULL;
+    size_t n = 0;
+    bool missing = true;
+    if (s) saved = sb_secret_read(s, "owner.sealed", &n, &missing, e);
+    if (!saved && !missing) return NULL;
+    if (saved && (n != 65 || saved[64] || strspn(saved, "0123456789abcdef") != 64)) {
+        sb_posix_wipe(saved, n); free(saved);
+        sb_fail(e, "Stored owner credential is corrupt."); return NULL;
+    }
+    if (external && saved && strcmp(external, saved)) {
+        sb_posix_wipe(saved, n); free(saved);
+        sb_fail(e, "Owner environment and encrypted credential conflict."); return NULL;
+    }
+    if (external) {
+        size_t size = strlen(external);
+        bool valid = size >= 32 && size <= 256;
+        for (size_t i = 0; valid && i < size; i++) valid = (unsigned char)external[i] > 32 && (unsigned char)external[i] < 127;
+        if (!valid) { if(saved)sb_posix_wipe(saved,strlen(saved));free(saved); sb_fail(e, "Owner bearer requires 32..256 visible ASCII bytes."); return NULL; }
+        if (!saved) saved = sb_strdup(external);
+    }
+    if (!saved && create && s) {
+        unsigned char random[32]; char token[65];
+        if (!sb_platform_random(random, sizeof(random), e)) return NULL;
+        for (unsigned i = 0; i < 32; i++) snprintf(token + i * 2, 3, "%02x", random[i]);
+        if (sb_secret_write(s, "owner.sealed", token, sizeof(token), e)) saved = sb_strdup(token);
+        sb_posix_wipe(random, sizeof(random)); sb_posix_wipe(token, sizeof(token));
+    }
+    if (!saved) { sb_fail(e, "Independent owner credential is missing."); return NULL; }
+    if(s){
+        yyjson_doc *projects=catalog(s,e);bool independent=projects!=NULL;
+        yyjson_val *entries=yyjson_obj_get(yyjson_doc_get_root(projects),"projects");
+        for(size_t i=0;independent&&i<yyjson_arr_size(entries);i++){
+            const char *token=sb_string(yyjson_obj_get(yyjson_arr_get(entries,i),"token"));
+            independent=strcmp(saved,token)!=0;
+        }
+        yyjson_doc_free(projects);
+        if(!independent){sb_posix_wipe(saved,strlen(saved));free(saved);if(!*e->text)sb_fail(e,"Owner bearer must be independent of every stored project credential, including disabled projects.");return NULL;}
+    }
+    size_t saved_length=strlen(saved);
+    char *bearer = malloc(saved_length + 8);
+    if (bearer) { memcpy(bearer,"Bearer ",7);memcpy(bearer+7,saved,saved_length+1); }
+    sb_posix_wipe(saved, strlen(saved)); free(saved);
+    return bearer;
 }
 char *sb_credential_bearer(sb_secrets *s, const char *id, const char *env, sb_error *e) {
     if (!s)

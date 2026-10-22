@@ -4,4 +4,5 @@
 int sb_posix_admin_agent(int argc, char **argv);
 void sb_posix_admin_connect(sb_host *host);
 void sb_posix_admin_close(sb_host *host);
+char *sb_posix_admin_owner(sb_host *host, const char *request);
 #endif

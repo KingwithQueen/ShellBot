@@ -604,6 +604,47 @@ void sb_oauth_free(sb_oauth *o) {
     sb_posix_wipe(o, sizeof(*o));
     free(o);
 }
+bool sb_oauth_relocate(sb_secrets *source, sb_secrets *target, const char *origin,
+    const sb_oauth_project *before, const sb_oauth_project *after, size_t count, sb_error *e) {
+    if (count>16 || (count && (!before || !after))) {
+        sb_fail(e,"Invalid project relocation binding count."); return false;
+    }
+    size_t n; bool missing;
+    char *plain=sb_secret_read(source,"oauth.sealed",&n,&missing,e);
+    if (missing) return true;
+    if (!plain) return false;
+    sb_oauth *validated=sb_oauth_new(source,origin,e);
+    if (!validated) { sb_posix_wipe(plain,n); free(plain); return false; }
+    sb_oauth_free(validated);
+    yyjson_doc *input=n>1 ? yyjson_read(plain,n-1,0) : NULL;
+    sb_posix_wipe(plain,n); free(plain);
+    yyjson_mut_doc *d=input ? yyjson_doc_mut_copy(input,NULL) : NULL;
+    yyjson_mut_val *root=yyjson_mut_doc_get_root(d), *grants=yyjson_mut_obj_get(root,"grants");
+    /* Carry validated persisted state across verbatim. Only matching project
+       bindings and the corresponding policy revision change; no token is issued. */
+    for (size_t i=0;i<yyjson_arr_size(yyjson_obj_get(yyjson_doc_get_root(input),"grants"));i++) {
+        yyjson_val *g=yyjson_arr_get(yyjson_obj_get(yyjson_doc_get_root(input),"grants"),i);
+        for (size_t j=0;j<count;j++) {
+            if (!before[j].enabled || !after[j].enabled || strcmp(str(g,"project"),before[j].id) ||
+                strcmp(str(g,"binding"),before[j].binding)) continue;
+            yyjson_mut_val *copy=yyjson_mut_arr_get(grants,i);
+            yyjson_mut_obj_remove_key(copy,"binding");
+            yyjson_mut_obj_add_strcpy(d,copy,"binding",after[j].binding);
+            if (yyjson_get_uint(yyjson_obj_get(g,"revision"))==before[j].revision) {
+                yyjson_mut_obj_remove_key(copy,"revision");
+                yyjson_mut_obj_add_uint(d,copy,"revision",after[j].revision);
+            }
+        }
+    }
+    char *text=d ? sb_posix_json(d,root) : NULL;
+    bool ok=text && sb_secret_write(target,"oauth.sealed",text,strlen(text)+1,e);
+    if (text) { sb_posix_wipe(text,strlen(text)); free(text); }
+    yyjson_doc_free(input);
+    validated=ok ? sb_oauth_new(target,origin,e) : NULL;
+    ok=validated!=NULL; sb_oauth_free(validated);
+    if (!ok && !*e->text) sb_fail(e,"OAuth relocation validation failed; the active data location was not changed.");
+    return ok;
+}
 static bool registration(sb_oauth *o, const sb_http_request *q, sb_http_response *r) {
     yyjson_doc *d = yyjson_read(q->body, q->length, 0);
     yyjson_val *v = yyjson_doc_get_root(d), *rs = yyjson_obj_get(v, "redirect_uris"),

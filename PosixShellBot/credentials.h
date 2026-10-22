@@ -16,6 +16,7 @@ bool sb_secret_write(sb_secrets *secrets, const char *name, const char *bytes, s
 bool sb_secret_native_key(const char *namespace_id, const char *keychain, bool create, unsigned char key[64],
                           sb_error *error);
 const char *sb_secrets_provider(sb_secrets *secrets);
+char *sb_owner_bearer(sb_secrets *secrets, const char *environment, bool create, sb_error *error);
 char *sb_credential_bearer(sb_secrets *secrets, const char *project, const char *environment,
                            sb_error *error);
 bool sb_credential_option(const char *option);
