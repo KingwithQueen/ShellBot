@@ -1,5 +1,6 @@
 #include "posix.h"
 #include "sb_projects.h"
+#include "credentials.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -7,7 +8,7 @@
 #include <fcntl.h>
 volatile sig_atomic_t sb_posix_signal=0;
 static void interrupt(int signal_number){sb_posix_signal=signal_number;}
-static void usage(void){puts("ShellBot POSIX phase 2 (C17)\n"
+static void usage(void){puts("ShellBot POSIX phase 3 (C17)\n"
     "  ShellBot --stdio|--http --config FILE [--data-dir ABSOLUTE_DIR] [--port 1..65535]\n"
     "  ShellBot --stdio|--http --projects REGISTRY --project ID [--port 1..65535]\n"
     "  ShellBot --stdio --root ABSOLUTE_DIR --data-dir ABSOLUTE_DIR (read-only)\n"
@@ -17,7 +18,7 @@ static void usage(void){puts("ShellBot POSIX phase 2 (C17)\n"
     "  ShellBot --owner-request FILE --data-dir ABSOLUTE_DIR\n"
     "One fixed project per process. HTTP binds only 127.0.0.1; token_env supplies bearer.\n"
     "Data must be a private user-owned 0700 directory, outside all configured roots.\n"
-    "Owner IPC requires the same native uid. OAuth, GUI and desktop are unavailable.\n"
+    "Owner IPC requires the same native uid. Manager OAuth is optional; GUI and desktop are unavailable.\n"
     "  ShellBot --manager [--http] --projects REGISTRY --manager-data-dir ABS_DIR [--start-project ID ...]\n"
     "  ShellBot --management-status|--manager-stop --manager-data-dir ABS_DIR\n"
     "  ShellBot --project-status|--project-start|--project-stop|--project-pause|--project-resume ID --manager-data-dir ABS_DIR\n"
@@ -26,6 +27,15 @@ static void usage(void){puts("ShellBot POSIX phase 2 (C17)\n"
     "  ShellBot --project-create DEFINITION --projects REGISTRY --output NEW --backup NEW_BACKUP\n"
     "  ShellBot --project-configure ID --project-definition FILE --projects REGISTRY --output NEW --backup NEW_BACKUP\n"
     "  ShellBot --project-remove ID --projects REGISTRY --output NEW --backup NEW_BACKUP\n"
+    "  ShellBot --manager --http --oauth --projects REGISTRY --manager-data-dir ABS_DIR [--credential-key-file ABS_KEY]\n"
+    "  ShellBot --credential-key-create ABS_KEY (new 64-byte key in a separate private 0700 directory)\n"
+    "  ShellBot --credential-set|--credential-generate ID --token-env NAME --manager-data-dir ABS_DIR [--credential-key-file ABS_KEY]\n"
+    "  ShellBot --credential-status|--credential-remove ID|--credential-export ID --output NEW --manager-data-dir ABS_DIR [--credential-key-file ABS_KEY]\n"
+    "  ShellBot --oauth-status|--oauth-approve ID [--persistent]|--oauth-deny ID|--oauth-revoke ID|--oauth-remove-client ID --manager-data-dir ABS_DIR\n"
+    "Native credential storage uses an unlocked macOS Keychain or Linux Secret Service. No automatic plaintext fallback.\n"
+    "macOS may select an existing private --credential-keychain FILE. Credential import reads one token from stdin.\n"
+    "OAuth requires an explicit HTTPS public_url; TLS/tunnel configuration remains with the owner.\n"
+    "--persistent approves ongoing access under the project's current and future permissions until explicit revocation.\n"
     "Ordinary commands require explicit current-user writable scope. No command sandbox is claimed.");}
 static bool port_number(const char *text,unsigned *out){if(!text||!*text||strspn(text,"0123456789")!=strlen(text))return false;unsigned long v=strtoul(text,NULL,10);if(v<1||v>65535)return false;*out=(unsigned)v;return true;}
 int main(int argc,char **argv){
@@ -33,16 +43,18 @@ int main(int argc,char **argv){
     sb_posix_set_program(argv[0]);
     for(int i=1;i<argc;i++)if(!strcmp(argv[i],"--project-worker")){if(!sb_posix_peer(3,true))return 2;fcntl(3,F_SETFD,FD_CLOEXEC);sb_posix_close_inherited();break;}
     if(argc==2&&!strcmp(argv[1],"--task-agent"))return sb_posix_task_agent(3);
+    for(int i=1;i<argc;i++)if(sb_credential_option(argv[i]))return sb_credential_cli(argc,argv);
     for(int i=1;i<argc;i++)if(sb_posix_manager_option(argv[i]))return sb_posix_manager_cli(argc,argv);
     sb_error error={0};
     if(argc==2&&!strcmp(argv[1],"--help")){usage();return 0;}
-    if(argc==2&&!strcmp(argv[1],"--version")){puts("ShellBot " SB_VERSION " (C17; POSIX phase 2)");return 0;}
+    if(argc==2&&!strcmp(argv[1],"--version")){puts("ShellBot " SB_VERSION " (C17; POSIX phase 3)");return 0;}
     if(argc==2&&!strcmp(argv[1],"--generate-token")){unsigned char b[32];if(!sb_platform_random(b,sizeof(b),&error))return 2;for(unsigned i=0;i<32;i++)printf("%02x",b[i]);puts("");memset(b,0,sizeof(b));return 0;}
     sb_host host={0};sb_config_defaults(&host.config);host.started_ms=sb_platform_millis();sb_project_registry registry={0};
     const char *config=NULL,*root=NULL,*data=NULL,*projects=NULL,*project_id=NULL,*port=NULL,*command=NULL,*id=NULL,*requestfile=NULL;
     bool http=false,transport=false,validate=false,worker=false;int result=2;
     for(int i=1;i<argc;i++){
         if(!strcmp(argv[i],"--project-worker")){if(worker)goto bad;worker=true;}
+        else if(!strcmp(argv[i],"--oauth-capable")){if(host.oauth_backend)goto bad;host.oauth_backend=true;}
         else if(!strcmp(argv[i],"--http")||!strcmp(argv[i],"--stdio")){if(transport)goto bad;transport=true;http=!strcmp(argv[i],"--http");}
         else if(!strcmp(argv[i],"--list-approvals")||!strcmp(argv[i],"--stop")){if(command)goto bad;command=!strcmp(argv[i],"--stop")?"stop":"list";}
         else if(!strcmp(argv[i],"--inspect")||!strcmp(argv[i],"--approve")||!strcmp(argv[i],"--deny")||!strcmp(argv[i],"--revoke")){
@@ -61,6 +73,7 @@ int main(int argc,char **argv){
         goto done;
     }
     if((projects&&!project_id)||(!projects&&project_id)||(config&&(root||projects))||(root&&projects))goto bad;
+    if(host.oauth_backend&&!worker)goto bad;
     if(projects){
         if(!sb_projects_load(&registry,projects,&error))goto done;host.project=sb_project_find(&registry,project_id);
         if(!host.project||!host.project->enabled){sb_fail(&error,"The selected fixed project is missing or disabled.");goto done;}

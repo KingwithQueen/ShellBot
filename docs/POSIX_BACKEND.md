@@ -1,4 +1,4 @@
-# Linux / macOS 后台开发版：第二阶段
+# Linux / macOS 后台开发版：第三阶段
 
 这是独立的 C17 POSIX 后台入口，不是 Windows 正式包或完整桌面版。正式 Windows 1.0.3 的 MSBuild 入口和 Win32 后端继续使用原有构建方式。当前已使用 Linux x86_64 和 Intel macOS 实机通过 SSH 编译运行；不能据此宣称所有发行版、旧系统或 Apple Silicon 已验收。
 
@@ -13,11 +13,13 @@
 - 本地项目列表、新增/配置/删除导出、启停、暂停/恢复与状态；管理器为每个启动的项目创建独立工作进程，统一回环 HTTP 按项目路由、分别认证。
 - 普通当前账户命令：启动、状态、二进制输出分页、标准输入及 EOF、取消、超时、输出限制、任务历史和输入回执。
 
-受限/管理员进程、OAuth 与凭据加密存储、产物传输、图像/PDF/Office、桌面控制、管理界面、托盘、自启和服务安装尚未实现。媒体工具继续隐藏；受限执行、管理员和桌面配置在启动时拒绝。普通命令须由项目显式开启；注册项目不会自动启动，异常退出的工作进程也不会自动重启。
+受限/管理员进程、产物传输、图像/PDF/Office、桌面控制、管理界面、托盘、自启和服务安装尚未实现。媒体工具继续隐藏；受限执行、管理员和桌面配置在启动时拒绝。普通命令须由项目显式开启；注册项目不会自动启动，异常退出的工作进程也不会自动重启。
+
+第三阶段加入 Keychain / Secret Service 加密凭据、显式私有密钥文件模式和管理器 OAuth；参见 [凭据存储与 OAuth](POSIX_OAUTH.md)。
 
 ## 原生构建
 
-依赖：C17 编译器、CMake 3.21 或更新版本、线程库，推荐 Ninja。yyjson 和现有带本地补丁的 CivetWeb 直接从仓库编译，不下载运行依赖，也不使用 Windows PDFium DLL。
+依赖：C17 编译器、CMake 3.21 或更新版本、线程库，推荐 Ninja。Linux 另需 OpenSSL 3 和 libsecret 的开发包与运行库；Mac 使用系统 Security/CoreFoundation/CommonCrypto。yyjson 和现有带本地补丁的 CivetWeb 直接从仓库编译，不下载运行依赖，也不使用 Windows PDFium DLL。
 
 ```sh
 cmake -S . -B build/posix-native -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -47,7 +49,7 @@ export SHELLBOT_EXAMPLE_TOKEN="$(build/posix-native/ShellBot --generate-token)"
 build/posix-native/ShellBot --http --projects /absolute/private/projects.json --project example
 ```
 
-`Authorization: Bearer ...` 在请求体和工具调用前校验；请求体最多 1 MiB，必须具有明确 Content-Length，JSON 响应上限继续使用共享核心限制。拒绝浏览器 Origin、未知 Host、重复认证头和查询参数。需要公网地址时沿用用户自己的隧道，ShellBot 不修改代理或域名。本阶段 HTTP bearer 不是 OAuth 长期授权实现。
+`Authorization: Bearer ...` 在请求体和工具调用前校验；请求体最多 1 MiB，必须具有明确 Content-Length，JSON 响应上限继续使用共享核心限制。拒绝浏览器 Origin、未知 Host、重复认证头和查询参数。需要公网地址时沿用用户自己的隧道，ShellBot 不修改代理或域名。管理器可显式开启 OAuth，配置与授权流程见 [凭据与 OAuth](POSIX_OAUTH.md)。
 
 端口仍接受 1～65535。低端口由目标操作系统决定是否允许普通用户监听，程序保留系统拒绝，不添加 1024 下限，也不自动提权。
 
@@ -115,7 +117,7 @@ ShellBot --project-remove example --projects /private/projects.json --output /pr
 
 `task_output` 返回 `data_base64`、字节偏移及 `next_offset`；有效 UTF-8 页另带 `text_utf8`。stdout 和 stderr 合计保留不超过项目 `max_output_bytes`，超限停止任务。默认最多 8 个活动任务、32 条实例内记录、256 KiB 输出；记录不自动淘汰，避免旧请求键被再次执行。`task_input` 每次最多 4096 字节 UTF-8，携带 `input_key` 和可选 EOF；每任务最多 16 份回执，同键不同内容拒绝。状态区分排队、已投递和失败；部分写入字节数保留供核对。
 
-任务只继承系统生成的 HOME/USER/LOGNAME、固定 PATH、LANG 和 TMPDIR，不继承宿主 bearer 或自定义环境变量。当前实例的输出留在受限内存缓冲区；历史保留每流最多 8192 字节前缀与截断标记，以及命令元数据和 stdin 投递回执。Data 沿用私有权限保护，尚未加密。
+任务只继承系统生成的 HOME/USER/LOGNAME、固定 PATH、LANG 和 TMPDIR，不继承宿主 bearer 或自定义环境变量。当前实例的输出留在受限内存缓冲区；历史保留每流最多 8192 字节前缀与截断标记，以及命令元数据和 stdin 投递回执。任务与审计 Data 沿用私有权限保护；项目凭据及 OAuth 状态可使用第三阶段独立的加密存储。
 
 取消、超时、暂停和正常退出会停止任务进程组中的普通后代。工作进程崩溃时独立监督进程检测通道关闭并清理进程组；管理器异常退出后，工作进程因私有通道关闭而退出并停止任务。没有按进程名批量终止其他程序，也不自动恢复任务或 stdin。主动脱离进程组的守护进程、恶意同 UID 程序、监督进程本身被强杀均不属于已验证的完整任务树隔离。
 
@@ -139,6 +141,6 @@ POSIX `flock` 是协作式锁。目录定位与版本复核是文件工具的访
 
 脚本仅选择 CMake、POSIX 后端、共享 C 源码及两个源码依赖，包含本机未提交的这些源码改动；不复制 `.git`、Windows 产物、Data 或 SSH 密钥。每次在远端指定根目录的 `.native-build/时间-随机值` 下新建源码和构建快照，核对逐文件 SHA-256 后编译，不覆盖现有文件，不运行安装操作。结果和取回的二进制保存在本机 `build/posix`，历史失败保留。
 
-现有约定将测试源保留在本机而不纳入 Git。恢复本地 `tests/posix_integration.py` 和 `tests/posix_phase2.py` 后可增加 `-WithTests`；测试仅在各远端项目下独立 `.qa-*` 夹具中读写，保留报告和备份，退出自己启动的进程。报告摘要须与取回的程序一致才视为通过。`-Sanitizers` 可对后台与共享核心启用地址/未定义行为检查；不声称第三方静态库也已经插桩。
+现有约定将测试源保留在本机而不纳入 Git。恢复本地 `tests/posix_integration.py` 、`tests/posix_phase2.py`、`tests/posix_oauth.py` 和 `tests/posix_clock.c` 后可增加 `-WithTests`；测试仅在各远端项目下独立 `.qa-*` 夹具中读写，保留报告和备份，退出自己启动的进程。报告摘要须与取回的程序一致才视为通过。`-Sanitizers` 可对后台与共享核心启用地址/未定义行为检查；不声称第三方静态库也已经插桩。
 
 本阶段的 SSH、原生后台、隔离文件与 HTTP 测试不等于真实 MCP 客户端、OAuth、GUI、物理桌面或跨发行版发布验收。

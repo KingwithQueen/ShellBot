@@ -295,7 +295,11 @@ static yyjson_mut_val *tool_call_inner(sb_host *host, const char *actor, const c
         yyjson_mut_obj_add_val(doc, data, "execution_status", sb_execution_status(host->execution, doc));
         yyjson_mut_obj_add_bool(doc, data, "desktop_control", host->project && host->project->policy.desktop.control && sb_desktop_available(host->desktop));
         yyjson_mut_obj_add_val(doc,data,"desktop_status",sb_desktop_capabilities(host->desktop,doc));
+#ifdef SB_POSIX
+        yyjson_mut_obj_add_bool(doc, data, "oauth", host->oauth_backend);
+#else
         yyjson_mut_obj_add_bool(doc, data, "oauth", false);
+#endif
         yyjson_mut_obj_add_bool(doc, data, "approval", true);
         yyjson_mut_obj_add_str(doc, data, "approval_mode", host->project && !host->project->legacy_compatibility ?
             (host->project->policy.approval_mode == SB_PROJECT_NEVER ? "never" : host->project->policy.approval_mode == SB_PROJECT_WORKSPACE_AUTO ? "workspace_auto" : "always") : "local-owner");

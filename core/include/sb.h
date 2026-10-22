@@ -78,6 +78,9 @@ typedef struct {
     sb_audit *audit;
     sb_store *store;
     bool http_mode;
+#ifdef SB_POSIX
+    bool oauth_backend; /* Set by the authenticated manager's private worker invocation. */
+#endif
     uint64_t started_ms;
     sb_execution *execution;
     sb_desktop *desktop; /* Ordinary project desktop; never the elevated backend. */

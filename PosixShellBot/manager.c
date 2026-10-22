@@ -1,5 +1,6 @@
 #include "posix.h"
 #include "sb_projects.h"
+#include "oauth.h"
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -16,7 +17,7 @@ typedef struct {
     pid_t pid;
     int fd, status;
     bool paused;
-    char instance[33], reason[128];
+    char instance[33], reason[128], data_identity[50];
     char *authorization;
 } worker;
 typedef struct {
@@ -27,6 +28,8 @@ typedef struct {
     sb_http_server *http;
     char *snapshot;
     worker workers[SB_MAX_PROJECTS];
+    sb_secrets *secrets;
+    sb_oauth *oauth;
 } manager;
 static const char *str(yyjson_val *v, const char *key) { return sb_string(yyjson_obj_get(v, key)); }
 static char *ok(void) { return sb_strdup("{\"ok\":true}"); }
@@ -191,7 +194,10 @@ static bool start(manager *m, worker *w, sb_error *e) {
                     m->snapshot,
                     "--project",
                     (char *)w->project->id,
+                    NULL,
                     NULL};
+    if (m->oauth)
+        argv[6] = "--oauth-capable";
     if (!sb_posix_spawn_channel(argv, &w->fd, &w->pid, e))
         return false;
     char *reply = sb_posix_frame_read(w->fd, 8000, e);
@@ -272,6 +278,38 @@ static yyjson_mut_val *worker_status(worker *w, yyjson_mut_doc *d) {
     yyjson_mut_obj_add_strcpy(d, v, "reason", w->reason);
     return v;
 }
+static size_t oauth_projects(manager *m, sb_oauth_project projects[SB_MAX_PROJECTS]) {
+    for (size_t i = 0; i < m->registry.project_count; i++) {
+        worker *w = &m->workers[i];
+        projects[i] = (sb_oauth_project){.id = w->project->id,
+                                         .revision = w->project->policy_revision,
+                                         .enabled = w->project->enabled && w->authorization};
+        sb_error e = {0};
+        char binding[256];
+        if (projects[i].enabled) {
+            snprintf(binding, sizeof(binding), "%s:%s:%s", w->authorization + 7, w->project->id,
+                     w->data_identity);
+            if (!sb_platform_sha256(binding, strlen(binding), projects[i].binding, &e))
+                projects[i].enabled = false;
+            sb_posix_wipe(binding, sizeof(binding));
+        }
+    }
+    return m->registry.project_count;
+}
+static bool oauth_http(void *context, const sb_http_request *q, sb_http_response *r) {
+    manager *m = context;
+    sb_oauth_project projects[SB_MAX_PROJECTS];
+    return sb_oauth_http(m->oauth, projects, oauth_projects(m, projects), q, r);
+}
+static char *oauth_challenge(void *context, const char *path) {
+    manager *m = context;
+    char endpoint[128];
+    if (!strcmp(path, "/mcp") && *m->registry.default_project_id) {
+        snprintf(endpoint, sizeof(endpoint), "/projects/%s/mcp", m->registry.default_project_id);
+        path = endpoint;
+    }
+    return sb_oauth_challenge(m->oauth, path);
+}
 static char *owner_request(void *context, const char *request, size_t length) {
     manager *m = context;
     yyjson_doc *parsed = yyjson_read(request, length, 0);
@@ -282,6 +320,28 @@ static char *owner_request(void *context, const char *request, size_t length) {
     sb_error e = {0};
     if (!command || !v)
         goto invalid;
+    if (!strncmp(command, "oauth-", 6)) {
+        static const char *const keys[] = {"command", "id", "persistent"};
+        const char *oauth_id = str(root, "id");
+        yyjson_val *persistent = yyjson_obj_get(root, "persistent");
+        if (!sb_config_keys(root, keys, 3) ||
+            (strcmp(command, "oauth-status") &&
+             (!oauth_id || strlen(oauth_id) != 64 || strspn(oauth_id, "0123456789abcdef") != 64)) ||
+            (persistent && (!yyjson_is_bool(persistent) || strcmp(command, "oauth-approve"))))
+            goto invalid;
+        char *response = NULL;
+        if (strcmp(command, "oauth-status") &&
+            !sb_audit_operation(m->audit, "oauth_owner_intent", "local-owner", "manager", "oauth", command,
+                                oauth_id))
+            response = sb_strdup("{\"error\":\"Manager audit unavailable; OAuth decision blocked\"}");
+        else {
+            sb_oauth_project projects[SB_MAX_PROJECTS];
+            response = sb_oauth_owner(m->oauth, projects, oauth_projects(m, projects), root);
+        }
+        yyjson_doc_free(parsed);
+        yyjson_mut_doc_free(d);
+        return response;
+    }
     if (!strcmp(command, "status")) {
         yyjson_mut_val *list = yyjson_mut_arr(d);
         for (size_t i = 0; i < m->registry.project_count; i++) {
@@ -293,6 +353,8 @@ static char *owner_request(void *context, const char *request, size_t length) {
         yyjson_mut_obj_add_val(d, v, "projects", list);
         yyjson_mut_obj_add_uint(d, v, "manager_pid", (uint64_t)getpid());
         yyjson_mut_obj_add_bool(d, v, "http", m->http != NULL);
+        yyjson_mut_obj_add_str(d, v, "credential_provider", sb_secrets_provider(m->secrets));
+        sb_oauth_summary(m->oauth, d, v);
     } else {
         worker *w = get_worker(m, id);
         if (!w)
@@ -362,7 +424,13 @@ static void *route_open(void *context, const char *path, const char *auth, bool 
         *status = 404;
         return NULL;
     }
-    if (!sb_posix_secret(auth, w->authorization)) {
+    sb_oauth_project projects[SB_MAX_PROJECTS];
+    size_t count = oauth_projects(m, projects);
+    const sb_oauth_project *project = NULL;
+    for (size_t i = 0; i < count; i++)
+        if (!strcmp(projects[i].id, w->project->id))
+            project = &projects[i];
+    if (!sb_posix_secret(auth, w->authorization) && !sb_oauth_authorized(m->oauth, project, auth)) {
         *status = 401;
         return NULL;
     }
@@ -411,6 +479,8 @@ static bool validate_directories(manager *m, sb_error *e) {
             sb_fail(e, "Manager Data and project Data must be separate private directories.");
             goto done;
         }
+        if (!sb_platform_root_identity(data[i], m->workers[i].data_identity, e))
+            goto done;
         for (size_t j = 0; j < i; j++)
             if (sb_platform_roots_overlap(data[i], data[j])) {
                 sb_fail(e, "Project Data directories overlap.");
@@ -440,10 +510,14 @@ done:
     return ok;
 }
 bool sb_posix_manager_option(const char *s) {
-    const char *options[] = {
-        "--manager",      "--manager-data-dir", "--management-status", "--project-status", "--project-start",
-        "--project-stop", "--project-pause",    "--project-resume",    "--project-owner",  "--manager-stop",
-        "--project-list", "--project-create",   "--project-configure", "--project-remove"};
+    const char *options[] = {"--manager",           "--manager-data-dir",    "--management-status",
+                             "--project-status",    "--project-start",       "--project-stop",
+                             "--project-pause",     "--project-resume",      "--project-owner",
+                             "--manager-stop",      "--project-list",        "--project-create",
+                             "--project-configure", "--project-remove",      "--oauth",
+                             "--credential-store",  "--credential-key-file", "--credential-keychain",
+                             "--oauth-status",      "--oauth-approve",       "--oauth-deny",
+                             "--oauth-revoke",      "--oauth-remove-client"};
     for (unsigned i = 0; i < sizeof(options) / sizeof(*options); i++)
         if (!strcmp(s, options[i]))
             return true;
@@ -455,11 +529,33 @@ int sb_posix_manager_cli(int argc, char **argv) {
     const char *starts[SB_MAX_PROJECTS];
     size_t start_count = 0;
     bool launch = false, http = false, list = false;
+    bool oauth = false, credentials = false, persistent = false;
+    sb_secret_options secret_options = {0};
     sb_error e = {0};
     int result = 2;
     for (int i = 1; i < argc; i++) {
         const char *s = argv[i];
-        if (!strcmp(s, "--manager")) {
+        if (!strcmp(s, "--oauth") || !strcmp(s, "--credential-store")) {
+            bool *flag = !strcmp(s, "--oauth") ? &oauth : &credentials;
+            if (*flag)
+                goto bad;
+            *flag = true;
+        } else if (!strcmp(s, "--persistent")) {
+            if (persistent)
+                goto bad;
+            persistent = true;
+        } else if (!strcmp(s, "--oauth-status") || !strcmp(s, "--oauth-approve") ||
+                   !strcmp(s, "--oauth-deny") || !strcmp(s, "--oauth-revoke") ||
+                   !strcmp(s, "--oauth-remove-client")) {
+            if (command)
+                goto bad;
+            command = s + 2;
+            if (strcmp(command, "oauth-status")) {
+                if (i + 1 >= argc)
+                    goto bad;
+                id = argv[++i];
+            }
+        } else if (!strcmp(s, "--manager")) {
             if (launch)
                 goto bad;
             launch = true;
@@ -490,11 +586,13 @@ int sb_posix_manager_cli(int argc, char **argv) {
                                 : !strcmp(s, "--manager-data-dir") ? &data
                                 : !strcmp(s, "--project-definition") || !strcmp(s, "--project-create")
                                     ? &definition
-                                : !strcmp(s, "--output")       ? &output
-                                : !strcmp(s, "--backup")       ? &backup
-                                : !strcmp(s, "--request")      ? &request_file
-                                : !strcmp(s, "--project-list") ? &projects
-                                                               : NULL;
+                                : !strcmp(s, "--output")              ? &output
+                                : !strcmp(s, "--backup")              ? &backup
+                                : !strcmp(s, "--request")             ? &request_file
+                                : !strcmp(s, "--credential-key-file") ? &secret_options.key_file
+                                : !strcmp(s, "--credential-keychain") ? &secret_options.keychain
+                                : !strcmp(s, "--project-list")        ? &projects
+                                                                      : NULL;
             if (!slot || *slot || i + 1 >= argc)
                 goto bad;
             if (!strcmp(s, "--project-list"))
@@ -507,6 +605,10 @@ int sb_posix_manager_cli(int argc, char **argv) {
             *slot = argv[++i];
         }
     }
+    if (persistent && (!command || strcmp(command, "oauth-approve")))
+        goto bad;
+    if ((command || list) && (oauth || credentials || secret_options.key_file || secret_options.keychain))
+        goto bad;
     if (command && !launch && !list && !start_count && !http && !projects && !definition && !output &&
         !backup) {
         if (!data)
@@ -517,7 +619,9 @@ int sb_posix_manager_cli(int argc, char **argv) {
         yyjson_mut_val *v = yyjson_mut_obj(d);
         yyjson_mut_obj_add_str(d, v, "command", command);
         if (id)
-            yyjson_mut_obj_add_str(d, v, "project_id", id);
+            yyjson_mut_obj_add_str(d, v, !strncmp(command, "oauth-", 6) ? "id" : "project_id", id);
+        if (persistent)
+            yyjson_mut_obj_add_bool(d, v, "persistent", true);
         if (request_file) {
             size_t n;
             char *bytes = sb_platform_load_config(request_file, &n, &e);
@@ -601,6 +705,40 @@ int sb_posix_manager_cli(int argc, char **argv) {
         free(original);
         goto cleanup;
     }
+    if (oauth && !http) {
+        free(original);
+        sb_fail(&e, "--oauth requires --http and a configured HTTPS public_url.");
+        goto cleanup;
+    }
+    if (credentials || oauth || secret_options.key_file || secret_options.keychain) {
+        if (secret_options.key_file) {
+            char *leaf = NULL;
+            sb_root *key_root = sb_platform_account_parent(secret_options.key_file, &leaf, &e);
+            free(leaf);
+            bool overlap = key_root == NULL;
+            for (size_t i = 0; key_root && i < m->registry.project_count; i++)
+                for (size_t j = 0; j < m->registry.projects[i].directory_count; j++) {
+                    sb_root *r = sb_platform_root(m->registry.projects[i].directories[j].path, &e);
+                    if (!r) {
+                        overlap = true;
+                        break;
+                    }
+                    overlap |= sb_platform_roots_overlap(key_root, r);
+                    sb_platform_root_close(r);
+                }
+            sb_platform_root_close(key_root);
+            if (overlap) {
+                free(original);
+                sb_fail(&e, "Credential key directory must not overlap an exposed project root.");
+                goto cleanup;
+            }
+        }
+        m->secrets = sb_secrets_open(m->lease, &secret_options, &e);
+        if (!m->secrets) {
+            free(original);
+            goto cleanup;
+        }
+    }
     char nonce[33];
     unsigned char b[16];
     if (!sb_platform_random(b, sizeof(b), &e)) {
@@ -631,7 +769,7 @@ int sb_posix_manager_cli(int argc, char **argv) {
         pthread_mutex_init(&w->mutex, NULL);
         initialized++;
         if (http && w->project->enabled) {
-            w->authorization = sb_posix_bearer(w->project->token_env, &e);
+            w->authorization = sb_credential_bearer(m->secrets, w->project->id, w->project->token_env, &e);
             if (!w->authorization)
                 goto cleanup;
             for (size_t j = 0; j < i; j++)
@@ -640,6 +778,11 @@ int sb_posix_manager_cli(int argc, char **argv) {
                     goto cleanup;
                 }
         }
+    }
+    if (oauth) {
+        m->oauth = sb_oauth_new(m->secrets, m->registry.public_origin, &e);
+        if (!m->oauth)
+            goto cleanup;
     }
     for (size_t i = 0; i < start_count; i++) {
         worker *w = get_worker(m, starts[i]);
@@ -655,7 +798,11 @@ int sb_posix_manager_cli(int argc, char **argv) {
         c.port = m->registry.port;
         if (*m->registry.public_origin && !sb_config_public_url(&c, m->registry.public_origin, &e))
             goto cleanup;
-        sb_http_routes routes = {.open = route_open, .call = route_call, .close = route_close};
+        sb_http_routes routes = {.open = route_open,
+                                 .call = route_call,
+                                 .close = route_close,
+                                 .auxiliary = oauth ? oauth_http : NULL,
+                                 .challenge = oauth ? oauth_challenge : NULL};
         m->http = sb_http_start(&c, &routes, m, &e);
         if (!m->http)
             goto cleanup;
@@ -688,6 +835,8 @@ cleanup:
         }
     }
     sb_audit_free(m->audit);
+    sb_oauth_free(m->oauth);
+    sb_secrets_close(m->secrets);
     sb_platform_lease_close(m->lease);
     sb_projects_free(&m->registry);
     free(m->snapshot);

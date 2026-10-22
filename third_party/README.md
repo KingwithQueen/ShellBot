@@ -1,5 +1,7 @@
 # 固定版本的原生依赖
 
+POSIX 第三阶段：Linux 的凭据后端动态使用系统 OpenSSL 3（libcrypto）及 libsecret/GLib/GIO，CMake 要求对应开发包；这些系统库不随开发包捆绑。macOS 使用系统 Security、CoreFoundation 与 CommonCrypto，不依赖额外下载的密码库。Windows 的固定依赖、构建和发布方式不变，说明见 [POSIX 凭据与 OAuth](../docs/POSIX_OAUTH.md)。
+
 2026-10-20 / dev.20 本地补丁：CivetWeb 的 civetweb.c / civetweb.h 新增 mg_disable_keep_alive，仅将当前连接标记为响应完成后关闭。下方归档摘要记录原始上游发行包，不能用来宣称当前 CivetWeb 源码逐字节未修改；本地修改随源码清单校验，MIT 许可保持。未更改 PDFium、yyjson 的依赖字节或版本。
 
 ShellBot 自有代码使用 C17。yyjson / CivetWeb 源文件直接编译进程序；PDFium 使用固定版本的旁置原生 DLL，默认构建复制对应架构文件。产品不需要 Node.js、Python、.NET、Microsoft Office 或运行时下载依赖。

@@ -22,7 +22,7 @@ add_executable(ShellBot
   PosixShellBot/main.c PosixShellBot/transport.c PosixShellBot/owner.c
   PosixShellBot/platform.c PosixShellBot/sha256.c PosixShellBot/unavailable.c
   PosixShellBot/process.c PosixShellBot/execution.c PosixShellBot/task_agent.c
-  PosixShellBot/manager.c
+  PosixShellBot/manager.c PosixShellBot/credentials.c PosixShellBot/keyring.c PosixShellBot/oauth.c
   core/config/config.c core/config/projects.c core/protocol/mcp.c
   core/policy/approval.c core/policy/audit.c core/policy/state.c core/policy/project_policy.c
   core/tools/tools.c core/tools/text.c core/tools/search.c core/tools/tasks.c
@@ -37,6 +37,14 @@ else()
 endif()
 target_compile_options(ShellBot PRIVATE -Wall -Wextra -Werror -Wno-misleading-indentation)
 target_link_libraries(ShellBot PRIVATE sb_json sb_http Threads::Threads)
+if(APPLE)
+  target_link_libraries(ShellBot PRIVATE "-framework Security" "-framework CoreFoundation")
+else()
+  find_package(OpenSSL 3.0 REQUIRED COMPONENTS Crypto)
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(LIBSECRET REQUIRED IMPORTED_TARGET libsecret-1)
+  target_link_libraries(ShellBot PRIVATE OpenSSL::Crypto PkgConfig::LIBSECRET)
+endif()
 if(SHELLBOT_SANITIZERS)
   target_compile_options(ShellBot PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
   target_link_options(ShellBot PRIVATE -fsanitize=address,undefined)
@@ -44,9 +52,13 @@ endif()
 if(SHELLBOT_TESTS)
   enable_testing()
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
-  if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/posix_integration.py")
-    message(FATAL_ERROR "Restore local tests/posix_integration.py before enabling SHELLBOT_TESTS.")
-  endif()
+  add_library(sb_test_clock SHARED tests/posix_clock.c)
+  target_link_libraries(sb_test_clock PRIVATE ${CMAKE_DL_LIBS})
+  foreach(test_file posix_integration.py posix_phase2.py posix_oauth.py posix_clock.c)
+    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/${test_file}")
+      message(FATAL_ERROR "Restore local tests/${test_file} before enabling SHELLBOT_TESTS.")
+    endif()
+  endforeach()
   add_test(NAME posix-integration COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/tests/posix_integration.py $<TARGET_FILE:ShellBot>)
   set_tests_properties(posix-integration PROPERTIES TIMEOUT 240)
@@ -56,5 +68,7 @@ install(FILES LICENSE.txt DESTINATION share/ShellBot/licenses)
 install(FILES third_party/yyjson/LICENSE DESTINATION share/ShellBot/licenses RENAME yyjson-LICENSE)
 install(FILES third_party/civetweb/LICENSE.md DESTINATION share/ShellBot/licenses RENAME civetweb-LICENSE.md)
 install(FILES docs/POSIX_BACKEND.md DESTINATION share/ShellBot)
+install(FILES docs/POSIX_OAUTH.md DESTINATION share/ShellBot)
 install(FILES config/posix-projects.example.json DESTINATION share/ShellBot/examples)
 install(FILES config/posix-commands.example.json DESTINATION share/ShellBot/examples)
+install(FILES config/posix-oauth.example.json DESTINATION share/ShellBot/examples)
