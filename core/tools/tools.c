@@ -48,7 +48,7 @@ static size_t tool_count(void) { return sizeof(definitions) / sizeof(definitions
 
 static bool platform_tool_available(const char *name) {
 #ifdef SB_POSIX
-    return name && (!strncmp(name,"fs_",3) || !strncmp(name,"host_",5) || !strncmp(name,"approval_",9) || !strncmp(name,"task_",5));
+    return name && (!strncmp(name,"fs_",3) || !strncmp(name,"host_",5) || !strncmp(name,"approval_",9) || !strncmp(name,"task_",5) || sb_desktop_tool(name));
 #else
     (void)name; return true;
 #endif

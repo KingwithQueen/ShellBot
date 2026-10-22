@@ -1,4 +1,5 @@
 #include "posix.h"
+#include "desktop.h"
 #include "sb_projects.h"
 #include "oauth.h"
 #include <sys/socket.h>
@@ -117,8 +118,9 @@ int sb_posix_worker_run(sb_host *h, int fd) {
                 reply = sb_dispatch(h, NULL, wire, strlen(wire), &ctx, &length, &status);
             }
         } else if (op && !strcmp(op, "owner") && wire)
-            reply = sb_policy_owner_request(h->policy, wire, strlen(wire));
+            reply = sb_posix_owner_request(h, wire, strlen(wire));
         else if (op && !strcmp(op, "pause")) {
+            sb_posix_desktop_pause(h->desktop);
             paused = true;
             sb_posix_execution_cancel_all(h->execution);
             reply = ok();

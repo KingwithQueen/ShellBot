@@ -23,7 +23,9 @@ foreach($folder in @('core','PosixShellBot','third_party/yyjson','third_party/ci
 }
 $files+='assets/branding/shellbot-v1/shellbot-icon.png';$files+='assets/branding/shellbot-v1/shellbot-icon-small.png'
 $files+='docs/POSIX_DESKTOP.md'
+$files+='docs/POSIX_REMOTE_DESKTOP.md';$files+='config/posix-desktop.example.json'
 if($WithTests){$files+='tests/posix_integration.py';$files+='tests/posix_phase2.py';$files+='tests/posix_oauth.py';$files+='tests/posix_clock.c';$files+='tests/posix_desktop.py';$files+='tests/posix_tray.py'}
+if($WithTests){$files+='tests/posix_remote.py';$files+='tests/posix_remote_fixture.c'}
 $files=@($files|Sort-Object -Unique)
 $hashes=foreach($file in $files){$path=Join-Path $repo $file;if(!(Test-Path -LiteralPath $path -PathType Leaf)){throw "Missing input: $file"};((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()+'  '+$file)}
 [IO.File]::WriteAllText((Join-Path $runDir 'SOURCE_SHA256SUMS'),($hashes -join "`n")+"`n",[Text.UTF8Encoding]::new($false))
@@ -88,6 +90,12 @@ fi
             if($LASTEXITCODE -ne 0){$testVerified=$false}else{
                 $desktopResult=Get-Content -LiteralPath $desktopReport -Raw|ConvertFrom-Json
                 $testVerified=$testVerified -and $desktopResult.status -ceq 'passed' -and $desktopResult.sha256 -ceq $testResult.sha256
+            }
+            $remoteReport=Join-Path $runDir ($connection.name+'-remote-desktop-report.json')
+            & $scp @options ($connection.hostName+':'+$snapshot+'/build/remote-desktop-test-report.json') $remoteReport
+            if($LASTEXITCODE -ne 0){$testVerified=$false}else{
+                $remoteResult=Get-Content -LiteralPath $remoteReport -Raw|ConvertFrom-Json
+                $testVerified=$testVerified -and $remoteResult.status -ceq 'passed' -and $remoteResult.sha256 -ceq $testResult.sha256
             }
         }
     }

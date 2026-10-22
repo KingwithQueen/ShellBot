@@ -14,7 +14,7 @@
 #include <stdarg.h>
 
 extern char **environ;
-struct sb_desktop {
+struct sb_native_manager {
     sb_lease *lease;
     char directory[256], registry[SB_PATH_CAP], data[512], key[SB_PATH_CAP];
     char selected[64], message[768];
@@ -135,6 +135,28 @@ char *sb_gui_request_text(yyjson_val *v, yyjson_val *configuration) {
     }
     return out;
 }
+char *sb_gui_desktop_text(yyjson_val *v) {
+    char *out = calloc(1, 4096);
+    if (!out)
+        return NULL;
+    if (!v || *sb_gui_string(v, "error")) {
+        snprintf(out, 4096, "请启用所选项目的桌面权限并启动项目，然后点击连接桌面。\n%s",
+                 sb_gui_string(v, "error"));
+        return out;
+    }
+    snprintf(
+        out, 4096,
+        "桌面连接：%s\n控制状态：%s\n短时租约：%s\n人工输入自动暂停：%s\n\n%"
+        "s\n\n连接需要本机确认。一次连接不会自动申请租约；远程操作仍按项目审批规则执行。\n暂停后只有本机恢复"
+        "，需重新申请租约、取得新截图。\n屏幕查看会披露共享屏幕上的其他应用，文件目录范围不会裁剪画面。",
+        sb_gui_bool(v, "available")    ? "已连接"
+        : sb_gui_bool(v, "connecting") ? "等待系统确认或连接中"
+                                       : "未连接",
+        sb_gui_bool(v, "paused") ? "已暂停" : "可申请控制", sb_gui_bool(v, "leased") ? "使用中" : "空闲",
+        sb_gui_bool(v, "human_input_pause_supported") ? "支持" : "此后端不支持；可在本机或系统共享入口停止",
+        sb_gui_string(v, "last_failure"));
+    return out;
+}
 static char *load(const char *path) {
     sb_error e = {0};
     size_t n;
@@ -145,7 +167,7 @@ static yyjson_doc *parse(char *bytes) {
     free(bytes);
     return d;
 }
-static yyjson_doc *registry(sb_desktop *g) { return parse(load(g->registry)); }
+static yyjson_doc *registry(sb_native_manager *g) { return parse(load(g->registry)); }
 static char *wire(const char *command, const char *project, const char *id) {
     yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
     yyjson_mut_val *v = yyjson_mut_obj(d);
@@ -156,14 +178,14 @@ static char *wire(const char *command, const char *project, const char *id) {
         yyjson_mut_obj_add_str(d, v, "id", id);
     return sb_posix_json(d, v);
 }
-static yyjson_doc *exchange(sb_desktop *g, const char *command, const char *project, const char *id) {
+static yyjson_doc *exchange(sb_native_manager *g, const char *command, const char *project, const char *id) {
     char *q = wire(command, project, id);
     sb_error e = {0};
     char *r = sb_owner_exchange(g->data, q, strlen(q), &e);
     free(q);
     return parse(r);
 }
-static bool online(sb_desktop *g) {
+static bool online(sb_native_manager *g) {
     yyjson_doc *d = exchange(g, "status", NULL, NULL);
     bool ok = yyjson_obj_get(yyjson_doc_get_root(d), "manager_pid") != NULL;
     yyjson_doc_free(d);
@@ -180,7 +202,7 @@ static bool private_dir(const char *path, sb_error *e) {
     return ok;
 }
 /* Immutable exports retain a flushed backup. Only the desktop's private copy is replaced. */
-static bool save(sb_desktop *g, const char *name, const char *json, sb_error *e) {
+static bool save(sb_native_manager *g, const char *name, const char *json, sb_error *e) {
     char target[SB_PATH_CAP], output[SB_PATH_CAP], backup[SB_PATH_CAP], nonce[33];
     unsigned char random[16];
     if (!sb_platform_random(random, sizeof(random), e))
@@ -204,13 +226,13 @@ static bool save(sb_desktop *g, const char *name, const char *json, sb_error *e)
     }
     return ok;
 }
-static bool save_registry(sb_desktop *g, const char *json, sb_error *e) {
+static bool save_registry(sb_native_manager *g, const char *json, sb_error *e) {
     sb_project_registry r = {0};
     bool ok = sb_projects_parse(&r, json, strlen(json), e);
     sb_projects_free(&r);
     return ok && save(g, "projects.json", json, e);
 }
-static yyjson_doc *settings(sb_desktop *g) {
+static yyjson_doc *settings(sb_native_manager *g) {
     char path[SB_PATH_CAP];
     snprintf(path, sizeof(path), "%s/desktop.json", g->directory);
     yyjson_doc *d = parse(load(path));
@@ -219,7 +241,7 @@ static yyjson_doc *settings(sb_desktop *g) {
     return d;
 }
 /* Spawn a fixed local executable without a shell, with bounded capture and time. */
-static char *run(sb_desktop *g, char *const argv[], bool daemon, sb_error *e) {
+static char *run(sb_native_manager *g, char *const argv[], bool daemon, sb_error *e) {
     int pipes[2] = {-1, -1};
     if (pipe(pipes)) {
         sb_posix_error(e, "Create backend output channel");
@@ -321,7 +343,7 @@ static char *run(sb_desktop *g, char *const argv[], bool daemon, sb_error *e) {
     }
     return out;
 }
-static bool credentials(sb_desktop *g, yyjson_val *projects, sb_error *e) {
+static bool credentials(sb_native_manager *g, yyjson_val *projects, sb_error *e) {
     char *args[14] = {(char *)sb_posix_program(), "--credential-status", "--manager-data-dir", g->data, NULL};
     unsigned n = 4;
     if (*g->key) {
@@ -377,7 +399,7 @@ static bool credentials(sb_desktop *g, yyjson_val *projects, sb_error *e) {
     yyjson_doc_free(catalog);
     return true;
 }
-static bool launch(sb_desktop *g, sb_error *e) {
+static bool launch(sb_native_manager *g, sb_error *e) {
     if (online(g)) {
         sb_fail(e, "Manager is already running; the desktop attached to it.");
         return false;
@@ -444,7 +466,7 @@ done:
     yyjson_doc_free(s);
     return ok;
 }
-static bool stopped(sb_desktop *g, sb_error *e) {
+static bool stopped(sb_native_manager *g, sb_error *e) {
     if (online(g)) {
         sb_fail(e, "请先停止后台，再保存配置。停止会结束运行中的项目和命令。");
         return false;
@@ -456,7 +478,7 @@ static bool stopped(sb_desktop *g, sb_error *e) {
     sb_platform_lease_close(l);
     return true;
 }
-static bool stop_manager(sb_desktop *g, sb_error *e) {
+static bool stop_manager(sb_native_manager *g, sb_error *e) {
     yyjson_doc *d = exchange(g, "stop", NULL, NULL);
     bool ok = sb_gui_bool(yyjson_doc_get_root(d), "stopping");
     yyjson_doc_free(d);
@@ -488,7 +510,19 @@ static yyjson_val *find(yyjson_doc *doc, const char *array, const char *key, con
                        v) if (!strcmp(sb_gui_string(v, key), id)) return v;
     return NULL;
 }
-static char *project_request(sb_desktop *g, const char *request, sb_error *e) {
+static char *project_request(sb_native_manager *g, const char *request, sb_error *e) {
+    yyjson_doc *local = yyjson_read(request, strlen(request), 0);
+    const char *command = sb_gui_string(yyjson_doc_get_root(local), "command");
+    if (!strncmp(command, "desktop-", 8)) {
+        yyjson_doc *cfg = registry(g);
+        yyjson_val *project = find(cfg, "projects", "id", g->selected);
+        const char *path = sb_gui_string(project, "data_dir");
+        char *reply = *path ? sb_owner_exchange(path, request, strlen(request), e) : NULL;
+        yyjson_doc_free(cfg);
+        yyjson_doc_free(local);
+        return reply;
+    }
+    yyjson_doc_free(local);
     yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
     yyjson_mut_val *v = yyjson_mut_obj(d);
     yyjson_mut_obj_add_str(d, v, "command", "owner");
@@ -505,7 +539,7 @@ static char *project_request(sb_desktop *g, const char *request, sb_error *e) {
     yyjson_doc_free(p);
     return out;
 }
-static bool edit(sb_desktop *g, yyjson_val *q, sb_error *e) {
+static bool edit(sb_native_manager *g, yyjson_val *q, sb_error *e) {
     const char *action = sb_gui_string(q, "action"), *id = sb_gui_string(q, "id"),
                *path = sb_gui_string(q, "path");
     if (!stopped(g, e))
@@ -580,6 +614,16 @@ static bool edit(sb_desktop *g, yyjson_val *q, sb_error *e) {
             "task_status", "task_output",       "task_input",      "task_cancel"};
         for (unsigned i = 0; i < (mode == 2 ? 19u : 14u); i++)
             yyjson_mut_arr_add_str(d, tools, names[i]);
+        /* Ordinary directory edits preserve the independent desktop permission and tool switches. */
+        yyjson_val *previous = yyjson_obj_get(existing, "policy"),
+                   *desktop = yyjson_obj_get(previous, "desktop");
+        if (desktop)
+            yyjson_mut_obj_add_val(d, policy, "desktop", yyjson_val_mut_copy(d, desktop));
+        yyjson_val *prior_tools = yyjson_obj_get(previous, "tools");
+        size_t ti, tn;
+        yyjson_val *t;
+        yyjson_arr_foreach(prior_tools, ti, tn, t) if (sb_desktop_tool(sb_string(t)))
+            yyjson_mut_arr_add_strcpy(d, tools, sb_string(t));
         yyjson_mut_obj_add_val(d, policy, "files", files);
         yyjson_mut_obj_add_val(d, policy, "execution", execution);
         yyjson_mut_obj_add_val(d, policy, "tools", tools);
@@ -601,7 +645,73 @@ done:
     free(output);
     return ok;
 }
-static bool configure(sb_desktop *g, yyjson_val *q, sb_error *e) {
+static bool desktop_permissions(sb_native_manager *g, yyjson_val *q, sb_error *e) {
+    if (!stopped(g, e))
+        return false;
+    const char *keys[] = {"enabled", "control", "clipboard_read", "clipboard_write"};
+    for (unsigned i = 0; i < 4; i++)
+        if (!yyjson_is_bool(yyjson_obj_get(q, keys[i]))) {
+            sb_fail(e, "桌面权限需要明确的开关值。");
+            return false;
+        }
+    bool enabled = sb_gui_bool(q, "enabled");
+    if (!enabled && (sb_gui_bool(q, "control") || sb_gui_bool(q, "clipboard_read") ||
+                     sb_gui_bool(q, "clipboard_write"))) {
+        sb_fail(e, "请先启用屏幕查看，再启用输入或剪贴板。");
+        return false;
+    }
+    yyjson_doc *cfg = registry(g);
+    yyjson_val *existing = find(cfg, "projects", "id", g->selected);
+    if (!existing) {
+        yyjson_doc_free(cfg);
+        sb_fail(e, "请先选择项目。");
+        return false;
+    }
+    yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *p = yyjson_val_mut_copy(d, existing), *policy = yyjson_mut_obj_get(p, "policy");
+    if (!policy) {
+        policy = yyjson_mut_obj(d);
+        yyjson_mut_obj_add_val(d, p, "policy", policy);
+    }
+    yyjson_val *prior = yyjson_obj_get(yyjson_obj_get(existing, "policy"), "desktop");
+    yyjson_mut_val *desktop = prior ? yyjson_val_mut_copy(d, prior) : yyjson_mut_obj(d);
+    for (unsigned i = 0; i < 4; i++) {
+        yyjson_mut_obj_remove_key(desktop, keys[i]);
+        yyjson_mut_obj_add_bool(d, desktop, keys[i], sb_gui_bool(q, keys[i]));
+    }
+    yyjson_mut_obj_remove_key(policy, "desktop");
+    yyjson_mut_obj_add_val(d, policy, "desktop", desktop);
+    sb_project_registry parsed = {0};
+    char *old = load(g->registry);
+    bool ok = old && sb_projects_parse(&parsed, old, strlen(old), e);
+    const sb_project *project = ok ? sb_project_find(&parsed, g->selected) : NULL;
+    if (project) {
+        yyjson_mut_val *tools = yyjson_mut_arr(d);
+        for (unsigned i = 0; i < SB_PROJECT_TOOL_COUNT; i++) {
+            bool allow = (project->policy.tools & (UINT64_C(1) << i)) != 0;
+            if (i >= 15 && i < 27)
+                allow = enabled && (i <= 18 || (i <= 24 && sb_gui_bool(q, "control")) ||
+                                    (i == 25 && sb_gui_bool(q, "clipboard_read")) ||
+                                    (i == 26 && sb_gui_bool(q, "clipboard_write")));
+            if (allow)
+                yyjson_mut_arr_add_str(d, tools, sb_project_tool_name(i));
+        }
+        yyjson_mut_obj_remove_key(policy, "tools");
+        yyjson_mut_obj_add_val(d, policy, "tools", tools);
+    }
+    char *definition = sb_posix_json(d, p),
+         *output = project ? sb_projects_edit(old, strlen(old), definition, strlen(definition), g->selected,
+                                              true, e)
+                           : NULL;
+    ok = output && save_registry(g, output, e);
+    free(output);
+    free(definition);
+    free(old);
+    sb_projects_free(&parsed);
+    yyjson_doc_free(cfg);
+    return ok;
+}
+static bool configure(sb_native_manager *g, yyjson_val *q, sb_error *e) {
     if (!stopped(g, e))
         return false;
     uint64_t port = yyjson_get_uint(yyjson_obj_get(q, "port"));
@@ -653,9 +763,9 @@ static void copy_doc(yyjson_mut_doc *d, yyjson_mut_val *root, const char *key, y
     if (v)
         yyjson_mut_obj_add_val(d, root, key, v);
 }
-static char *snapshot(sb_desktop *g) {
+static char *snapshot(sb_native_manager *g) {
     yyjson_doc *cfg = registry(g), *state = exchange(g, "status", NULL, NULL), *s = settings(g),
-               *oauth = NULL, *approvals = NULL;
+               *oauth = NULL, *approvals = NULL, *desktop = NULL;
     bool active = yyjson_obj_get(yyjson_doc_get_root(state), "manager_pid") != NULL;
     if (!find(cfg, "projects", "id", g->selected)) {
         yyjson_val *first = yyjson_arr_get(yyjson_obj_get(yyjson_doc_get_root(cfg), "projects"), 0);
@@ -665,6 +775,7 @@ static char *snapshot(sb_desktop *g) {
         oauth = exchange(g, "oauth-status", NULL, NULL);
         sb_error e = {0};
         approvals = parse(project_request(g, "{\"command\":\"list\"}", &e));
+        desktop = parse(project_request(g, "{\"command\":\"desktop-status\"}", &e));
     }
     yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
     yyjson_mut_val *v = yyjson_mut_obj(d);
@@ -673,6 +784,7 @@ static char *snapshot(sb_desktop *g) {
     copy_doc(d, v, "status", state);
     copy_doc(d, v, "oauth", oauth);
     copy_doc(d, v, "approvals", approvals);
+    copy_doc(d, v, "desktop", desktop);
     copy_doc(d, v, "inspected", g->inspected);
     yyjson_mut_obj_add_bool(d, v, "online", active);
     yyjson_mut_obj_add_bool(d, v, "ok", g->last_ok);
@@ -685,9 +797,10 @@ static char *snapshot(sb_desktop *g) {
     yyjson_doc_free(state);
     yyjson_doc_free(oauth);
     yyjson_doc_free(approvals);
+    yyjson_doc_free(desktop);
     return sb_posix_json(d, v);
 }
-char *sb_desktop_work(sb_desktop *g, const char *request) {
+char *sb_desktop_work(sb_native_manager *g, const char *request) {
     yyjson_doc *d = yyjson_read(request, strlen(request), 0);
     yyjson_val *q = yyjson_doc_get_root(d);
     const char *a = sb_gui_string(q, "action"), *id = sb_gui_string(q, "id"),
@@ -713,8 +826,18 @@ char *sb_desktop_work(sb_desktop *g, const char *request) {
         ok = edit(g, q, &e);
     else if (!strcmp(a, "settings"))
         ok = configure(g, q, &e);
-    else if (!strcmp(a, "start") || !strcmp(a, "stop_project") || !strcmp(a, "pause") ||
-             !strcmp(a, "resume")) {
+    else if (!strcmp(a, "desktop_permissions"))
+        ok = desktop_permissions(g, q, &e);
+    else if (!strcmp(a, "desktop-connect") || !strcmp(a, "desktop-pause") || !strcmp(a, "desktop-resume")) {
+        char request[80];
+        snprintf(request, sizeof(request), "{\"command\":\"%s\"}", a);
+        yyjson_doc *r = parse(project_request(g, request, &e));
+        ok = r && !yyjson_obj_get(yyjson_doc_get_root(r), "error");
+        if (!ok && r)
+            sb_fail(&e, sb_gui_string(yyjson_doc_get_root(r), "error"));
+        yyjson_doc_free(r);
+    } else if (!strcmp(a, "start") || !strcmp(a, "stop_project") || !strcmp(a, "pause") ||
+               !strcmp(a, "resume")) {
         yyjson_doc *r = exchange(g, a, g->selected, NULL);
         yyjson_val *v = yyjson_doc_get_root(r);
         ok = r && !*sb_gui_string(v, "error");
@@ -783,7 +906,7 @@ char *sb_desktop_work(sb_desktop *g, const char *request) {
     yyjson_doc_free(d);
     return snapshot(g);
 }
-sb_desktop *sb_desktop_open(const char *directory, const char *key, sb_error *e) {
+sb_native_manager *sb_desktop_open(const char *directory, const char *key, sb_error *e) {
     if (!directory || *directory != '/' || strlen(directory) > 240) {
         sb_fail(e, "Desktop requires an absolute data directory.");
         return NULL;
@@ -802,7 +925,7 @@ sb_desktop *sb_desktop_open(const char *directory, const char *key, sb_error *e)
         sb_platform_root_close(r);
         return NULL;
     }
-    sb_desktop *g = calloc(1, sizeof(*g));
+    sb_native_manager *g = calloc(1, sizeof(*g));
     if (!g) {
         sb_platform_lease_close(lease);
         return NULL;
@@ -844,9 +967,9 @@ fail:
     sb_desktop_close(g);
     return NULL;
 }
-const char *sb_desktop_directory(sb_desktop *g) { return g->directory; }
-bool sb_desktop_raise(sb_desktop *g) { return !unlinkat(g->lease->root->fd, "raise.request", 0); }
-void sb_desktop_close(sb_desktop *g) {
+const char *sb_desktop_directory(sb_native_manager *g) { return g->directory; }
+bool sb_desktop_raise(sb_native_manager *g) { return !unlinkat(g->lease->root->fd, "raise.request", 0); }
+void sb_desktop_close(sb_native_manager *g) {
     if (g) {
         yyjson_doc_free(g->inspected);
         sb_platform_lease_close(g->lease);

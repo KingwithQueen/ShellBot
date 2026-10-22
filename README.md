@@ -53,7 +53,7 @@
 
 ## Linux 和 macOS 后台开发版
 
-独立 C17 POSIX 后端使用 CMake 构建，可在本机编辑源码后通过 SSH 到 Linux/macOS 原生编译测试。已提供基础文件、项目独立工作进程、普通命令、加密凭据与 OAuth，以及 Mac Cocoa / Linux GTK 4 原生管理窗口和托盘。窗口可管理项目、审批和连接，普通命令具有当前账户权限，工作目录不是命令沙箱。受限/管理员执行、远程桌面控制、自启服务和媒体尚未实现；这是跨平台开发版。
+独立 C17 POSIX 后端使用 CMake 构建，可在本机编辑源码后通过 SSH 到 Linux/macOS 原生编译测试。已提供基础文件、项目独立工作进程、普通命令、加密凭据与 OAuth，以及 Mac Cocoa / Linux GTK 4 原生管理窗口和托盘。窗口可管理项目、审批和连接，普通命令具有当前账户权限，工作目录不是命令沙箱。第五阶段增加屏幕查看、键鼠与文本剪贴板、本机连接/暂停及短时租约，参见 [Linux / Mac 远程桌面](docs/POSIX_REMOTE_DESKTOP.md)。Wayland 和 Mac 系统授权后的实机操作需另行验收。受限/管理员执行、自启服务和媒体尚未实现；这是跨平台开发版。
 
 构建、配置、目录边界及远端开发流程见 [Linux/macOS 后台说明](docs/POSIX_BACKEND.md)，原生窗口使用见 [管理界面与托盘](docs/POSIX_DESKTOP.md)。Windows 继续使用上面的 MSBuild 入口，原有 Win32 平台代码及发布包保持独立。
 

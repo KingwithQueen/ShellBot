@@ -1,0 +1,17 @@
+{
+  "format_version": 1,
+  "gateway": { "port": 8765 },
+  "projects": [{
+    "id": "desktop_example",
+    "token_env": "SHELLBOT_DESKTOP_TOKEN",
+    "data_dir": "/absolute/private/ShellBotDesktopData",
+    "workspaces": [{ "id": "workspace", "path": "/absolute/workspace", "read_only": true }],
+    "policy": {
+      "approval_mode": "always",
+      "files": { "scope": "configured" },
+      "execution": { "enabled": false },
+      "desktop": { "enabled": true, "control": true, "clipboard_read": true, "clipboard_write": true, "lease_seconds": 30, "emergency_key": "F9" },
+      "tools": ["host_info", "host_capabilities", "approval_status", "approval_cancel", "desktop_lease", "desktop_state", "desktop_capture", "window_list", "window_focus", "desktop_click", "desktop_drag", "desktop_scroll", "desktop_type", "desktop_key", "clipboard_read", "clipboard_write"]
+    }
+  }]
+}

@@ -30,8 +30,14 @@ void sb_desktop_tools_list(sb_host *host, yyjson_mut_doc *doc, yyjson_mut_val *t
         yyjson_mut_obj_add_str(doc,tool,"description",
             "Explicit ordinary-project desktop permission and caller-bound expiring lease required. "
             "Request owner approval when pending; retry unchanged parameters with approval_id. Use a fresh request_key for each new observation/action. "
+#ifdef SB_POSIX
+            "Actions require screen_id from a recent observation and coordinates in its reported coordinate_space; refresh after any action. "
+            "Connect locally and grant system permissions first. Read host_capabilities.desktop_status for platform limits and human-input pause support. "
+            "The local owner can pause all workers and is the only party allowed to resume. Wayland has no arbitrary window focus/list or global human-input detection. "
+#else
             "Actions require screen_id from a recent observation and physical desktop coordinates; refresh after any action. "
             "Human/foreign input or Ctrl+Alt+configured function key pauses all ShellBot desktop control; only the local owner resumes it. "
+#endif
             "Input submission is not proof of application success. No elevated, lock-screen or UAC desktop automation.");
         yyjson_mut_obj_add_str(doc,schema,"type","object");
         yyjson_mut_obj_add_bool(doc,schema,"additionalProperties",false);

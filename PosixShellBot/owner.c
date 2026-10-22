@@ -1,4 +1,5 @@
 #include "posix.h"
+#include "desktop.h"
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/time.h>
@@ -55,7 +56,22 @@ sb_owner *sb_owner_start_handler(const char *data,sb_owner_handler handler,void 
     if(pthread_create(&o->thread,NULL,serve,o)){sb_fail(e,"Cannot start local owner thread.");goto fail;}sb_platform_root_close(root);return o;
 fail:sb_platform_root_close(root);if(o->fd>=0)close(o->fd);free(o);return NULL;
 }
-static char *host_request(void *context,const char *bytes,size_t n){sb_host *h=context;return sb_policy_owner_request(h->policy,bytes,n);}
+char *sb_posix_owner_request(sb_host *h, const char *bytes, size_t n) {
+    yyjson_doc *doc = yyjson_read(bytes, n, 0);
+    yyjson_val *v = yyjson_doc_get_root(doc);
+    const char *command = sb_string(yyjson_obj_get(v, "command"));
+    char *reply = NULL;
+    if (command && !strncmp(command, "desktop-", 8)) {
+        const char *keys[] = {"command"};
+        reply = sb_config_keys(v, keys, 1) ? sb_posix_desktop_owner(h, command)
+                                           : sb_posix_json_error("Unknown desktop owner fields.");
+    }
+    yyjson_doc_free(doc);
+    return reply ? reply : sb_policy_owner_request(h->policy, bytes, n);
+}
+static char *host_request(void *context, const char *bytes, size_t n) {
+    return sb_posix_owner_request(context, bytes, n);
+}
 sb_owner *sb_owner_start(sb_host *h,sb_error *e){return sb_owner_start_handler(h->config.data_dir,host_request,h,e);}
 void sb_owner_stop(sb_owner *o){if(o){atomic_store(&o->quit,true);pthread_join(o->thread,NULL);close(o->fd);unlink(o->path);free(o);}}
 bool sb_owner_stopping(sb_owner *o){return o&&atomic_load(&o->stopping);}

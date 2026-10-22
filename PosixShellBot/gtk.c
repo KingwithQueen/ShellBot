@@ -7,10 +7,10 @@
 #include <unistd.h>
 
 typedef struct {
-    sb_desktop *desktop;
+    sb_native_manager *desktop;
     GtkApplication *app;
     GtkWidget *window, *projects, *requests, *details, *request_detail, *message, *summary, *tray_label;
-    GtkWidget *http, *oauth, *port, *url, *persistent;
+    GtkWidget *http, *oauth, *port, *url, *persistent, *desktop_status;
     yyjson_doc *model;
     char project[64], request_id[65], request_type[32];
     bool busy, rendering, tray, quitting, settings_loaded;
@@ -133,6 +133,11 @@ static void render(void) {
     gtk_label_set_text(GTK_LABEL(ui.summary),
                        active ? "后台运行中 · 项目独立运行" : "后台已停止 · 点击启动后台后可启动项目");
     gtk_label_set_text(GTK_LABEL(ui.message), sb_gui_string(yyjson_doc_get_root(ui.model), "message"));
+    if (ui.desktop_status) {
+        char *status = sb_gui_desktop_text(model("desktop"));
+        set_text(ui.desktop_status, status);
+        free(status);
+    }
     if (!ui.settings_loaded) {
         yyjson_val *gateway = yyjson_obj_get(model("config"), "gateway"), *opts = model("settings");
         gtk_spin_button_set_value(GTK_SPIN_BUTTON(ui.port), yyjson_get_uint(yyjson_obj_get(gateway, "port")));
@@ -245,6 +250,54 @@ static GtkWidget *button(GtkWidget *parent, const char *title, const char *actio
     append(parent, b);
     g_signal_connect(b, "clicked", G_CALLBACK(clicked), (gpointer)action);
     return b;
+}
+typedef struct {
+    GtkWidget *window, *flags[4];
+} desktop_editor;
+static void desktop_save(GtkButton *button, gpointer data) {
+    (void)button;
+    desktop_editor *editor = data;
+    yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *q = yyjson_mut_obj(d);
+    yyjson_mut_obj_add_str(d, q, "action", "desktop_permissions");
+    const char *keys[] = {"enabled", "control", "clipboard_read", "clipboard_write"};
+    for (unsigned i = 0; i < 4; i++)
+        yyjson_mut_obj_add_bool(d, q, keys[i],
+                                gtk_check_button_get_active(GTK_CHECK_BUTTON(editor->flags[i])));
+    send_doc(d, q);
+    gtk_window_destroy(GTK_WINDOW(editor->window));
+}
+static void desktop_edit(GtkButton *button, gpointer unused) {
+    (void)button;
+    (void)unused;
+    if (ui.busy)
+        return;
+    desktop_editor *editor = g_new0(desktop_editor, 1);
+    editor->window = gtk_window_new();
+    gtk_window_set_title(GTK_WINDOW(editor->window), "所选项目的桌面权限");
+    gtk_window_set_transient_for(GTK_WINDOW(editor->window), GTK_WINDOW(ui.window));
+    gtk_window_set_modal(GTK_WINDOW(editor->window), TRUE);
+    GtkWidget *content = box(true, 12);
+    gtk_widget_set_margin_start(content, 20);
+    gtk_widget_set_margin_end(content, 20);
+    gtk_widget_set_margin_top(content, 20);
+    gtk_widget_set_margin_bottom(content, 20);
+    gtk_window_set_child(GTK_WINDOW(editor->window), content);
+    append(content, label("先停止后台再保存。项目权限不代替系统共享确认；重新启动项目后手动连接桌面。"));
+    const char *titles[] = {"允许屏幕查看（整个共享屏幕）", "允许键盘和鼠标控制", "允许读取剪贴板文本",
+                            "允许写入剪贴板文本"},
+               *keys[] = {"enabled", "control", "clipboard_read", "clipboard_write"};
+    yyjson_val *policy = yyjson_obj_get(yyjson_obj_get(project_config(), "policy"), "desktop");
+    for (unsigned i = 0; i < 4; i++) {
+        editor->flags[i] = gtk_check_button_new_with_label(titles[i]);
+        gtk_check_button_set_active(GTK_CHECK_BUTTON(editor->flags[i]), sb_gui_bool(policy, keys[i]));
+        append(content, editor->flags[i]);
+    }
+    GtkWidget *save = gtk_button_new_with_label("保存桌面权限");
+    append(content, save);
+    g_signal_connect(save, "clicked", G_CALLBACK(desktop_save), editor);
+    g_object_set_data_full(G_OBJECT(editor->window), "editor", editor, g_free);
+    gtk_window_present(GTK_WINDOW(editor->window));
 }
 static void quit_response(GObject *d, GAsyncResult *result, gpointer unused) {
     (void)unused;
@@ -507,7 +560,10 @@ static GVariant *menu_props(int id) {
         return g_variant_builder_end(&b);
     }
     g_variant_builder_add(&b, "{sv}", "label",
-                          g_variant_new_string(id == 1 ? "打开 ShellBot" : "退出 ShellBot"));
+                          g_variant_new_string(id == 1   ? "打开 ShellBot"
+                                               : id == 2 ? "退出 ShellBot"
+                                               : id == 3 ? "暂停桌面控制"
+                                                         : "本机恢复桌面控制"));
     g_variant_builder_add(&b, "{sv}", "enabled", g_variant_new_boolean(TRUE));
     g_variant_builder_add(&b, "{sv}", "visible", g_variant_new_boolean(TRUE));
     return g_variant_builder_end(&b);
@@ -524,7 +580,7 @@ static void tray_method(GDBusConnection *c, const gchar *sender, const gchar *pa
             const gchar *name;
             g_variant_get(params, "(i&s)", &id, &name);
             GVariant *props = g_variant_ref_sink(menu_props(id));
-            GVariant *value = id >= 0 && id <= 2 ? g_variant_lookup_value(props, name, NULL) : NULL;
+            GVariant *value = id >= 0 && id <= 4 ? g_variant_lookup_value(props, name, NULL) : NULL;
             if (value) {
                 g_dbus_method_invocation_return_value(call, g_variant_new("(v)", value));
                 g_variant_unref(value);
@@ -544,13 +600,17 @@ static void tray_method(GDBusConnection *c, const gchar *sender, const gchar *pa
                 GVariant *entry = g_variant_get_child_value(array, i),
                          *id_value = events ? g_variant_get_child_value(entry, 0) : g_variant_ref(entry);
                 int id = g_variant_get_int32(id_value);
-                if (id < 0 || id > 2)
+                if (id < 0 || id > 4)
                     g_variant_builder_add(&errors, "i", id);
                 else if (events) {
                     GVariant *event = g_variant_get_child_value(entry, 1);
                     if (!strcmp(g_variant_get_string(event, NULL), "clicked")) {
                         if (id == 1)
                             present();
+                        if (id == 3)
+                            submit("desktop-pause");
+                        if (id == 4)
+                            submit("desktop-resume");
                         if (id == 2)
                             quit();
                     }
@@ -575,14 +635,14 @@ static void tray_method(GDBusConnection *c, const gchar *sender, const gchar *pa
             int parent = g_variant_get_int32(parent_value), depth = g_variant_get_int32(depth_value);
             g_variant_unref(parent_value);
             g_variant_unref(depth_value);
-            if (parent < 0 || parent > 2) {
+            if (parent < 0 || parent > 4) {
                 g_dbus_method_invocation_return_dbus_error(call, "com.canonical.dbusmenu.Error.UnknownId",
                                                            "Unknown menu item.");
                 return;
             }
             GVariantBuilder children;
             g_variant_builder_init(&children, G_VARIANT_TYPE("av"));
-            for (int id = 1; parent == 0 && depth != 0 && id <= 2; id++)
+            for (int id = 1; parent == 0 && depth != 0 && id <= 4; id++)
                 g_variant_builder_add(&children, "v",
                                       g_variant_new("(i@a{sv}@av)", id, menu_props(id),
                                                     g_variant_new_array(G_VARIANT_TYPE_VARIANT, NULL, 0)));
@@ -594,7 +654,7 @@ static void tray_method(GDBusConnection *c, const gchar *sender, const gchar *pa
         if (!strcmp(method, "GetGroupProperties")) {
             GVariantBuilder b;
             g_variant_builder_init(&b, G_VARIANT_TYPE("a(ia{sv})"));
-            for (int id = 1; id <= 2; id++)
+            for (int id = 1; id <= 4; id++)
                 g_variant_builder_add(&b, "(i@a{sv})", id, menu_props(id));
             g_dbus_method_invocation_return_value(call,
                                                   g_variant_new("(@a(ia{sv}))", g_variant_builder_end(&b)));
@@ -610,6 +670,10 @@ static void tray_method(GDBusConnection *c, const gchar *sender, const gchar *pa
             if (!strcmp(g_variant_get_string(event, NULL), "clicked")) {
                 if (id == 1)
                     present();
+                if (id == 3)
+                    submit("desktop-pause");
+                if (id == 4)
+                    submit("desktop-resume");
                 if (id == 2)
                     quit();
             }
@@ -873,6 +937,22 @@ static void activate(GtkApplication *app, gpointer data) {
     ui.details = text();
     append(right, scroll(ui.details));
     gtk_notebook_append_page(GTK_NOTEBOOK(tabs), projects, gtk_label_new("项目"));
+    GtkWidget *desktop_box = box(true, 12), *desktop_actions = box(false, 8);
+    append(desktop_box, label("当前所选项目的远程桌面。先设置权限，再启动项目并连接；系统会要求确认共享。暂停"
+                              "会中断本会话所有 ShellBot 项目的桌面租约。"));
+    b = gtk_button_new_with_label("设置桌面权限…");
+    g_signal_connect(b, "clicked", G_CALLBACK(desktop_edit), NULL);
+    append(desktop_actions, b);
+    button(desktop_actions, "连接桌面", "desktop-connect");
+    button(desktop_actions, "暂停桌面", "desktop-pause");
+    button(desktop_actions, "本机恢复", "desktop-resume");
+    append(desktop_box, desktop_actions);
+    append(desktop_box, label("Wayland "
+                              "由系统提供停止共享入口；无法检测全局人工输入，也不支持任意窗口列表或聚焦。租约"
+                              "结束不会自动停止项目。"));
+    ui.desktop_status = text();
+    append(desktop_box, scroll(ui.desktop_status));
+    gtk_notebook_append_page(GTK_NOTEBOOK(tabs), desktop_box, gtk_label_new("远程桌面"));
     GtkWidget *requests = box(false, 12), *rr = box(true, 8);
     ui.requests = gtk_list_box_new();
     g_signal_connect(ui.requests, "row-selected", G_CALLBACK(request_selected), NULL);

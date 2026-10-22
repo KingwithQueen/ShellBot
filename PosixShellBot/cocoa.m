@@ -61,7 +61,7 @@ static void putText(NSTextView *view, NSString *text) {
 @property NSWindow *window;
 @property NSStatusItem *statusItem;
 @property NSTableView *projects, *requests;
-@property NSTextView *detail, *requestDetail;
+@property NSTextView *detail, *requestDetail, *desktopStatus;
 @property NSTextField *summary, *message, *port, *url;
 @property NSButton *http, *oauth, *persistent;
 @property NSMutableArray<NSDictionary *> *projectRows, *requestRows;
@@ -70,7 +70,7 @@ static void putText(NSTextView *view, NSString *text) {
 @property unsigned ticks;
 @property dispatch_queue_t queue;
 @property NSTimer *timer;
-@property sb_desktop *desktop;
+@property sb_native_manager *desktop;
 @property yyjson_doc *model;
 @end
 
@@ -167,6 +167,25 @@ static void putText(NSTextView *view, NSString *text) {
     tab.label = @"项目";
     tab.view = projects;
     [tabs addTabViewItem:tab];
+    self.desktopStatus = textView();
+    NSScrollView *desktopDetail = scrolled(self.desktopStatus);
+    NSStackView *desktopActions = stack(NO, @[
+        [self special:@"设置桌面权限…" selector:@selector(desktopPermissions:)],
+        [self button:@"连接桌面" action:@"desktop-connect"],
+        [self button:@"暂停桌面" action:@"desktop-pause"], [self button:@"本机恢复" action:@"desktop-resume"]
+    ]);
+    NSStackView *desktopPage = stack(YES, @[
+        label(@"当前所选项目的远程桌面。设置项目权限后手动连接，并在系统设置中允许屏幕录制、辅助功能和输入监"
+              @"控。"),
+        desktopActions,
+        label(@"人工输入会暂停控制；暂停影响本会话所有 ShellBot 项目。只有本机可恢复，旧观察图会失效。"),
+        desktopDetail
+    ]);
+    [desktopDetail.widthAnchor constraintEqualToAnchor:desktopPage.widthAnchor].active = YES;
+    tab = [[NSTabViewItem alloc] initWithIdentifier:@"desktop"];
+    tab.label = @"远程桌面";
+    tab.view = desktopPage;
+    [tabs addTabViewItem:tab];
     self.requests = [self table];
     NSScrollView *requestList = scrolled(self.requests);
     [requestList.widthAnchor constraintEqualToConstant:300].active = YES;
@@ -232,6 +251,15 @@ static void putText(NSTextView *view, NSString *text) {
                                            keyEquivalent:@""];
     open.target = self;
     [menu addItem:open];
+    for (NSString *action in @[ @"desktop-pause", @"desktop-resume" ]) {
+        NSMenuItem *item = [[NSMenuItem alloc]
+            initWithTitle:[action isEqual:@"desktop-pause"] ? @"暂停桌面控制" : @"本机恢复桌面控制"
+                   action:@selector(desktopMenu:)
+            keyEquivalent:@""];
+        item.representedObject = action;
+        item.target = self;
+        [menu addItem:item];
+    }
     [menu addItem:[NSMenuItem separatorItem]];
     NSMenuItem *quit = [[NSMenuItem alloc] initWithTitle:@"退出 ShellBot"
                                                   action:@selector(quit:)
@@ -357,6 +385,9 @@ static void putText(NSTextView *view, NSString *text) {
     BOOL active = sb_gui_bool(yyjson_doc_get_root(self.model), "online");
     self.summary.stringValue = active ? @"后台运行中 · 项目独立运行" : @"后台已停止 · 启动后台后可启动项目";
     self.message.stringValue = str(sb_gui_string(yyjson_doc_get_root(self.model), "message"));
+    char *desktopText = sb_gui_desktop_text([self value:"desktop"]);
+    putText(self.desktopStatus, str(desktopText));
+    free(desktopText);
     if (!self.settingsLoaded) {
         yyjson_val *gateway = yyjson_obj_get([self value:"config"], "gateway"), *s = [self value:"settings"];
         self.port.stringValue = [NSString
@@ -459,6 +490,45 @@ static void putText(NSTextView *view, NSString *text) {
 }
 - (void)submit:(NSString *)action {
     [self send:@{@"action" : action}];
+}
+- (void)desktopMenu:(NSMenuItem *)item {
+    [self submit:item.representedObject];
+}
+- (void)desktopPermissions:(id)sender {
+    (void)sender;
+    if (self.busy)
+        return;
+    NSAlert *dialog = [NSAlert new];
+    dialog.messageText = @"所选项目的桌面权限";
+    dialog.informativeText = @"先停止后台再保存。重新启动项目后手动连接桌面；系统权限仍需单独允许。";
+    const char *keys[] = {"enabled", "control", "clipboard_read", "clipboard_write"};
+    NSArray *titles = @[
+        @"允许屏幕查看（整个共享屏幕）", @"允许键盘和鼠标控制", @"允许读取剪贴板文本", @"允许写入剪贴板文本"
+    ];
+    NSMutableArray<NSButton *> *checks = [NSMutableArray new];
+    yyjson_val *policy = yyjson_obj_get(yyjson_obj_get([self project], "policy"), "desktop");
+    for (unsigned i = 0; i < 4; i++) {
+        NSButton *b = [NSButton checkboxWithTitle:titles[i] target:nil action:nil];
+        b.state = sb_gui_bool(policy, keys[i]);
+        [checks addObject:b];
+    }
+    NSStackView *view = stack(YES, checks);
+    view.frame = NSMakeRect(0, 0, 420, 130);
+    dialog.accessoryView = view;
+    [dialog addButtonWithTitle:@"保存"];
+    [dialog addButtonWithTitle:@"取消"];
+    [dialog beginSheetModalForWindow:self.window
+                   completionHandler:^(NSModalResponse response) {
+                     if (response != NSAlertFirstButtonReturn)
+                         return;
+                     [self send:@{
+                         @"action" : @"desktop_permissions",
+                         @"enabled" : @(checks[0].state == NSControlStateValueOn),
+                         @"control" : @(checks[1].state == NSControlStateValueOn),
+                         @"clipboard_read" : @(checks[2].state == NSControlStateValueOn),
+                         @"clipboard_write" : @(checks[3].state == NSControlStateValueOn)
+                     }];
+                   }];
 }
 - (void)command:(NSButton *)sender {
     NSString *a = sender.identifier;
@@ -711,7 +781,7 @@ int sb_native_main(int argc, char **argv) {
             base = defaultBase.fileSystemRepresentation;
         }
         sb_error e = {0};
-        sb_desktop *desktop = sb_desktop_open(base, key, &e);
+        sb_native_manager *desktop = sb_desktop_open(base, key, &e);
         if (!desktop) {
             fprintf(stderr, "ShellBot: %s\n", e.text);
             return 2;

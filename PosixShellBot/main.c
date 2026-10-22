@@ -1,4 +1,5 @@
 #include "posix.h"
+#include "desktop.h"
 #ifdef SB_NATIVE_DESKTOP
 #include "native.h"
 #endif
@@ -11,7 +12,7 @@
 #include <fcntl.h>
 volatile sig_atomic_t sb_posix_signal=0;
 static void interrupt(int signal_number){sb_posix_signal=signal_number;}
-static void usage(void){puts("ShellBot POSIX phase 4 (C17)\n"
+static void usage(void){puts("ShellBot POSIX phase 5 (C17)\n"
     "  ShellBot --desktop [--data-dir PRIVATE_DESKTOP_DIR] [--credential-key-file KEY]\n"
     "  ShellBot --stdio|--http --config FILE [--data-dir ABSOLUTE_DIR] [--port 1..65535]\n"
     "  ShellBot --stdio|--http --projects REGISTRY --project ID [--port 1..65535]\n"
@@ -20,9 +21,10 @@ static void usage(void){puts("ShellBot POSIX phase 4 (C17)\n"
     "  ShellBot --list-approvals|--stop --data-dir ABSOLUTE_DIR\n"
     "  ShellBot --inspect|--approve|--deny|--revoke ID --data-dir ABSOLUTE_DIR\n"
     "  ShellBot --owner-request FILE --data-dir ABSOLUTE_DIR\n"
+    "  ShellBot --desktop-permissions (read-only; does not grant system permissions)\n"
     "One fixed project per process. HTTP binds only 127.0.0.1; token_env supplies bearer.\n"
     "Data must be a private user-owned 0700 directory, outside all configured roots.\n"
-    "Owner IPC requires the same native uid. Native management UI is optional; desktop control remains unavailable.\n"
+    "Owner IPC requires the same native uid. Desktop control requires explicit project permission and a local desktop-connect owner request.\n"
     "  ShellBot --manager [--http] --projects REGISTRY --manager-data-dir ABS_DIR [--start-project ID ...]\n"
     "  ShellBot --management-status|--manager-stop --manager-data-dir ABS_DIR\n"
     "  ShellBot --project-status|--project-start|--project-stop|--project-pause|--project-resume ID --manager-data-dir ABS_DIR\n"
@@ -49,7 +51,7 @@ int main(int argc,char **argv){
     if(argc==1||!strcmp(argv[1],"--desktop"))return sb_native_main(argc,argv);
 #ifdef SHELLBOT_TESTS
     if(argc>=3&&!strcmp(argv[1],"--desktop-driver")){
-        sb_error e={0};sb_desktop *g=sb_desktop_open(argv[2],argc==4?argv[3]:NULL,&e);
+        sb_error e={0};sb_native_manager *g=sb_desktop_open(argv[2],argc==4?argv[3]:NULL,&e);
         if(!g){fprintf(stderr,"%s\n",e.text);return 2;}
         char *line=NULL;size_t capacity=0;
         while(getline(&line,&capacity,stdin)>0){char *reply=sb_desktop_work(g,line);if(!reply)break;puts(reply);fflush(stdout);free(reply);}
@@ -63,7 +65,8 @@ int main(int argc,char **argv){
     for(int i=1;i<argc;i++)if(sb_posix_manager_option(argv[i]))return sb_posix_manager_cli(argc,argv);
     sb_error error={0};
     if(argc==2&&!strcmp(argv[1],"--help")){usage();return 0;}
-    if(argc==2&&!strcmp(argv[1],"--version")){puts("ShellBot " SB_VERSION " (C17; POSIX phase 4)");return 0;}
+    if(argc==2&&!strcmp(argv[1],"--desktop-permissions")){yyjson_mut_doc *doc=yyjson_mut_doc_new(NULL);char *text=sb_posix_json(doc,sb_os_desktop_permissions(doc));if(!text)return 2;puts(text);free(text);return 0;}
+    if(argc==2&&!strcmp(argv[1],"--version")){puts("ShellBot " SB_VERSION " (C17; POSIX phase 5)");return 0;}
     if(argc==2&&!strcmp(argv[1],"--generate-token")){unsigned char b[32];if(!sb_platform_random(b,sizeof(b),&error))return 2;for(unsigned i=0;i<32;i++)printf("%02x",b[i]);puts("");memset(b,0,sizeof(b));return 0;}
     sb_host host={0};sb_config_defaults(&host.config);host.started_ms=sb_platform_millis();sb_project_registry registry={0};
     const char *config=NULL,*root=NULL,*data=NULL,*projects=NULL,*project_id=NULL,*port=NULL,*command=NULL,*id=NULL,*requestfile=NULL;
@@ -93,7 +96,7 @@ int main(int argc,char **argv){
     if(projects){
         if(!sb_projects_load(&registry,projects,&error))goto done;host.project=sb_project_find(&registry,project_id);
         if(!host.project||!host.project->enabled){sb_fail(&error,"The selected fixed project is missing or disabled.");goto done;}
-        if(host.project->legacy_compatibility||host.project->policy.administrator_allowed||host.project->policy.desktop.enabled||(host.project->policy.execution_enabled&&host.project->policy.default_identity!=SB_ID_CURRENT_USER)){sb_fail(&error,"POSIX projects support ordinary current-user commands; legacy projects, restricted commands, administrator and desktop are unavailable.");goto done;}
+        if(host.project->legacy_compatibility||host.project->policy.administrator_allowed||(host.project->policy.execution_enabled&&host.project->policy.default_identity!=SB_ID_CURRENT_USER)){sb_fail(&error,"POSIX projects support ordinary current-user commands; legacy projects, restricted commands, administrator are unavailable.");goto done;}
         host.config.execution_enabled=host.project->policy.execution_enabled;host.config.execution_profile=SB_EXEC_USER;
         host.config.port=registry.port;host.config.approval_ttl_seconds=host.project->approval_ttl_seconds;host.config.audit_max_bytes=host.project->audit_max_bytes;host.config.limits=host.project->limits;
         strcpy(host.config.token_env,host.project->token_env);strcpy(host.config.public_origin,registry.public_origin);
@@ -113,11 +116,12 @@ int main(int argc,char **argv){
     host.policy=sb_policy_new(host.config.approval_ttl_seconds,host.audit,&error);if(!host.policy)goto done;
     if(host.project){host.store=sb_store_new(host.lease,host.project->id,host.project->policy_revision,sb_execution_instance(host.execution),"ordinary",&error);if(!host.store)goto done;sb_policy_store(host.policy,host.store);sb_policy_limit(host.policy,host.config.limits.approval_records);}
     if(!sb_posix_execution_bind(host.execution,&host,&error))goto done;
+    if(host.project&&host.project->policy.desktop.enabled){host.desktop=sb_posix_desktop_new(&host,&error);if(!host.desktop)goto done;}
     host.owner=sb_owner_start(&host,&error);if(!host.owner)goto done;
     if(worker&&(!projects||transport||port)){sb_fail(&error,"Invalid private worker invocation.");goto done;}
     result=worker?sb_posix_worker_run(&host,3):http?sb_http_run(&host,&error):sb_stdio_run(&host);goto done;
 bad:sb_fail(&error,"Invalid, duplicate or incompatible arguments. Use --help.");
 done:
     if(result&&*error.text)fprintf(stderr,"ShellBot: %s\n",error.text);
-    sb_owner_stop(host.owner);sb_execution_free(host.execution);sb_policy_free(host.policy);sb_store_free(host.store);sb_audit_free(host.audit);sb_platform_lease_close(host.lease);sb_config_free(&host.config);sb_projects_free(&registry);return result;
+    sb_owner_stop(host.owner);sb_posix_desktop_free(host.desktop);sb_execution_free(host.execution);sb_policy_free(host.policy);sb_store_free(host.store);sb_audit_free(host.audit);sb_platform_lease_close(host.lease);sb_config_free(&host.config);sb_projects_free(&registry);return result;
 }
