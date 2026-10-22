@@ -20,7 +20,7 @@ M1 完成配置与统一判断，M2/M3 接入运行和地址，M4 接通全工�
 | --- | --- |
 | format_version | 必填整数 1；其他格式和无版本注册配置拒绝 |
 | projects | 1～16 个项目；project id 区分大小写，由 1～63 个 ASCII 字母、数字、下划线或连字符组成 |
-| gateway | 可选；port 默认 8765，仅 1024～65535；public_url 可空，只沿用既有地址语法校验，不进行网络或域名探测 |
+| gateway | 可选；port 默认 8765，范围 1～65535；public_url 可空，只沿用既有地址语法校验，不进行网络或域名探测 |
 | gateway.default_project_id | 只允许引用注册项目；省略表示不绑定旧 `/mcp`；M3 已实现显式默认项目路径 |
 | 项目 enabled / policy_revision | 默认 true / 1；revision 必须是非零 uint64，未来由管理器在配置变更时维护 |
 | 项目 token_env | 普通新项目必填，仅保存凭据环境变量引用；不同项目不得重用同一引用，Windows 大小写变体也拒绝；工作进程排除全部项目凭据变量；M3 还核验启用项目令牌值有效且不同 |

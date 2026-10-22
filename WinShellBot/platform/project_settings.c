@@ -238,7 +238,7 @@ static bool commit(settings *s) {
         free(runtime);
     }
     yyjson_mut_val *gateway=object(s,yyjson_mut_doc_get_root(s->doc),"gateway");
-    if (!read_number(s,F_PORT,gateway,"port")) { error_box(s->window,"本机端口必须填写整数（1024～65535）。"); return false; }
+    if (!read_number(s,F_PORT,gateway,"port")) { error_box(s->window,"本机端口必须填写整数（1～65535）。"); return false; }
     const char *global_keys[]={"public_url","owner_token_env","default_project_id"};
     for (int i=0;i<3;++i) { char *v=text(s->fields[F_PUBLIC+i]); string(s,gateway,global_keys[i],v,true); free(v); }
     return true;
@@ -313,7 +313,7 @@ static bool validate_form(settings *s) {
         }
     }
     uint64_t port=yyjson_mut_get_uint(yyjson_mut_obj_get(gateway,"port"));
-    if (port<1024 || port>65535) return form_error(s,(size_t)s->selected,4,F_PORT,"本机端口必须在 1024～65535 之间。");
+    if (port<1 || port>65535) return form_error(s,(size_t)s->selected,4,F_PORT,"本机端口必须在 1～65535 之间。");
     const char *owner=str(gateway,"owner_token_env"),*default_id=str(gateway,"default_project_id"); bool found=!*default_id;
     if (*owner && !sb_identifier(owner)) return form_error(s,(size_t)s->selected,4,F_OWNER,"所有者令牌环境变量名称只能使用 1～63 个英文字母、数字、下划线或连字符。");
     for (size_t i=0;i<count;++i) {

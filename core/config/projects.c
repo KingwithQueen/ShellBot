@@ -412,7 +412,7 @@ bool sb_projects_parse(sb_project_registry *registry, const char *bytes, size_t 
     }
     yyjson_val *gateway = yyjson_obj_get(root, "gateway");
     if (gateway) {
-        if (!KEYS(gateway, gateway_keys) || !number_field(gateway, "port", 8765, 1024, 65535, &number)) goto done;
+        if (!KEYS(gateway, gateway_keys) || !number_field(gateway, "port", 8765, 1, 65535, &number)) goto done;
         candidate->port = (unsigned)number;
         yyjson_val *owner=yyjson_obj_get(gateway,"owner_token_env");
         if (owner) {

@@ -16,7 +16,7 @@ _Static_assert(__STDC_VERSION__ >= 201710L, "ShellBot requires C17");
 static void usage(void) {
     fputs("ShellBot " SB_VERSION " (C17)\n"
           "Usage: WinShellBot [--stdio | --http] [--config FILE | --root ABSOLUTE_DIR]\n"
-          "                  [--data-dir ABSOLUTE_DIR] [--port 1024..65535]\n"
+          "                  [--data-dir ABSOLUTE_DIR] [--port 1..65535]\n"
           "                  [--public-url DOMAIN_OR_HTTP_ORIGIN]\n"
           "       WinShellBot --generate-token | --version | --help\n"
           "       WinShellBot --validate-projects FILE\n"
@@ -175,7 +175,7 @@ static int run(int argc, char **argv) {
     if (port) {
         char *end = NULL;
         unsigned long value = strtoul(port, &end, 10);
-        if (*port < '0' || *port > '9' || *end || value < 1024 || value > 65535) {
+        if (*port < '0' || *port > '9' || *end || value < 1 || value > 65535) {
             sb_fail(&error, "Invalid HTTP port."); goto failed;
         }
         host.config.port = (unsigned)value;

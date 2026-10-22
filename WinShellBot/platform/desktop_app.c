@@ -337,7 +337,7 @@ static bool read_catalog(sb_desktop_app *app,bool *rebased,sb_error *error) {
     yyjson_val *root=yyjson_doc_get_root(doc),*projects=yyjson_obj_get(root,"projects");uint64_t version=yyjson_get_uint(yyjson_obj_get(root,"format_version"));const char *prior=version==2?str(root,"storage_root"):NULL;
     bool valid=doc && (version==1 || version==2) && yyjson_obj_size(root)==(version==2?5u:4u) && (version!=2 || sb_project_path_valid(prior)) &&
         yyjson_is_arr(projects) && yyjson_arr_size(projects)<=SB_MAX_PROJECTS && yyjson_is_uint(yyjson_obj_get(root,"port")) &&
-        yyjson_get_uint(yyjson_obj_get(root,"port"))>=1024 && yyjson_get_uint(yyjson_obj_get(root,"port"))<=65535 && strlen(str(root,"public_url"))<sizeof(app->origin);
+        yyjson_get_uint(yyjson_obj_get(root,"port"))>=1 && yyjson_get_uint(yyjson_obj_get(root,"port"))<=65535 && strlen(str(root,"public_url"))<sizeof(app->origin);
     *rebased=valid && prior && _stricmp(prior,app->base)!=0;
     if(valid){app->port=(unsigned)yyjson_get_uint(yyjson_obj_get(root,"port"));strcpy(app->origin,str(root,"public_url"));
         for(size_t i=0;i<yyjson_arr_size(projects) && valid;++i)valid=load_project(app,yyjson_arr_get(projects,i),*rebased?prior:NULL,error);}
@@ -384,7 +384,7 @@ done:
     free(target);InterlockedExchange(&app->busy,0);return ok;
 }
 bool sb_desktop_connection(sb_desktop_app *app,unsigned port,const char *origin,sb_error *error) {
-    if (port<1024 || port>65535 || strlen(origin)>=sizeof(app->origin)) { sb_fail(error,"端口须为 1024～65535；公共地址请填写域名或 HTTP(S) 来源地址。");return false; }
+    if (port<1 || port>65535 || strlen(origin)>=sizeof(app->origin)) { sb_fail(error,"端口须为 1～65535；公共地址请填写域名或 HTTP(S) 来源地址。");return false; }
     sb_config config;sb_config_defaults(&config);bool valid=!*origin || sb_config_public_url(&config,origin,error);sb_config_free(&config);if (!valid) return false;
     if (InterlockedCompareExchange(&app->busy,1,0)) return false;
     if (!stop_runtime(app,error)) { InterlockedExchange(&app->busy,0);return false; }

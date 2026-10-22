@@ -86,8 +86,8 @@ static void begin_save(dialog *d) {
         if(MessageBoxW(d->window,L"迁移将停止全部项目，复制并逐文件校验应用数据。成功后请重新打开程序；旧目录保留，请在退出后手动删除。继续？",L"迁移应用数据",MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2)!=IDYES)return;
     }else if (d->connection) {
         char *port=text(GetDlgItem(d->window,D_PORT)),*end=NULL;unsigned long n=port ? strtoul(port,&end,10) : 0;
-        bool valid=port && *port && strspn(port,"0123456789")==strlen(port) && end && !*end && n>=1024 && n<=65535;free(port);
-        if (!valid) { error(d,"本机端口须在 1024～65535 之间。");return; }
+        bool valid=port && *port && strspn(port,"0123456789")==strlen(port) && end && !*end && n>=1 && n<=65535;free(port);
+        if (!valid) { error(d,"本机端口须在 1～65535 之间。");return; }
         d->port=(unsigned)n;free(d->origin);d->origin=text(GetDlgItem(d->window,D_ORIGIN));if (!d->origin) return;
         if (MessageBoxW(d->window,L"应用连接设置会重新打开 HTTP 网关，并停止当前活动任务。项目将按“随管理界面启动”设置重新启动。继续？",L"应用连接设置",MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2)!=IDYES) return;
     } else if (!read_draft(d)) return;

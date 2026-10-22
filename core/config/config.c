@@ -234,7 +234,7 @@ bool sb_config_parse(sb_config *config, const char *bytes, size_t length, sb_err
         yyjson_val *port = yyjson_obj_get(http, "port");
         uint64_t number;
         if (port) {
-            if (!sb_integer(port, &number) || number < 1024 || number > 65535) goto invalid;
+            if (!sb_integer(port, &number) || number < 1 || number > 65535) goto invalid;
             config->port = (unsigned)number;
         }
         yyjson_val *env = yyjson_obj_get(http, "token_env");
