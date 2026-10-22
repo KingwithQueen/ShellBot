@@ -1,4 +1,7 @@
 #include "posix.h"
+#ifdef SB_NATIVE_DESKTOP
+#include "native.h"
+#endif
 #include "sb_projects.h"
 #include "credentials.h"
 #include <stdio.h>
@@ -8,7 +11,8 @@
 #include <fcntl.h>
 volatile sig_atomic_t sb_posix_signal=0;
 static void interrupt(int signal_number){sb_posix_signal=signal_number;}
-static void usage(void){puts("ShellBot POSIX phase 3 (C17)\n"
+static void usage(void){puts("ShellBot POSIX phase 4 (C17)\n"
+    "  ShellBot --desktop [--data-dir PRIVATE_DESKTOP_DIR] [--credential-key-file KEY]\n"
     "  ShellBot --stdio|--http --config FILE [--data-dir ABSOLUTE_DIR] [--port 1..65535]\n"
     "  ShellBot --stdio|--http --projects REGISTRY --project ID [--port 1..65535]\n"
     "  ShellBot --stdio --root ABSOLUTE_DIR --data-dir ABSOLUTE_DIR (read-only)\n"
@@ -18,7 +22,7 @@ static void usage(void){puts("ShellBot POSIX phase 3 (C17)\n"
     "  ShellBot --owner-request FILE --data-dir ABSOLUTE_DIR\n"
     "One fixed project per process. HTTP binds only 127.0.0.1; token_env supplies bearer.\n"
     "Data must be a private user-owned 0700 directory, outside all configured roots.\n"
-    "Owner IPC requires the same native uid. Manager OAuth is optional; GUI and desktop are unavailable.\n"
+    "Owner IPC requires the same native uid. Native management UI is optional; desktop control remains unavailable.\n"
     "  ShellBot --manager [--http] --projects REGISTRY --manager-data-dir ABS_DIR [--start-project ID ...]\n"
     "  ShellBot --management-status|--manager-stop --manager-data-dir ABS_DIR\n"
     "  ShellBot --project-status|--project-start|--project-stop|--project-pause|--project-resume ID --manager-data-dir ABS_DIR\n"
@@ -41,13 +45,25 @@ static bool port_number(const char *text,unsigned *out){if(!text||!*text||strspn
 int main(int argc,char **argv){
     umask(077);struct sigaction action={0};action.sa_handler=interrupt;sigemptyset(&action.sa_mask);sigaction(SIGINT,&action,NULL);sigaction(SIGTERM,&action,NULL);signal(SIGPIPE,SIG_IGN);
     sb_posix_set_program(argv[0]);
+#ifdef SB_NATIVE_DESKTOP
+    if(argc==1||!strcmp(argv[1],"--desktop"))return sb_native_main(argc,argv);
+#ifdef SHELLBOT_TESTS
+    if(argc>=3&&!strcmp(argv[1],"--desktop-driver")){
+        sb_error e={0};sb_desktop *g=sb_desktop_open(argv[2],argc==4?argv[3]:NULL,&e);
+        if(!g){fprintf(stderr,"%s\n",e.text);return 2;}
+        char *line=NULL;size_t capacity=0;
+        while(getline(&line,&capacity,stdin)>0){char *reply=sb_desktop_work(g,line);if(!reply)break;puts(reply);fflush(stdout);free(reply);}
+        free(line);sb_desktop_close(g);return 0;
+    }
+#endif
+#endif
     for(int i=1;i<argc;i++)if(!strcmp(argv[i],"--project-worker")){if(!sb_posix_peer(3,true))return 2;fcntl(3,F_SETFD,FD_CLOEXEC);sb_posix_close_inherited();break;}
     if(argc==2&&!strcmp(argv[1],"--task-agent"))return sb_posix_task_agent(3);
     for(int i=1;i<argc;i++)if(sb_credential_option(argv[i]))return sb_credential_cli(argc,argv);
     for(int i=1;i<argc;i++)if(sb_posix_manager_option(argv[i]))return sb_posix_manager_cli(argc,argv);
     sb_error error={0};
     if(argc==2&&!strcmp(argv[1],"--help")){usage();return 0;}
-    if(argc==2&&!strcmp(argv[1],"--version")){puts("ShellBot " SB_VERSION " (C17; POSIX phase 3)");return 0;}
+    if(argc==2&&!strcmp(argv[1],"--version")){puts("ShellBot " SB_VERSION " (C17; POSIX phase 4)");return 0;}
     if(argc==2&&!strcmp(argv[1],"--generate-token")){unsigned char b[32];if(!sb_platform_random(b,sizeof(b),&error))return 2;for(unsigned i=0;i<32;i++)printf("%02x",b[i]);puts("");memset(b,0,sizeof(b));return 0;}
     sb_host host={0};sb_config_defaults(&host.config);host.started_ms=sb_platform_millis();sb_project_registry registry={0};
     const char *config=NULL,*root=NULL,*data=NULL,*projects=NULL,*project_id=NULL,*port=NULL,*command=NULL,*id=NULL,*requestfile=NULL;

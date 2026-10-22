@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=ShellBot
+Comment=Manage local ShellBot projects and connections
+Exec=ShellBot --desktop
+Icon=shellbot
+Terminal=false
+Categories=Development;Utility;
+StartupNotify=true

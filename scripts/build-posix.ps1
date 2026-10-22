@@ -18,10 +18,12 @@ New-Item -ItemType Directory -Path $runDir -Force | Out-Null
 $files=@('CMakeLists.txt','LICENSE.txt','third_party/yyjson/LICENSE','third_party/civetweb/LICENSE.md','docs/POSIX_BACKEND.md','docs/POSIX_OAUTH.md','config/posix-projects.example.json','config/posix-commands.example.json','config/posix-oauth.example.json')
 foreach($folder in @('core','PosixShellBot','third_party/yyjson','third_party/civetweb/src','third_party/civetweb/include')){
     foreach($item in Get-ChildItem -LiteralPath (Join-Path $repo $folder) -Recurse -File){
-        if($item.Extension -in @('.c','.h','.inl')){$files+=[IO.Path]::GetRelativePath($repo,$item.FullName).Replace('\','/')}
+        if($item.Extension -in @('.c','.h','.inl','.m','.plist','.desktop','.cmake')){$files+=[IO.Path]::GetRelativePath($repo,$item.FullName).Replace('\','/')}
     }
 }
-if($WithTests){$files+='tests/posix_integration.py';$files+='tests/posix_phase2.py';$files+='tests/posix_oauth.py';$files+='tests/posix_clock.c'}
+$files+='assets/branding/shellbot-v1/shellbot-icon.png';$files+='assets/branding/shellbot-v1/shellbot-icon-small.png'
+$files+='docs/POSIX_DESKTOP.md'
+if($WithTests){$files+='tests/posix_integration.py';$files+='tests/posix_phase2.py';$files+='tests/posix_oauth.py';$files+='tests/posix_clock.c';$files+='tests/posix_desktop.py';$files+='tests/posix_tray.py'}
 $files=@($files|Sort-Object -Unique)
 $hashes=foreach($file in $files){$path=Join-Path $repo $file;if(!(Test-Path -LiteralPath $path -PathType Leaf)){throw "Missing input: $file"};((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()+'  '+$file)}
 [IO.File]::WriteAllText((Join-Path $runDir 'SOURCE_SHA256SUMS'),($hashes -join "`n")+"`n",[Text.UTF8Encoding]::new($false))
@@ -81,6 +83,12 @@ fi
         if($LASTEXITCODE -eq 0 -and $artifactExit -eq 0){
             $testResult=Get-Content -LiteralPath $testReport -Raw | ConvertFrom-Json
             $testVerified=$testResult.status -ceq 'passed' -and $testResult.sha256 -ceq (Get-FileHash -LiteralPath (Join-Path $runDir ($connection.name+'-ShellBot')) -Algorithm SHA256).Hash.ToLowerInvariant()
+            $desktopReport=Join-Path $runDir ($connection.name+'-desktop-report.json')
+            & $scp @options ($connection.hostName+':'+$snapshot+'/build/desktop-test-report.json') $desktopReport
+            if($LASTEXITCODE -ne 0){$testVerified=$false}else{
+                $desktopResult=Get-Content -LiteralPath $desktopReport -Raw|ConvertFrom-Json
+                $testVerified=$testVerified -and $desktopResult.status -ceq 'passed' -and $desktopResult.sha256 -ceq $testResult.sha256
+            }
         }
     }
     $results+=[ordered]@{target=$connection.name;remote_snapshot=$snapshot;build_exit=$buildExit;artifact_copied=($artifactExit -eq 0);tests_requested=[bool]$WithTests;test_report_verified=$testVerified;configuration=$Configuration;sanitizers=[bool]$Sanitizers}
