@@ -93,6 +93,64 @@ dkms.conf
 /scripts/package-test.ps1
 /scripts/package-http-diagnostics.ps1
 /scripts/package-endpoint-test.ps1
+/scripts/collect-*-acceptance.ps1
+/scripts/package-candidate.ps1
+/scripts/package-desktop.ps1
+/scripts/package-eof.ps1
+/scripts/package-native-ui.ps1
+/scripts/package-oauth.ps1
+/scripts/package-portable.ps1
+/scripts/validate-native-ui.ps1
+/scripts/validation-report.ps1
+/scripts/verify-native-ui-package.ps1
+
+# Local handoffs, development journals and acceptance notes.
+# Ignore rules do not remove existing index entries; keep local copies when untracking.
+[Hh][Aa][Nn][Dd][Oo][Ff][Ff]*.md
+[Hh][Aa][Nn][Dd][Oo][Ff][Ff]*.txt
+*交接*.md
+*交接*.txt
+/handoffs/
+/docs/DEVELOPMENT_PLAN.md
+/docs/IMPLEMENTATION_STATUS.md
+/docs/PHASE_1_PLAN.md
+/docs/MANUAL_ACCEPTANCE_*.md
+/docs/UI_REVIEW_*.md
+/docs/LAYOUT_PREVIEW_*.md
+/docs/ICON_INTEGRATION_*.md
+/docs/SERVER_*_TEST.md
+/assets/branding/shellbot-v1/design-and-prompt.txt
+/assets/branding/shellbot-v1/receipt.json
+
+# Local AI client state, instructions and conversation exports.
+/.local-ai/
+/.codex/
+/.agents/
+/.chatgpt/
+/.gpt/
+/.claude/
+/AGENTS.md
+/CLAUDE.md
+/GEMINI.md
+/conversations/
+/transcripts/
+/sessions/
+conversations.json
+chat.html
+[Cc][Hh][Aa][Tt][Gg][Pp][Tt]-*.json
+[Cc][Hh][Aa][Tt][Gg][Pp][Tt]-*.html
+[Cc][Hh][Aa][Tt][Gg][Pp][Tt]-*.md
+gpt-conversation-*.json
+gpt-conversation-*.md
+codex-session-*.jsonl
+rollout-*.jsonl
+rollout-*.jsonl.zst
+*[Gg][Pp][Tt]*对话*.md
+*[Gg][Pp][Tt]*对话*.txt
+*[Gg][Pp][Tt]*对话*.json
+*对话记录*.md
+*对话记录*.txt
+*对话记录*.json
 
 # Local runtime data and credentials
 /Data/
@@ -112,8 +170,36 @@ dkms.conf
 /shellbot.local.json
 /WinShellBot/shellbot.local.json
 /config/*.local.json
+/ShellBot.storage.json
+/WinShellBot/ShellBot.storage.json
+*.sbproj
+*.sbkey
+*.dpapi
 __pycache__/
 *.pyc
+
+# Generated CMake/Ninja/Xcode state for future Linux/macOS builds.
+/cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+CTestTestfile.cmake
+/Testing/
+build.ninja
+.ninja_log
+.ninja_deps
+DerivedData/
+xcuserdata/
+*.xcuserstate
+.DS_Store
+._*
+
+# Portable packages accidentally copied to the repository root.
+/ShellBot-*.zip
+/ShellBot-*.zip.sha256
+/ShellBot-*.tar.gz
+/ShellBot-*.tar.xz
 
 # Keep product build/packaging scripts, example configuration and resources tracked.
 # ShellBot-SandboxProbe is a product dependency; do not exclude its source/project.
