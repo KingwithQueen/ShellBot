@@ -173,6 +173,10 @@ bool sb_os_desktop_connect(sb_os_desktop *d, sb_error *e) {
 bool sb_os_desktop_ready(sb_os_desktop *d) {
     return d && atomic_load(&d->ready) && !atomic_load(&d->cancelled);
 }
+const char *sb_os_desktop_coordinates(sb_os_desktop *d) {
+    (void)d;
+    return "macOS_screen_points";
+}
 const char *sb_os_desktop_provider(sb_os_desktop *d) {
     (void)d;
     return "macOS ScreenCaptureKit";

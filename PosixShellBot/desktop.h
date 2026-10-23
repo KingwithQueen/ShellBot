@@ -39,6 +39,7 @@ void sb_os_desktop_pump(sb_os_desktop *os);
 void sb_os_desktop_cancel(sb_os_desktop *os);
 void sb_os_desktop_free(sb_os_desktop *os);
 const char *sb_os_desktop_provider(sb_os_desktop *os);
+const char *sb_os_desktop_coordinates(sb_os_desktop *os);
 bool sb_os_desktop_human_pause(sb_os_desktop *os);
 yyjson_mut_val *sb_os_desktop_permissions(yyjson_mut_doc *doc);
 bool sb_os_desktop_view(sb_os_desktop *os, sb_dview *view, sb_error *error);

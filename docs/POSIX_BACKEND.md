@@ -1,4 +1,4 @@
-# Linux / macOS 后台开发版：第十阶段
+# Linux / macOS 后台开发版：第十四阶段
 
 这是独立的 C17 POSIX 后台入口，不是 Windows 正式包或完整桌面版。正式 Windows 1.0.3 的 MSBuild 入口和 Win32 后端继续使用原有构建方式。当前已使用 Linux x86_64 和 Intel macOS 实机通过 SSH 编译运行；不能据此宣称所有发行版、旧系统或 Apple Silicon 已验收。
 
@@ -18,6 +18,8 @@
 第三阶段加入 Keychain / Secret Service 加密凭据、显式私有密钥文件模式和管理器 OAuth；参见 [凭据存储与 OAuth](POSIX_OAUTH.md)。
 
 第四阶段加入 Mac Cocoa / Linux GTK 4 原生项目窗口、审批与 OAuth 连接管理，以及菜单栏/StatusNotifier 托盘；参见 [管理界面与托盘](POSIX_DESKTOP.md)。界面默认构建；无桌面环境可明确设置 `-DSHELLBOT_DESKTOP=OFF`。
+
+第十一至十三阶段补充多项目共享管理员监督器、原生授权与审批池、独立后台服务管理。第十四阶段补充 Linux Wayland 多屏流和明确的坐标空间、当前有效 XKB 布局文字输入及动态 XI 2.1 设备观察；详细能力与系统限制见 [远程桌面](POSIX_REMOTE_DESKTOP.md)。进程树资源边界、长 Data 路径及发行准备仍需继续，集中验收见 [人工验收清单](POSIX_ACCEPTANCE.md)。
 
 ## 原生构建
 
@@ -145,6 +147,6 @@ POSIX `flock` 是协作式锁。目录定位与版本复核是文件工具的访
 
 脚本仅选择 CMake、POSIX 后端、共享 C 源码、源码依赖及已校验的 POSIX 媒体运行库，包含本机未提交的这些源码改动；不复制 `.git`、Windows 产物、Data 或 SSH 密钥。每次在远端指定根目录的 `.native-build/时间-随机值` 下新建源码和构建快照，核对逐文件 SHA-256 后编译，不覆盖现有文件，不运行安装操作。结果和取回的二进制保存在本机 `build/posix`，历史失败保留。
 
-现有约定将测试源保留在本机而不纳入 Git。恢复本机全部 `tests/posix_*` 副本后可增加 `-WithTests`。十组覆盖后台、桌面后端、媒体/产物、自启、命令、管理员文件/媒体请求、界面控制器、项目配置/审批/迁移、多项目管理员监督器和原生管理员管理；报告摘要须与取回的程序一致。管理员专项另构建不安装的 `sb_admin_contract`，以普通 UID 验证同一策略和私有 RPC，不代替真实 root 认证/权限效果。后台与控制器均使用独立夹具；托盘模拟和原生窗口检查另行记录。管理员管理另有普通 UID 的 `sb_admin_ui_contract`，验证控制器、监督器及审批策略的联通与失效绑定，不代替系统授权或实际 root。`-TestScope administrator-ui`、`administrator-broker`、`administrator-media`、`command-identities` 或 `project-profile` 仅运行相应专项，不代替完整回归。`-Sanitizers` 为相关自有代码启用地址/未定义行为检查，不声称系统框架和第三方静态库已插桩。生产构建使用 `SHELLBOT_TESTS=OFF`，不包含测试入口或管理员测试程序。
+现有约定将测试源保留在本机而不纳入 Git。恢复本机全部 `tests/posix_*` 副本后可增加 `-WithTests`。十一组覆盖后台、桌面后端、媒体/产物、自启、命令、管理员文件/媒体请求、界面控制器、项目配置/审批/迁移、多项目管理员监督器、原生管理员管理和原生服务管理；报告摘要须与取回的程序一致。管理员专项另构建不安装的 `sb_admin_contract`，以普通 UID 验证同一策略和私有 RPC，不代替真实 root 认证/权限效果。后台与控制器均使用独立夹具；托盘模拟和原生窗口检查另行记录。管理员管理另有普通 UID 的 `sb_admin_ui_contract`，验证控制器、监督器及审批策略的联通与失效绑定，不代替系统授权或实际 root。Linux 桌面专项另有普通 UID 的 `sb_desktop_contract`，只在测试构建内验证真实解析、映射、帧边界和私有总线输入发送；不代替实际 Wayland 共享授权。`-TestScope remote-desktop`、`service-ui`、`administrator-ui`、`administrator-broker`、`administrator-media`、`command-identities` 或 `project-profile` 仅运行相应专项，不代替完整回归。`-Sanitizers` 为相关自有代码启用地址/未定义行为检查，不声称系统框架和第三方静态库已插桩。生产构建使用 `SHELLBOT_TESTS=OFF`，不包含测试入口或管理员、服务及桌面测试程序。
 
 本阶段的 SSH、原生后台、隔离文件与 HTTP 测试不等于真实 MCP 客户端、OAuth、GUI、物理桌面或跨发行版发布验收。

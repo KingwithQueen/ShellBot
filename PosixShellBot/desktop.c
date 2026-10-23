@@ -247,9 +247,14 @@ yyjson_mut_val *sb_desktop_capabilities(sb_desktop *d, yyjson_mut_doc *doc) {
     yyjson_mut_obj_add_bool(doc, v, "window_list_and_focus", !wayland);
     yyjson_mut_obj_add_bool(doc, v, "foreground_change_guard", !wayland);
     yyjson_mut_obj_add_bool(doc, v, "input_target_identity_guard", !wayland);
+    yyjson_mut_obj_add_str(doc, v, "coordinate_space", sb_os_desktop_coordinates(d->os));
+    yyjson_mut_obj_add_uint(doc, v, "max_monitors", SB_DESKTOP_MONITORS);
+    yyjson_mut_obj_add_bool(doc, v, "cross_monitor_drag_supported", false);
+    if (wayland)
+        yyjson_mut_obj_add_str(doc, v, "layout_change_detection", "stream_pixel_size_changes_only");
     yyjson_mut_obj_add_str(doc, v, "text_input",
                            !strcmp(sb_os_desktop_provider(d->os), "X11 / XTest")
-                               ? "current_layout_direct_keys_only"
+                               ? "current_effective_layout_direct_keys_only"
                                : "Unicode");
     yyjson_mut_obj_add_uint(doc, v, "max_lease_seconds", d->host->project->policy.desktop.lease_seconds);
     yyjson_mut_obj_add_uint(doc, v, "observation_ttl_ms", 30000);
@@ -580,10 +585,7 @@ char *sb_desktop_request(sb_desktop *d, const char *actor, const char *name, yyj
             yyjson_mut_obj_add_str(doc, o, "screen_id", view->id);
             yyjson_mut_obj_add_uint(doc, o, "clipboard_sequence", view->view.clipboard);
             yyjson_mut_obj_add_uint(doc, o, "observation_ttl_ms", 30000);
-            yyjson_mut_obj_add_str(doc, o, "coordinate_space",
-                                   !strcmp(sb_os_desktop_provider(d->os), "macOS ScreenCaptureKit")
-                                       ? "macOS_screen_points"
-                                       : "desktop_session_coordinates");
+            yyjson_mut_obj_add_str(doc, o, "coordinate_space", sb_os_desktop_coordinates(d->os));
             yyjson_mut_val *arr = yyjson_mut_arr(doc);
             for (unsigned i = 0; i < view->view.count; i++) {
                 yyjson_mut_val *m = yyjson_mut_obj(doc);

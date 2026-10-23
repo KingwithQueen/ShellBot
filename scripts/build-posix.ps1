@@ -5,7 +5,7 @@ param(
     [ValidateSet('Debug','Release')][string]$Configuration='Debug',
     [switch]$WithTests,
     [switch]$Sanitizers,
-    [ValidateSet('all','project-profile','administrator-media','administrator-broker','administrator-ui','service-ui','command-identities')][string]$TestScope='all'
+    [ValidateSet('all','project-profile','administrator-media','administrator-broker','administrator-ui','service-ui','remote-desktop','command-identities')][string]$TestScope='all'
 )
 $ErrorActionPreference='Stop'
 if($TestScope -ne 'all' -and !$WithTests){throw 'TestScope requires -WithTests.'}
@@ -28,7 +28,7 @@ $files+='assets/branding/shellbot-v1/shellbot-icon.png';$files+='assets/branding
 $files+='docs/POSIX_DESKTOP.md'
 $files+='docs/POSIX_REMOTE_DESKTOP.md';$files+='config/posix-desktop.example.json'
 if($WithTests){$files+='tests/posix_integration.py';$files+='tests/posix_phase2.py';$files+='tests/posix_oauth.py';$files+='tests/posix_clock.c';$files+='tests/posix_desktop.py';$files+='tests/posix_tray.py'}
-if($WithTests){$files+='tests/posix_remote.py';$files+='tests/posix_remote_fixture.c'}
+if($WithTests){$files+='tests/posix_remote.py';$files+='tests/posix_remote_fixture.c';$files+='tests/posix_desktop_contract.c'}
 $files+='third_party/stb/stb_image.h';$files+='third_party/stb/LICENSE';$files+='third_party/stb/PROVENANCE.json'
 $files+='third_party/pdfium/include/fpdfview.h';$files+='third_party/pdfium/include/fpdf_text.h'
 foreach($platform in @('linux-x64','mac-x64')){foreach($item in Get-ChildItem -LiteralPath (Join-Path $repo ('third_party/pdfium/'+$platform)) -Recurse -File){$files+=[IO.Path]::GetRelativePath($repo,$item.FullName).Replace('\','/')}}
@@ -98,7 +98,7 @@ fi
     $artifactExit=$LASTEXITCODE
     $testVerified=$null
     if($WithTests -and $TestScope -ne 'all'){
-        $reportKind=@{'project-profile'='profile';'administrator-media'='admin-media';'administrator-broker'='admin-broker';'administrator-ui'='admin-ui';'service-ui'='service-ui';'command-identities'='commands'}[$TestScope]
+        $reportKind=@{'project-profile'='profile';'administrator-media'='admin-media';'administrator-broker'='admin-broker';'administrator-ui'='admin-ui';'service-ui'='service-ui';'remote-desktop'='remote-desktop';'command-identities'='commands'}[$TestScope]
         $profileReport=Join-Path $runDir ($connection.name+'-'+$reportKind+'-report.json')
         & $scp @options ($connection.hostName+':'+$snapshot+'/build/'+$reportKind+'-test-report.json') $profileReport
         $testVerified=$false
