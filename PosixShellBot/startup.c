@@ -2,6 +2,7 @@
 #include "sb_projects.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <poll.h>
 #include <pwd.h>
 #include <spawn.h>
@@ -23,6 +24,7 @@ typedef struct {
     const char *starts[SB_MAX_PROJECTS];
     unsigned count;
     bool oauth;
+    const char *expected_uid, *expected_unit, *expected_content, *expected_registry, *expected_kind;
     uid_t uid;
     char home[SB_PATH_CAP], account[64], unit[160], native[SB_PATH_CAP], domain[48];
     char *args[64];
@@ -302,7 +304,7 @@ static int native(char *const args[], char output[OUTPUT_LIMIT + 1], sb_error *e
         return -1;
     }
     size_t used = 0;
-    bool eof = false, done = false;
+    bool eof = false, done = false, reaped_elsewhere = false;
     int status = 0;
     uint64_t deadline = sb_platform_millis() + 20000;
     while (sb_platform_millis() < deadline && (!done || !eof)) {
@@ -322,16 +324,19 @@ static int native(char *const args[], char output[OUTPUT_LIMIT + 1], sb_error *e
         if (!done) {
             pid_t got = waitpid(pid, &status, WNOHANG);
             done = got == pid;
+            if (got < 0 && errno == ECHILD) { done = true; reaped_elsewhere = true; }
         }
     }
     close(pipes[0]);
     output[used] = 0;
     if (!done) {
-        kill(pid, SIGKILL);
-        waitpid(pid, &status, 0);
+        pid_t owned;
+        do { owned = waitpid(pid, &status, WNOHANG); } while (owned < 0 && errno == EINTR);
+        if (!owned) { kill(pid, SIGKILL); while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {} }
         sb_fail(e, "Native service command timed out.");
         return -1;
     }
+    if (reaped_elsewhere) { sb_fail(e, "Native service command completion could not be verified."); return -1; }
     return WIFEXITED(status) ? WEXITSTATUS(status) : 128;
 }
 static int control(startup *s, const char *command, char out[OUTPUT_LIMIT + 1], sb_error *e) {
@@ -682,6 +687,35 @@ static const char *str(yyjson_val *v, const char *key) {
     const char *s = yyjson_get_str(yyjson_obj_get(v, key));
     return s ? s : "";
 }
+static bool review(startup *s, yyjson_val *record, sb_error *e) {
+    if ((s->expected_uid && (!*s->expected_uid || strspn(s->expected_uid, "0123456789") != strlen(s->expected_uid) ||
+          strtoull(s->expected_uid, NULL, 10) != (uint64_t)s->uid)) ||
+        (s->expected_unit && strcmp(s->expected_unit, s->unit)) ||
+        (s->expected_kind && strcmp(s->expected_kind, s->kind)) ||
+        (s->expected_content && (strlen(s->expected_content) != 64 ||
+          strspn(s->expected_content, "0123456789abcdef") != 64))) {
+        sb_fail(e, "Startup review does not match this runtime account or native unit; nothing changed.");
+        return false;
+    }
+    if (s->expected_content) {
+        char sha[65];
+        const char *contents = record ? str(record, "contents") : s->content.bytes;
+        if (!sb_platform_sha256(contents, strlen(contents), sha, e) || strcmp(sha, s->expected_content)) {
+            sb_fail(e, "Startup contents changed since review; inspect the current plan or receipt first.");
+            return false;
+        }
+    }
+    if (s->expected_registry) {
+        size_t size = 0; char sha[65];
+        char *bytes = s->projects ? sb_platform_load_config(s->projects, &size, e) : NULL;
+        bool ok = bytes && strlen(s->expected_registry) == 64 &&
+                  strspn(s->expected_registry, "0123456789abcdef") == 64 &&
+                  sb_platform_sha256(bytes, size, sha, e) && !strcmp(sha, s->expected_registry);
+        free(bytes);
+        if (!ok) { sb_fail(e, "Project registry changed since startup review; nothing changed."); return false; }
+    }
+    return true;
+}
 static bool load_record(startup *s, yyjson_val *v, sb_error *e) {
     s->kind = str(v, "kind");
     s->name = str(v, "name");
@@ -753,6 +787,11 @@ int sb_startup_cli(int argc, char **argv) {
                                 : !strcmp(arg, "--credential-key-file") ? &s.key
                                 : !strcmp(arg, "--credential-keychain") ? &s.keychain
                                 : !strcmp(arg, "--service-user")        ? &s.user
+                                : !strcmp(arg, "--expected-runtime-uid") ? &s.expected_uid
+                                : !strcmp(arg, "--expected-unit-id") ? &s.expected_unit
+                                : !strcmp(arg, "--expected-content-sha256") ? &s.expected_content
+                                : !strcmp(arg, "--expected-registry-sha256") ? &s.expected_registry
+                                : !strcmp(arg, "--expected-kind") ? &s.expected_kind
                                                                         : NULL;
             if (!slot || *slot || i + 1 >= argc)
                 goto bad;
@@ -765,6 +804,8 @@ int sb_startup_cli(int argc, char **argv) {
         goto done;
     if (!strcmp(s.action, "plan") || !strcmp(s.action, "install")) {
         if (!build(&s, &e))
+            goto done;
+        if (!review(&s, NULL, &e))
             goto done;
         reply = description(&s, out);
         if (!strcmp(s.action, "plan")) {
@@ -780,6 +821,8 @@ int sb_startup_cli(int argc, char **argv) {
         if (!lease)
             goto done;
         if (!state_scope(&s, lease->root, &e))
+            goto done;
+        if (!review(&s, NULL, &e))
             goto done;
         bool absent;
         char *old = read_at(lease->root->fd, "startup.json", true, &absent, &e);
@@ -851,11 +894,12 @@ int sb_startup_cli(int argc, char **argv) {
         }
 #endif
         yyjson_mut_obj_add_bool(out, reply, "installed", true);
+        yyjson_mut_obj_add_bool(out, reply, "registered", true);
         result = 0;
         goto done;
     }
     if (s.kind || s.name || s.projects || s.data || s.desktop_data || s.key || s.keychain || s.user ||
-        s.count || s.oauth)
+        s.count || s.oauth || s.expected_registry)
         goto bad;
     struct stat state;
     if (lstat(s.directory, &state) && errno == ENOENT) {
@@ -865,9 +909,16 @@ int sb_startup_cli(int argc, char **argv) {
         }
         reply = yyjson_mut_obj(out);
         yyjson_mut_obj_add_bool(out, reply, "installed", false);
+        yyjson_mut_obj_add_bool(out, reply, "registered", false);
+        yyjson_mut_obj_add_bool(out, reply, "status_known", true);
         result = 0;
         goto done;
     }
+    /* Read the ownership record and its matching native definition under the
+       same lease used by install/uninstall, including explicit status. */
+    lease = sb_platform_lease(s.directory, &e);
+    if (!lease)
+        goto done;
     fd = directory(s.directory, false, true, &e);
     if (fd < 0)
         goto done;
@@ -879,6 +930,8 @@ int sb_startup_cli(int argc, char **argv) {
         if (absent && (!strcmp(s.action, "status") || !strcmp(s.action, "uninstall"))) {
             reply = yyjson_mut_obj(out);
             yyjson_mut_obj_add_bool(out, reply, "installed", false);
+            yyjson_mut_obj_add_bool(out, reply, "registered", false);
+            yyjson_mut_obj_add_bool(out, reply, "status_known", true);
             result = 0;
         }
         goto done;
@@ -888,37 +941,52 @@ int sb_startup_cli(int argc, char **argv) {
     yyjson_val *record = yyjson_doc_get_root(saved);
     if (!saved || !load_record(&s, record, &e))
         goto done;
+    if (!review(&s, record, &e))
+        goto done;
     if (!strcmp(s.kind, "system-service") && geteuid() != 0) {
         sb_fail(&e, "System startup records and controls require the administrator installer account.");
         goto done;
-    }
-    if (strcmp(s.action, "status")) {
-        lease = sb_platform_lease(s.directory, &e);
-        if (!lease)
-            goto done;
     }
     bool missing;
     if (!matching(&s, record, &fd, leaf, &missing, &e))
         goto done;
     reply = yyjson_mut_obj(out);
     yyjson_mut_obj_add_bool(out, reply, "installed", !missing);
+    yyjson_mut_obj_add_bool(out, reply, "registered", true);
     yyjson_mut_obj_add_strcpy(out, reply, "native_path", s.native);
     yyjson_mut_obj_add_strcpy(out, reply, "unit_id", s.unit);
     yyjson_mut_obj_add_strcpy(out, reply, "kind", s.kind);
+    yyjson_mut_obj_add_strcpy(out, reply, "name", s.name);
+    yyjson_mut_obj_add_strcpy(out, reply, "content_sha256", str(record, "content_sha256"));
+    yyjson_mut_obj_add_uint(out, reply, "runtime_uid", s.uid);
+    yyjson_mut_obj_add_val(out, reply, "argv", yyjson_val_mut_copy(out, yyjson_obj_get(record, "argv")));
     yyjson_mut_obj_add_bool(out, reply, "replays_tasks", false);
     if (!strcmp(s.action, "status")) {
-        bool active = false;
+        bool active = false, known = true; unsigned long process = 0;
         if (strcmp(s.kind, "desktop")) {
 #ifdef __APPLE__
             int code = control(&s, "print", native_out, &e);
             active = !code && strstr(native_out, "state = running");
+            known = code >= 0 && (!code || strstr(native_out, "Could not find service"));
+            const char *entry = !code ? strstr(native_out, "\n\tpid = ") : NULL;
+            char *end = NULL;
+            unsigned long actual = entry ? strtoul(entry + 8, &end, 10) : 0;
+            if (actual > 1 && actual <= INT_MAX && end && (*end == '\n' || *end == '\r')) process = actual;
 #else
             int code = control(&s, "show", native_out, &e);
             active = !code && strstr(native_out, "ActiveState=active");
-            yyjson_mut_obj_add_strcpy(out, reply, "native_state", native_out);
+            known = !code;
+            const char *entry = !code ? strstr(native_out, "MainPID=") : NULL;
+            char *end = NULL;
+            unsigned long actual = entry ? strtoul(entry + 8, &end, 10) : 0;
+            if (actual > 1 && actual <= INT_MAX && end && (!*end || *end == '\n' || *end == '\r')) process = actual;
 #endif
+            yyjson_mut_obj_add_strcpy(out, reply, "native_state", native_out);
+            if (!known && *e.text) yyjson_mut_obj_add_strcpy(out, reply, "status_error", e.text);
         }
         yyjson_mut_obj_add_bool(out, reply, "active", active);
+        yyjson_mut_obj_add_bool(out, reply, "status_known", known);
+        yyjson_mut_obj_add_uint(out, reply, "process_id", process);
         result = 0;
     } else if (!strcmp(s.action, "start") || !strcmp(s.action, "stop")) {
         if (missing || !strcmp(s.kind, "desktop")) {
@@ -1025,6 +1093,8 @@ int sb_startup_cli(int argc, char **argv) {
         yyjson_mut_obj_add_bool(out, reply, "data_preserved", true);
         yyjson_mut_obj_remove_key(reply, "installed");
         yyjson_mut_obj_add_bool(out, reply, "installed", false);
+        yyjson_mut_obj_remove_key(reply, "registered");
+        yyjson_mut_obj_add_bool(out, reply, "registered", false);
         result = 0;
     } else
         goto bad;

@@ -119,7 +119,7 @@ fail:
     free(command); free(script); return NULL;
 }
 #endif
-static bool launch_authorization(char *const args[], int log, pid_t *pid, sb_error *e) {
+bool sb_admin_authorize_launch(char *const args[], int log, pid_t *pid, sb_error *e) {
     char *launcher[24];
 #ifdef __APPLE__
     char *script = authorization_script(args);
@@ -129,6 +129,7 @@ static bool launch_authorization(char *const args[], int log, pid_t *pid, sb_err
     launcher[0] = "/usr/bin/pkexec";
     unsigned i = 0;
     for (; args[i] && i + 2 < sizeof(launcher) / sizeof(*launcher); i++) launcher[i + 1] = args[i];
+    if (args[i]) { sb_fail(e, "Administrator launch exceeds its fixed argument budget."); return false; }
     launcher[i + 1] = NULL;
 #endif
     posix_spawn_file_actions_t files; posix_spawnattr_t attr;
@@ -138,7 +139,7 @@ static bool launch_authorization(char *const args[], int log, pid_t *pid, sb_err
     if (!rc) rc = posix_spawn_file_actions_adddup2(&files, log, 2);
     if (!rc) rc = posix_spawn_file_actions_addclose(&files, log);
     sigset_t empty, defaults; sigemptyset(&empty); sigemptyset(&defaults);
-    sigaddset(&defaults, SIGTERM); sigaddset(&defaults, SIGINT); sigaddset(&defaults, SIGPIPE);
+    sigaddset(&defaults, SIGTERM); sigaddset(&defaults, SIGINT); sigaddset(&defaults, SIGPIPE); sigaddset(&defaults, SIGCHLD);
     posix_spawnattr_setsigmask(&attr, &empty); posix_spawnattr_setsigdefault(&attr, &defaults);
     posix_spawnattr_setpgroup(&attr, 0);
     posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF);
@@ -184,7 +185,7 @@ bool sb_admin_link_start(sb_admin_link *link, const char *directory, const char 
     char *args[] = {(char *)sb_posix_program(), "--admin-broker", "--projects", (char *)registry,
                     "--admin-dir", (char *)state, "--owner-uid", user, "--desktop-channel", path,
                     "--desktop-pid", pid, "--expected-registry-sha256", (char *)sha, NULL};
-    if (!launch_authorization(args, log, &link->launcher, e)) goto done;
+    if (!sb_admin_authorize_launch(args, log, &link->launcher, e)) goto done;
     uint64_t deadline = sb_platform_millis() + 120000;
     while (!atomic_load(cancel) && !sb_posix_signal && sb_platform_millis() < deadline) {
         struct pollfd p = {.fd = listener, .events = POLLIN};

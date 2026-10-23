@@ -5,6 +5,7 @@
 #include "oauth.h"
 #include "admin_desktop.h"
 #include "admin_internal.h"
+#include "service_desktop.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -18,6 +19,8 @@
 #include <unistd.h>
 #include <stdarg.h>
 #include <dirent.h>
+#include <pwd.h>
+#include <time.h>
 
 extern char **environ;
 struct sb_native_manager {
@@ -34,6 +37,11 @@ struct sb_native_manager {
     yyjson_doc *admin_state;
     char approval_backend[16], inspected_backend[16], inspected_project[64], inspected_broker[33];
     uint64_t inspected_generation;
+    yyjson_doc *service_state, *service_preview;
+    char service_plan_hash[65], service_preview_options[65], service_preview_registry[65];
+    char service_error[768], service_cache_hash[65];
+    uint64_t service_checked_at;
+    bool service_cache_loaded;
 };
 const char *sb_gui_string(yyjson_val *o, const char *key) {
     const char *s = yyjson_get_str(yyjson_obj_get(o, key));
@@ -207,6 +215,7 @@ static bool online(sb_native_manager *g) {
     return ok;
 }
 static void admin_close(sb_native_manager *g);
+static bool service_blocked(sb_native_manager *g, sb_error *e);
 static bool private_dir(const char *path, sb_error *e) {
     if (mkdir(path, 0700) && errno != EEXIST) {
         sb_posix_error(e, "Create desktop directory");
@@ -443,6 +452,7 @@ static bool credentials(sb_native_manager *g, yyjson_val *projects, sb_error *e)
     return true;
 }
 static bool launch(sb_native_manager *g, sb_error *e) {
+    if (service_blocked(g, e)) return false;
     if (online(g)) {
         sb_fail(e, "Manager is already running; the desktop attached to it.");
         return false;
@@ -519,6 +529,7 @@ done:
     return ok;
 }
 static bool stopped(sb_native_manager *g, sb_error *e) {
+    if (service_blocked(g, e)) return false;
     if (g->administrator.fd >= 0 || sb_admin_link_closing(&g->administrator)) {
         sb_fail(e, "请先结束管理员会话，再修改或迁移项目配置。"); return false;
     }
@@ -837,6 +848,7 @@ static void copy_doc(yyjson_mut_doc *d, yyjson_mut_val *root, const char *key, y
         yyjson_mut_obj_add_val(d, root, key, v);
 }
 #include "native_admin.inl"
+#include "native_service.inl"
 #include "profile.inl"
 static char *snapshot(sb_native_manager *g) {
     yyjson_doc *cfg = registry(g), *state = exchange(g, "status", NULL, NULL), *s = settings(g),
@@ -875,6 +887,7 @@ static char *snapshot(sb_native_manager *g) {
     yyjson_mut_obj_add_strcpy(d, v, "administrator_error", admin_error.text);
     yyjson_mut_obj_add_strcpy(d, v, "approval_backend", g->approval_backend);
     copy_doc(d, v, "startup", autostart);
+    service_snapshot(g, d, v);
     yyjson_doc *pending=pending_migration(g);copy_doc(d,v,"migration_pending",pending);yyjson_doc_free(pending);
     yyjson_doc_free(autostart);
     copy_doc(d, v, "inspected", g->inspected);
@@ -915,8 +928,8 @@ char *sb_desktop_work(sb_native_manager *g, const char *request) {
     } else if (!strcmp(a, "start_manager"))
         ok = launch(g, &e);
     else if (!strcmp(a, "stop_manager")) {
-        admin_close(g);
-        ok = stop_manager(g, &e);
+        if (service_blocked(g, &e)) ok = false;
+        else { admin_close(g); ok = stop_manager(g, &e); }
     }
     else if (!strcmp(a, "exit")) {
         admin_close(g);
@@ -933,6 +946,7 @@ char *sb_desktop_work(sb_native_manager *g, const char *request) {
     else if(!strcmp(a,"recover_migration"))
         ok=recover_migration(g,q,&e);
     else if (!strcmp(a, "admin_settings")) ok = admin_save(g, q, &e);
+    else if (!strncmp(a, "service_", 8)) ok = service_action(g, a + 8, q, &e);
     else if (!strcmp(a, "admin_start")) {
         if (yyjson_obj_get(q, "root_registry") || yyjson_obj_get(q, "root_state")) ok = admin_save(g, q, &e);
         if (ok) ok = admin_start(g, &e);
@@ -1119,6 +1133,7 @@ void sb_desktop_close(sb_native_manager *g) {
     if (g) {
         admin_close(g);
         yyjson_doc_free(g->inspected);
+        yyjson_doc_free(g->service_state); yyjson_doc_free(g->service_preview);
         if(g->clipboard){sb_posix_wipe(g->clipboard,strlen(g->clipboard));free(g->clipboard);}
         sb_platform_lease_close(g->lease);
         pthread_mutex_destroy(&g->location_mutex);

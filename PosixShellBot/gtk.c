@@ -14,9 +14,10 @@ typedef struct {
     GtkWidget *window, *projects, *requests, *details, *request_detail, *message, *summary, *tray_label;
     GtkWidget *http, *oauth, *port, *url, *persistent, *desktop_status, *startup_status, *remote_owner, *owner_env, *default_project;
     GtkWidget *admin_status, *root_registry, *root_state, *approval_backend;
+    GtkWidget *service_kind, *service_name, *service_directory, *service_key, *service_starts, *service_oauth, *service_status;
     yyjson_doc *model;
     char project[64], request_id[65], request_type[32];
-    bool busy, rendering, tray, quitting, settings_loaded;
+    bool busy, rendering, tray, quitting, settings_loaded, service_settings_loaded;
     GDBusConnection *bus;
     GDBusNodeInfo *sni_info, *menu_info;
     guint sni_object, menu_object, watch;
@@ -150,6 +151,29 @@ static void render(void) {
             sb_gui_bool(yyjson_doc_get_root(ui.model), "administrator_closing"));
         set_text(ui.admin_status, status); free(status);
     }
+    if (ui.service_status) {
+        char *status = sb_gui_service_text(model("service"), model("service_plan"),
+            !strcmp(sb_gui_string(model("service_settings"), "kind"), "system-service"),
+            sb_gui_string(yyjson_doc_get_root(ui.model), "service_error"));
+        set_text(ui.service_status, status); free(status);
+    }
+    if (!ui.service_settings_loaded) {
+        yyjson_val *service = model("service_settings"), *item;
+        gtk_drop_down_set_selected(GTK_DROP_DOWN(ui.service_kind),
+            !strcmp(sb_gui_string(service, "kind"), "system-service") ? 1 : 0);
+        gtk_editable_set_text(GTK_EDITABLE(ui.service_name), sb_gui_string(service, "name"));
+        gtk_editable_set_text(GTK_EDITABLE(ui.service_directory), sb_gui_string(service, "directory"));
+        gtk_editable_set_text(GTK_EDITABLE(ui.service_key), sb_gui_string(service, "key"));
+        gtk_check_button_set_active(GTK_CHECK_BUTTON(ui.service_oauth), sb_gui_bool(service, "oauth"));
+        GString *starts = g_string_new(""); size_t si, sm;
+        yyjson_arr_foreach(yyjson_obj_get(service, "starts"), si, sm, item) {
+            if (!yyjson_is_str(item)) continue;
+            if (starts->len) g_string_append_c(starts, '\n');
+            g_string_append(starts, yyjson_get_str(item));
+        }
+        set_text(ui.service_starts, starts->str); g_string_free(starts, TRUE);
+        ui.service_settings_loaded = true;
+    }
     if (ui.approval_backend) gtk_drop_down_set_selected(GTK_DROP_DOWN(ui.approval_backend),
         !strcmp(sb_gui_string(yyjson_doc_get_root(ui.model), "approval_backend"), "administrator") ? 1 : 0);
     if (!ui.settings_loaded) {
@@ -224,6 +248,7 @@ static void done(GObject *source, GAsyncResult *result, gpointer data) {
     GError *e = NULL;
     char *json = g_task_propagate_pointer(G_TASK(result), &e);
     ui.busy = false;
+    gtk_widget_set_sensitive(ui.service_kind, TRUE);
     if (json) {
         yyjson_doc_free(ui.model);
         ui.model = yyjson_read(json, strlen(json), 0);
@@ -254,6 +279,7 @@ static void send_doc(yyjson_mut_doc *d, yyjson_mut_val *q) {
     if (!yyjson_mut_obj_get(q, "project")) yyjson_mut_obj_add_strcpy(d, q, "project", ui.project);
     char *bytes = sb_posix_json(d, q);
     ui.busy = true;
+    gtk_widget_set_sensitive(ui.service_kind, FALSE);
     GTask *task = g_task_new(NULL, NULL, done, NULL);
     g_task_set_task_data(task, bytes, free);
     g_task_run_in_thread(task, work_thread);
@@ -539,6 +565,77 @@ static void admin_clicked(GtkButton *button, gpointer data) {
     const char *buttons[] = {"继续", "取消", NULL}; gtk_alert_dialog_set_buttons(dialog, buttons);
     gtk_alert_dialog_set_default_button(dialog, 1); gtk_alert_dialog_set_cancel_button(dialog, 1);
     gtk_alert_dialog_choose(dialog, GTK_WINDOW(ui.window), NULL, admin_confirmed, bytes); g_object_unref(dialog);
+}
+static yyjson_mut_doc *service_request(const char *action, yyjson_mut_val **request) {
+    yyjson_mut_doc *d = yyjson_mut_doc_new(NULL); yyjson_mut_val *q = yyjson_mut_obj(d), *starts = yyjson_mut_arr(d);
+    yyjson_mut_obj_add_strcpy(d, q, "action", action);
+    yyjson_mut_obj_add_str(d, q, "kind", gtk_drop_down_get_selected(GTK_DROP_DOWN(ui.service_kind)) == 1 ? "system-service" : "user-service");
+    yyjson_mut_obj_add_strcpy(d, q, "name", gtk_editable_get_text(GTK_EDITABLE(ui.service_name)));
+    yyjson_mut_obj_add_strcpy(d, q, "directory", gtk_editable_get_text(GTK_EDITABLE(ui.service_directory)));
+    yyjson_mut_obj_add_strcpy(d, q, "key", gtk_editable_get_text(GTK_EDITABLE(ui.service_key)));
+    yyjson_mut_obj_add_bool(d, q, "oauth", gtk_check_button_get_active(GTK_CHECK_BUTTON(ui.service_oauth)));
+    GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(ui.service_starts));
+    GtkTextIter first, last; gtk_text_buffer_get_bounds(buffer, &first, &last);
+    char *text = gtk_text_buffer_get_text(buffer, &first, &last, TRUE), **parts = g_strsplit_set(text, ",\r\n", -1);
+    for (size_t i = 0; parts[i]; i++) {
+        char *identifier = g_strstrip(parts[i]);
+        if (*identifier) yyjson_mut_arr_add_strcpy(d, starts, identifier);
+    }
+    g_strfreev(parts); g_free(text);
+    yyjson_mut_obj_add_val(d, q, "starts", starts); *request = q;
+    return d;
+}
+static void service_clicked(GtkButton *button, gpointer data) {
+    (void)button; const char *action = data;
+    if (ui.busy) return;
+    yyjson_mut_val *q; yyjson_mut_doc *d = service_request(action, &q);
+    bool system = gtk_drop_down_get_selected(GTK_DROP_DOWN(ui.service_kind)) == 1;
+    if (!strcmp(action, "service_settings") || !strcmp(action, "service_plan")) {
+        send_doc(d, q); return;
+    }
+    yyjson_val *service = model("service"), *target = service;
+    bool install = !strcmp(action, "service_install");
+    if (install) {
+        const char *sha = sb_gui_string(yyjson_doc_get_root(ui.model), "service_plan_sha256");
+        if (!*sha) {
+            yyjson_mut_doc_free(d);
+            alert("请先点击“预览安装内容”，核对完整参数、启动项目和原生服务文件后再安装。"); return;
+        }
+        yyjson_mut_obj_add_strcpy(d, q, "expected_plan_sha256", sha); target = model("service_plan");
+    } else {
+        const char *unit = sb_gui_string(service, "unit_id"), *sha = sb_gui_string(service, "content_sha256");
+        if (*unit) yyjson_mut_obj_add_strcpy(d, q, "expected_unit_id", unit);
+        if (*sha) yyjson_mut_obj_add_strcpy(d, q, "expected_content_sha256", sha);
+    }
+    if (!system && !strcmp(action, "service_refresh")) { send_doc(d, q); return; }
+    const char *operation = install ? "安装" : !strcmp(action, "service_start") ? "启动" :
+        !strcmp(action, "service_stop") ? "停止" : !strcmp(action, "service_uninstall") ? "卸载" : "检查";
+    const char *effect = install ? "安装仅登记服务，不立即启动；服务将使用预览中的项目清单。" :
+        !strcmp(action, "service_start") ? "将启动服务及其登记的项目；已经运行的服务可能重启并结束当前任务。" :
+        !strcmp(action, "service_stop") || !strcmp(action, "service_uninstall") ?
+        "所属项目和当前任务会结束，未提交上传会丢弃。数据和历史记录保留。" : "读取系统服务最近状态。";
+    const char *unit = sb_gui_string(target, "unit_id"), *path = sb_gui_string(target, "native_path");
+    GtkAlertDialog *dialog = gtk_alert_dialog_new("%s服务？\n名称：%s\n服务标识：%s\n原生文件：%s\n\n%s%s", operation,
+        gtk_editable_get_text(GTK_EDITABLE(ui.service_name)), *unit ? unit : "尚未检查", *path ? path : "尚未检查", effect,
+        system ? "\n将打开系统管理员授权；后台仍以当前账户运行。ShellBot 不读取或保存密码。" : "");
+    char *bytes = sb_posix_json(d, q);
+    const char *buttons[] = {"继续", "取消", NULL}; gtk_alert_dialog_set_buttons(dialog, buttons);
+    gtk_alert_dialog_set_default_button(dialog, 1); gtk_alert_dialog_set_cancel_button(dialog, 1);
+    gtk_alert_dialog_choose(dialog, GTK_WINDOW(ui.window), NULL, admin_confirmed, bytes); g_object_unref(dialog);
+}
+static void service_kind_changed(GObject *object, GParamSpec *spec, gpointer unused) {
+    (void)object; (void)spec; (void)unused;
+    if (ui.rendering) return;
+    unsigned selected = gtk_drop_down_get_selected(GTK_DROP_DOWN(ui.service_kind));
+    if (sb_gui_bool(model("service"), "registered")) {
+        ui.rendering = true;
+        gtk_drop_down_set_selected(GTK_DROP_DOWN(ui.service_kind),
+            !strcmp(sb_gui_string(model("service_settings"), "kind"), "system-service") ? 1 : 0);
+        ui.rendering = false;
+        alert("请先卸载已登记的服务，再更换服务类型或登记目录。"); return;
+    }
+    const char *directory = sb_gui_string(model("service_default_directories"), selected == 1 ? "system-service" : "user-service");
+    if (*directory) gtk_editable_set_text(GTK_EDITABLE(ui.service_directory), directory);
 }
 /* KDE's deployed interface name is retained alongside the freedesktop interface. */
 static const char sni_xml[] =
@@ -1017,6 +1114,36 @@ static void activate(GtkApplication *app, gpointer data) {
     }
     append(admin_box, admin_actions); append(admin_box, scroll(ui.admin_status));
     gtk_notebook_append_page(GTK_NOTEBOOK(tabs), admin_box, gtk_label_new("管理员"));
+    GtkWidget *service_box = box(true, 10);
+    append(service_box, label("独立后台服务使用当前窗口已保存的项目配置和后台数据，以当前账户运行。系统服务通过系统管理员授权安装和控制；项目管理员权限仍在“管理员”页单独授权。"));
+    const char *service_kinds[] = {"当前账户服务（登录后运行）", "系统服务（开机后以当前账户运行）", NULL};
+    ui.service_kind = gtk_drop_down_new_from_strings(service_kinds);
+    g_signal_connect(ui.service_kind, "notify::selected", G_CALLBACK(service_kind_changed), NULL);
+    ui.service_name = gtk_entry_new(); ui.service_directory = gtk_entry_new(); ui.service_key = gtk_entry_new();
+    ui.service_starts = text(); gtk_text_view_set_editable(GTK_TEXT_VIEW(ui.service_starts), TRUE);
+    ui.service_oauth = gtk_check_button_new_with_label("服务启用 OAuth 连接授权"); ui.service_status = text();
+    append(service_box, label("服务类型")); append(service_box, ui.service_kind);
+    append(service_box, label("服务名称")); append(service_box, ui.service_name);
+    append(service_box, label("服务登记目录（与后台数据目录分开）")); append(service_box, ui.service_directory);
+    append(service_box, label("凭据密钥文件（当前账户服务可留空；系统服务必填）")); append(service_box, ui.service_key);
+    append(service_box, label("服务启动项目（每行或逗号分隔；留空只启动后台，不使用界面的项目自动启动选项）"));
+    GtkWidget *service_starts_scroll = scroll(ui.service_starts);
+    gtk_widget_set_size_request(service_starts_scroll, -1, 85); gtk_widget_set_vexpand(service_starts_scroll, FALSE);
+    append(service_box, service_starts_scroll); append(service_box, ui.service_oauth);
+    const char *service_titles[] = {"保存服务设置", "预览安装内容", "安装服务…", "检查状态", "启动服务…", "停止服务…", "卸载服务…"};
+    const char *service_verbs[] = {"service_settings", "service_plan", "service_install", "service_refresh", "service_start", "service_stop", "service_uninstall"};
+    GtkWidget *service_actions = box(false, 6);
+    for (unsigned i = 0; i < 7; i++) {
+        if (i == 3) { append(service_box, service_actions); service_actions = box(false, 6); }
+        b = gtk_button_new_with_label(service_titles[i]);
+        g_signal_connect(b, "clicked", G_CALLBACK(service_clicked), (gpointer)service_verbs[i]); append(service_actions, b);
+    }
+    append(service_box, service_actions);
+    b = gtk_button_new_with_label("取消授权等待"); g_signal_connect(b, "clicked", G_CALLBACK(admin_cancel_clicked), NULL); append(service_box, b);
+    append(service_box, label("系统服务状态只在点击检查或执行操作时请求授权，下面显示最近一次检查结果。安装仅登记服务，请随后显式启动。停止或卸载会结束服务所属项目和当前任务。"));
+    GtkWidget *service_status_scroll = scroll(ui.service_status); gtk_widget_set_size_request(service_status_scroll, -1, 280);
+    append(service_box, service_status_scroll);
+    gtk_notebook_append_page(GTK_NOTEBOOK(tabs), scroll(service_box), gtk_label_new("服务"));
     GtkWidget *settings_box = box(true, 12);
     ui.http = gtk_check_button_new_with_label("启用本机 HTTP 网关（仅监听回环地址）");
     ui.oauth = gtk_check_button_new_with_label("启用 OAuth 连接授权");
@@ -1039,7 +1166,7 @@ static void activate(GtkApplication *app, gpointer data) {
     g_signal_connect(b, "clicked", G_CALLBACK(settings_save), NULL);
     append(settings_box, b);
     ui.startup_status=label("登录自启：正在检查");append(settings_box,ui.startup_status);
-    append(settings_box,label("登录自启只打开管理界面；独立后台服务请按 POSIX_STARTUP.md 安装。"));
+    append(settings_box,label("登录自启只打开管理界面；独立后台服务在“服务”页管理。"));
     b=gtk_button_new_with_label("启用登录自启");g_signal_connect(b,"clicked",G_CALLBACK(startup_clicked),"startup_install");append(settings_box,b);
     b=gtk_button_new_with_label("取消登录自启");g_signal_connect(b,"clicked",G_CALLBACK(startup_clicked),"startup_uninstall");append(settings_box,b);
     b=gtk_button_new_with_label("迁移应用数据…");g_signal_connect(b,"clicked",G_CALLBACK(migrate_clicked),"migrate_application");append(settings_box,b);

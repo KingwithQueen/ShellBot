@@ -16,4 +16,5 @@ char *sb_gui_project_text(yyjson_val *project, yyjson_val *gateway, yyjson_val *
 char *sb_gui_request_text(yyjson_val *request, yyjson_val *configuration);
 char *sb_gui_desktop_text(yyjson_val *state);
 char *sb_gui_admin_text(yyjson_val *state, const char *selected, bool connected, bool closing);
+char *sb_gui_service_text(yyjson_val *status, yyjson_val *plan, bool system, const char *error);
 #endif

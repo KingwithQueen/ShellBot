@@ -67,11 +67,15 @@ static void putText(NSTextView *view, NSString *text) {
 @property NSTextView *adminStatus;
 @property NSTextField *rootRegistry, *rootState;
 @property NSPopUpButton *approvalBackend;
+@property NSPopUpButton *serviceKind;
+@property NSTextField *serviceName, *serviceDirectory, *serviceKey;
+@property NSTextView *serviceStarts, *serviceStatus;
+@property NSButton *serviceOAuth;
 @property NSTextField *summary, *message, *port, *url, *startupStatus, *ownerEnv, *defaultProject;
 @property NSButton *http, *oauth, *persistent, *remoteOwner;
 @property NSMutableArray<NSDictionary *> *projectRows, *requestRows;
 @property NSString *selected, *requestID, *requestType, *smoke;
-@property BOOL busy, rendering, quitting, settingsLoaded;
+@property BOOL busy, rendering, quitting, settingsLoaded, serviceSettingsLoaded;
 @property unsigned ticks;
 @property dispatch_queue_t queue;
 @property NSTimer *timer;
@@ -237,6 +241,38 @@ static void putText(NSTextView *view, NSString *text) {
     [adminStatusScroll.widthAnchor constraintEqualToAnchor:adminPage.widthAnchor].active = YES;
     tab = [[NSTabViewItem alloc] initWithIdentifier:@"administrator"]; tab.label = @"管理员";
     tab.view = sb_macos_form_scroll(adminPage); [tabs addTabViewItem:tab];
+    self.serviceKind = [NSPopUpButton new];
+    [self.serviceKind addItemsWithTitles:@[@"当前账户服务（登录后运行）", @"系统服务（开机后以当前账户运行）"]];
+    self.serviceKind.target = self; self.serviceKind.action = @selector(serviceKindChanged:);
+    self.serviceName = [NSTextField new]; self.serviceDirectory = [NSTextField new]; self.serviceKey = [NSTextField new];
+    self.serviceStarts = textView(); self.serviceStarts.editable = YES;
+    self.serviceOAuth = [NSButton checkboxWithTitle:@"服务启用 OAuth 连接授权" target:nil action:nil];
+    self.serviceStatus = textView();
+    NSScrollView *serviceStartsScroll = scrolled(self.serviceStarts), *serviceStatusScroll = scrolled(self.serviceStatus);
+    [serviceStartsScroll.heightAnchor constraintEqualToConstant:70].active = YES;
+    [serviceStatusScroll.heightAnchor constraintGreaterThanOrEqualToConstant:240].active = YES;
+    NSStackView *servicePage = stack(YES, @[
+        label(@"独立后台服务使用当前窗口已保存的项目配置和后台数据，以当前账户运行。系统服务通过系统管理员授权安装和控制；项目管理员权限仍在“管理员”页单独授权。"),
+        label(@"服务类型"), self.serviceKind, label(@"服务名称"), self.serviceName,
+        label(@"服务登记目录（与后台数据目录分开）"), self.serviceDirectory,
+        label(@"凭据密钥文件（当前账户服务可留空；系统服务必填）"), self.serviceKey,
+        label(@"服务启动项目（每行或逗号分隔；留空只启动后台，不使用界面的项目自动启动选项）"), serviceStartsScroll,
+        self.serviceOAuth,
+        stack(NO, @[[self special:@"保存服务设置" selector:@selector(serviceSave:)],
+                    [self special:@"预览安装内容" selector:@selector(servicePlan:)],
+                    [self special:@"安装服务…" selector:@selector(serviceInstall:)]]),
+        stack(NO, @[[self special:@"检查状态" selector:@selector(serviceRefresh:)],
+                    [self special:@"启动服务…" selector:@selector(serviceStart:)],
+                    [self special:@"停止服务…" selector:@selector(serviceStop:)],
+                    [self special:@"卸载服务…" selector:@selector(serviceUninstall:)],
+                    [self special:@"取消授权等待" selector:@selector(adminCancel:)]]),
+        label(@"系统服务状态只在点击检查或执行操作时请求授权，下面显示最近一次检查结果。安装仅登记服务，请随后显式启动。停止或卸载会结束服务所属项目和当前任务。"),
+        serviceStatusScroll
+    ]);
+    for (NSView *field in @[self.serviceName, self.serviceDirectory, self.serviceKey, serviceStartsScroll, serviceStatusScroll])
+        [field.widthAnchor constraintEqualToAnchor:servicePage.widthAnchor].active = YES;
+    tab = [[NSTabViewItem alloc] initWithIdentifier:@"service"]; tab.label = @"服务";
+    tab.view = sb_macos_form_scroll(servicePage); [tabs addTabViewItem:tab];
     self.http = [NSButton checkboxWithTitle:@"启用本机 HTTP 网关（仅监听回环地址）" target:nil action:nil];
     self.oauth = [NSButton checkboxWithTitle:@"启用 OAuth 连接授权" target:nil action:nil];
     self.remoteOwner=[NSButton checkboxWithTitle:@"启用远程所有者操作审批（独立凭据）" target:nil action:nil];
@@ -253,7 +289,7 @@ static void putText(NSTextView *view, NSString *text) {
         label(@"凭据由系统钥匙串保护。保存前请停止后台；项目自动启动选项在项目设置中选择。"),
         [self special:@"保存连接设置" selector:@selector(saveSettings:)],
         self.startupStatus,
-        label(@"登录自启只打开管理界面；独立后台服务请按 POSIX_STARTUP.md 安装。"),
+        label(@"登录自启只打开管理界面；独立后台服务在“服务”页管理。"),
         [self special:@"启用登录自启" selector:@selector(enableStartup:)],
         [self special:@"取消登录自启" selector:@selector(disableStartup:)],
         [self special:@"迁移应用数据…" selector:@selector(migrateApplication:)],
@@ -434,7 +470,25 @@ static void putText(NSTextView *view, NSString *text) {
         sb_gui_bool(yyjson_doc_get_root(self.model), "administrator_connected"),
         sb_gui_bool(yyjson_doc_get_root(self.model), "administrator_closing"));
     putText(self.adminStatus, str(adminText)); free(adminText);
+    char *serviceText = sb_gui_service_text([self value:"service"], [self value:"service_plan"],
+        !strcmp(sb_gui_string([self value:"service_settings"], "kind"), "system-service"),
+        sb_gui_string(yyjson_doc_get_root(self.model), "service_error"));
+    putText(self.serviceStatus, str(serviceText)); free(serviceText);
     [self.approvalBackend selectItemAtIndex:!strcmp(sb_gui_string(yyjson_doc_get_root(self.model), "approval_backend"), "administrator") ? 1 : 0];
+    if (!self.serviceSettingsLoaded) {
+        yyjson_val *service = [self value:"service_settings"], *item;
+        [self.serviceKind selectItemAtIndex:!strcmp(sb_gui_string(service, "kind"), "system-service") ? 1 : 0];
+        self.serviceName.stringValue = str(sb_gui_string(service, "name"));
+        self.serviceDirectory.stringValue = str(sb_gui_string(service, "directory"));
+        self.serviceKey.stringValue = str(sb_gui_string(service, "key"));
+        self.serviceOAuth.state = sb_gui_bool(service, "oauth") ? NSControlStateValueOn : NSControlStateValueOff;
+        NSMutableArray<NSString *> *starts = [NSMutableArray new];
+        size_t si, sm;
+        yyjson_arr_foreach(yyjson_obj_get(service, "starts"), si, sm, item)
+            if (yyjson_is_str(item)) [starts addObject:str(yyjson_get_str(item))];
+        self.serviceStarts.string = [starts componentsJoinedByString:@"\n"];
+        self.serviceSettingsLoaded = YES;
+    }
     if (!self.settingsLoaded) {
         yyjson_val *gateway = yyjson_obj_get([self value:"config"], "gateway"), *s = [self value:"settings"];
         self.port.stringValue = [NSString
@@ -521,10 +575,12 @@ static void putText(NSTextView *view, NSString *text) {
     NSData *bytes = [NSJSONSerialization dataWithJSONObject:q options:0 error:nil];
     NSString *json = [[NSString alloc] initWithData:bytes encoding:NSUTF8StringEncoding];
     self.busy = YES;
+    self.serviceKind.enabled = NO;
     dispatch_async(self.queue, ^{
       char *reply = sb_desktop_work(self.desktop, json.UTF8String);
       dispatch_async(dispatch_get_main_queue(), ^{
         self.busy = NO;
+        self.serviceKind.enabled = YES;
         yyjson_doc_free(self.model);
         self.model = reply ? yyjson_read(reply, strlen(reply), 0) : NULL;
         if(reply)sb_posix_wipe(reply,strlen(reply));
@@ -576,6 +632,72 @@ static void putText(NSTextView *view, NSString *text) {
     (void)sender; NSString *project = [self.selected copy];
     [self confirm:[NSString stringWithFormat:@"撤销项目 %@ 的本次管理员授权？所属管理员任务会结束，其他项目保留。重新允许需要结束会话后再次授权。",project]
         action:^{[self send:@{@"action":@"admin_revoke",@"project":project}];}];
+}
+- (NSMutableDictionary *)serviceRequest:(NSString *)action {
+    NSMutableArray<NSString *> *starts = [NSMutableArray new];
+    for (NSString *part in [self.serviceStarts.string componentsSeparatedByCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@",\r\n"]]) {
+        NSString *identifier = [part stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if (identifier.length) [starts addObject:identifier];
+    }
+    return [@{@"action":action, @"kind":self.serviceKind.indexOfSelectedItem == 1 ? @"system-service" : @"user-service",
+        @"name":self.serviceName.stringValue, @"directory":self.serviceDirectory.stringValue,
+        @"key":self.serviceKey.stringValue, @"oauth":@(self.serviceOAuth.state == NSControlStateValueOn),
+        @"starts":starts} mutableCopy];
+}
+- (void)serviceKindChanged:(id)sender {
+    (void)sender;
+    if (self.rendering) return;
+    if (sb_gui_bool([self value:"service"], "registered")) {
+        [self.serviceKind selectItemAtIndex:!strcmp(sb_gui_string([self value:"service_settings"], "kind"), "system-service") ? 1 : 0];
+        [self alert:@"请先卸载已登记的服务，再更换服务类型或登记目录。"]; return;
+    }
+    const char *directory = sb_gui_string([self value:"service_default_directories"], self.serviceKind.indexOfSelectedItem == 1 ? "system-service" : "user-service");
+    if (*directory) self.serviceDirectory.stringValue = str(directory);
+}
+- (void)serviceSave:(id)sender { (void)sender; [self send:[self serviceRequest:@"service_settings"]]; }
+- (void)servicePlan:(id)sender { (void)sender; [self send:[self serviceRequest:@"service_plan"]]; }
+- (void)serviceAction:(NSString *)action {
+    if (self.busy) return;
+    NSMutableDictionary *request = [self serviceRequest:action];
+    yyjson_val *service = [self value:"service"], *plan = [self value:"service_plan"];
+    BOOL install = [action isEqual:@"service_install"], system = [request[@"kind"] isEqual:@"system-service"];
+    if (install) {
+        NSString *sha = str(sb_gui_string(yyjson_doc_get_root(self.model), "service_plan_sha256"));
+        if (!sha.length) { [self alert:@"请先点击“预览安装内容”，核对完整参数、启动项目和原生服务文件后再安装。"]; return; }
+        request[@"expected_plan_sha256"] = sha;
+    } else {
+        const char *unit = sb_gui_string(service, "unit_id"), *sha = sb_gui_string(service, "content_sha256");
+        if (*unit) request[@"expected_unit_id"] = str(unit);
+        if (*sha) request[@"expected_content_sha256"] = str(sha);
+    }
+    NSString *unit = str(sb_gui_string(install ? plan : service, "unit_id"));
+    NSString *path = str(sb_gui_string(install ? plan : service, "native_path"));
+    NSString *operation = install ? @"安装" : [action isEqual:@"service_start"] ? @"启动" :
+        [action isEqual:@"service_stop"] ? @"停止" : [action isEqual:@"service_uninstall"] ? @"卸载" : @"检查";
+    NSString *effect = install ? @"安装仅登记服务，不立即启动；服务将使用预览中的项目清单。" :
+        [action isEqual:@"service_start"] ? @"将启动服务及其登记的项目；已经运行的服务可能重启并结束当前任务。" :
+        [action isEqual:@"service_stop"] || [action isEqual:@"service_uninstall"] ?
+            @"所属项目和当前任务会结束，未提交上传会丢弃。数据和历史记录保留。" : @"读取系统服务最近状态。";
+    NSString *message = [NSString stringWithFormat:@"%@服务？\n名称：%@\n服务标识：%@\n原生文件：%@\n\n%@%@", operation,
+        request[@"name"], unit.length ? unit : @"尚未检查", path.length ? path : @"尚未检查", effect,
+        system ? @"\n将打开系统管理员授权；后台仍以当前账户运行。ShellBot 不读取或保存密码。" : @""];
+    NSDictionary *frozen = [request copy];
+    [self confirm:message action:^{ [self send:frozen]; }];
+}
+- (void)serviceInstall:(id)sender { (void)sender; [self serviceAction:@"service_install"]; }
+- (void)serviceStart:(id)sender { (void)sender; [self serviceAction:@"service_start"]; }
+- (void)serviceStop:(id)sender { (void)sender; [self serviceAction:@"service_stop"]; }
+- (void)serviceUninstall:(id)sender { (void)sender; [self serviceAction:@"service_uninstall"]; }
+- (void)serviceRefresh:(id)sender {
+    (void)sender;
+    if (self.serviceKind.indexOfSelectedItem == 1) [self serviceAction:@"service_refresh"];
+    else {
+        NSMutableDictionary *request = [self serviceRequest:@"service_refresh"];
+        const char *unit = sb_gui_string([self value:"service"], "unit_id"), *sha = sb_gui_string([self value:"service"], "content_sha256");
+        if (*unit) request[@"expected_unit_id"] = str(unit);
+        if (*sha) request[@"expected_content_sha256"] = str(sha);
+        [self send:request];
+    }
 }
 - (void)desktopMenu:(NSMenuItem *)item {
     [self submit:item.representedObject];
