@@ -10,6 +10,35 @@ Linux 需要 /usr/bin/bwrap、可用的用户/挂载/PID/网络命名空间和 s
 
 管理员操作使用显式的 identity:administrator；普通网关和项目工作进程始终非 root。项目还必须独立设置 administrator_allowed=true、default_identity=current_user、files.scope=current_user。第十阶段补齐文件读写/管理、图片和文档读取/预览、产物上传下载及相应审批。命令仍须另外启用 execution.enabled 并取消命令涉及的只读限制；只使用管理员文件时可保持命令关闭。各文件位置的只读开关、工具开关、摘要/版本校验和审批继续执行。管理员代理不提供桌面或元数据入口，普通操作也不因代理存在而提升。
 
+## 多项目共享管理员会话
+
+第十一阶段提供 `--admin-broker`。本机所有者一次显式启动，监督器按该次注册表快照登记所有已允许的项目；A、B 可复用这次授权，未允许的 C 不创建管理员代理。每个已授权项目仍使用独立的 root 子代理、私有状态、审批池、任务和工作进程实例；一个项目退出、异常或撤销不会关闭其他项目的代理。普通管理器和工作进程保持原账户权限。该会话不是让多个项目共享同一个策略或任务池。
+
+完整程序、注册表和状态目录及其祖先仍须 root 拥有且不可由普通账户改写，准备规则与下面的单项目入口相同。然后运行：
+
+```sh
+sudo /absolute/root-owned/bin/ShellBot --admin-broker \
+  --projects /absolute/root-owned/projects.json \
+  --owner-uid 1000 --admin-dir /absolute/root-owned/admin-broker-state
+```
+
+所有者 UID 必须按目标机器查询，不能把 Linux 的示例 UID 照抄到 Mac。监督器将注册表保存为 root 私有的独立 `grant-*.json` 快照；每个子代理还核对该次授权的项目完整摘要。编辑原注册表不会扩大或改变当前会话；增加项目、改变策略或重新允许已撤销的项目，必须停止本会话，由所有者重新明确授权。程序不设置免密 sudo、不读取或保存密码、不自动弹窗提权。原有单项目 `--admin-agent` 保留。
+
+启动共享会话后再启动/重启对应的普通项目。每个子代理等待其匹配工作进程最多 120 秒，绑定后沿用原有文件、媒体、传输和命令协议。项目停止或暂停、工作进程断开后，子代理退出并取消所属任务、丢弃未提交上传；监督器记录退出，不自动重启子代理，也不重放任务、输入、审批或旧实例。
+
+监督器的本机 owner 通道只接受 root 账户连接。用独立请求文件发送 `{"command":"status"}`，读取本次 `broker_id` 和各项目的 `project_sha256`、`generation`、真实子进程状态及 `host_instance_id`：
+
+```sh
+sudo /absolute/root-owned/bin/ShellBot --owner-request /absolute/status.json \
+  --data-dir /absolute/root-owned/admin-broker-state
+```
+
+项目控制请求只允许 `restart` 和 `revoke`，均须包含 `project_id`、从本次状态读取的 `expected_broker_id`、`expected_project_sha256` 和 `expected_generation`。旧会话、旧代次、摘要不符、未授权项目或未知字段均拒绝。`restart` 只复用最初已经允许且尚未撤销的项目，启动新子代理；所有者还须重启普通工作进程以绑定新实例。`revoke` 立即取消该项目连接和任务，且本次会话不再允许重启它。没有 `grant`、`allow` 或自动重新加载入口。
+
+Ctrl+C 或 `sudo ShellBot --stop --data-dir BROKER_STATE` 撤销全部子代理。监督器异常消失时，私有监督通道关闭，各子代理也会退出并回收任务。状态、快照、审批历史和审计保留。原生管理界面的共享代理配置、启停及管理员审批池将在下一阶段接入；当前使用上述本机命令，真实 sudo/root 行为仍待集中人工验收。隔离的普通 UID 生命周期测试不等于真实 root 或保护文件验收。
+
+## 单项目兼容入口
+
 本地所有者先把完整程序包和注册表副本放到 root 拥有且各级目录不可被普通用户改写的位置；注册表必须与普通项目的配置一致。准备独立 root 私有状态目录。不要更改现有普通 Data 的所有者。然后由所有者在目标机器显式运行：
 
 ```sh

@@ -1,4 +1,5 @@
 #include "admin.h"
+#include "admin_internal.h"
 #include "sb_projects.h"
 #include "media.h"
 #include <sys/socket.h>
@@ -253,6 +254,34 @@ static bool trusted_path(const char *path, bool directory, sb_error *e) {
                    "chains without links.");
     return ok;
 }
+bool sb_admin_project_eligible(const sb_project *p) { return eligible(p); }
+bool sb_admin_project_digest(const sb_project *p, char hash[65], sb_error *e) { return digest(p, hash, e); }
+bool sb_admin_trusted_path(const char *path, bool directory, sb_error *e) {
+    return trusted_path(path, directory, e);
+}
+/* The supervisor owns this channel for the entire grant. Losing the supervisor
+   revokes the agent even while it is still waiting for an ordinary worker. */
+static bool supervisor_alive(bool supervised) {
+    if (!supervised)
+        return true;
+    struct pollfd p = {.fd = 3, .events = POLLIN};
+    int rc = poll(&p, 1, 0);
+    return rc == 0 || (rc < 0 && errno == EINTR);
+}
+static bool supervisor_state(bool supervised, const char *state, const char *instance, sb_error *e) {
+    if (!supervised)
+        return true;
+    yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
+    if (!d)
+        return false;
+    yyjson_mut_val *v = yyjson_mut_obj(d);
+    yyjson_mut_obj_add_str(d, v, "state", state);
+    yyjson_mut_obj_add_str(d, v, "instance", instance ? instance : "");
+    char *wire = sb_posix_json(d, v);
+    bool ok = wire && sb_posix_frame_write(3, wire, 1000, e);
+    free(wire);
+    return ok;
+}
 static bool initialize(sb_host *h, const sb_project *p, const char *data, const char *instance, sb_error *e) {
     h->project = p;
     h->administrator_host = true;
@@ -328,17 +357,22 @@ static char *dispatch(sb_host *h, yyjson_val *v) {
 }
 int sb_posix_admin_agent(int argc, char **argv) {
     sb_error e = {0};
-    const char *projects = NULL, *id = NULL, *data = NULL, *owner = NULL;
+    const char *projects = NULL, *id = NULL, *data = NULL, *owner = NULL, *expected = NULL;
     int result = 2, listenfd = -1, fd = -1;
-    bool bound = false;
+    bool bound = false, supervised = false;
     sb_project_registry registry = {0};
     sb_host h = {0};
     struct sockaddr_un address = {0};
     for (int i = 2; i < argc; i++) {
+        if (!strcmp(argv[i], "--supervised") && !supervised) {
+            supervised = true;
+            continue;
+        }
         const char **slot = !strcmp(argv[i], "--projects")    ? &projects
                             : !strcmp(argv[i], "--project")   ? &id
                             : !strcmp(argv[i], "--owner-uid") ? &owner
                             : !strcmp(argv[i], "--admin-dir") ? &data
+                            : !strcmp(argv[i], "--expected-project-sha256") ? &expected
                                                               : NULL;
         if (!slot || *slot || i + 1 >= argc) {
             sb_fail(&e, "Invalid administrator agent arguments.");
@@ -349,6 +383,17 @@ int sb_posix_admin_agent(int argc, char **argv) {
     if (getuid() != 0 || geteuid() != 0) {
         sb_fail(&e, "Administrator agent requires explicit local sudo/root authorization; it never requests "
                     "or records a password.");
+        goto done;
+    }
+    if (supervised) {
+        if (!expected || !sb_posix_peer(3, true) || !peer_program(3)) {
+            sb_fail(&e, "Administrator supervisor channel is not a verified root parent.");
+            goto done;
+        }
+        fcntl(3, F_SETFD, FD_CLOEXEC);
+        sb_posix_close_inherited();
+    } else if (expected) {
+        sb_fail(&e, "An expected project digest requires a verified root supervisor.");
         goto done;
     }
     if (!projects || !id || !data || !owner || !*owner || strspn(owner, "0123456789") != strlen(owner)) {
@@ -373,6 +418,10 @@ int sb_posix_admin_agent(int argc, char **argv) {
     char wanted[65];
     if (!digest(p, wanted, &e) || !endpoint((uid_t)uid, id, &address))
         goto done;
+    if (expected && strcmp(wanted, expected)) {
+        sb_fail(&e, "Administrator project no longer matches the supervisor's explicit grant.");
+        goto done;
+    }
     listenfd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (listenfd < 0)
         goto done;
@@ -392,8 +441,10 @@ int sb_posix_admin_agent(int argc, char **argv) {
             "Administrator project %s: waiting up to 120 seconds for the configured owner's ordinary worker. "
             "Ctrl+C revokes this session.\n",
             id);
+    if (!supervisor_state(supervised, "waiting", NULL, &e))
+        goto done;
     uint64_t deadline = sb_platform_millis() + 120000;
-    while (!sb_posix_signal && sb_platform_millis() < deadline) {
+    while (!sb_posix_signal && supervisor_alive(supervised) && sb_platform_millis() < deadline) {
         struct pollfd pollfd = {.fd = listenfd, .events = POLLIN};
         if (poll(&pollfd, 1, 100) <= 0)
             continue;
@@ -423,6 +474,8 @@ int sb_posix_admin_agent(int argc, char **argv) {
         }
         if (!sb_posix_frame_write(fd, "{\"ready\":true}", 3000, &e))
             goto done;
+        if (!supervisor_state(supervised, "connected", sb_execution_instance(h.execution), &e))
+            goto done;
         break;
     }
     if (fd < 0) {
@@ -431,7 +484,7 @@ int sb_posix_admin_agent(int argc, char **argv) {
     }
     close(listenfd);
     listenfd = -1;
-    while (!sb_posix_signal && !sb_owner_stopping(h.owner)) {
+    while (!sb_posix_signal && supervisor_alive(supervised) && !sb_owner_stopping(h.owner)) {
         struct pollfd pollfd = {.fd = fd, .events = POLLIN};
         int n = poll(&pollfd, 1, 100);
         if (n < 0 && errno == EINTR)
@@ -470,6 +523,8 @@ done:
     sb_config_free(&h.config);
     sb_projects_free(&registry);
     sb_media_shutdown();
+    if (supervised)
+        close(3);
     if (result)
         fprintf(stderr, "ShellBot administrator: %s\n",
                 *e.text ? e.text : "Native agent initialization failed.");

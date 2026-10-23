@@ -5,7 +5,7 @@ param(
     [ValidateSet('Debug','Release')][string]$Configuration='Debug',
     [switch]$WithTests,
     [switch]$Sanitizers,
-    [ValidateSet('all','project-profile','administrator-media','command-identities')][string]$TestScope='all'
+    [ValidateSet('all','project-profile','administrator-media','administrator-broker','command-identities')][string]$TestScope='all'
 )
 $ErrorActionPreference='Stop'
 if($TestScope -ne 'all' -and !$WithTests){throw 'TestScope requires -WithTests.'}
@@ -41,6 +41,7 @@ $files+='config/posix-restricted.example.json';$files+='config/posix-admin.examp
 if($WithTests){$files+='tests/posix_commands.py';$files+='tests/posix_command_fixture.c'}
 if($WithTests){$files+='tests/posix_profile.py'}
 if($WithTests){$files+='tests/posix_admin_contract.c';$files+='tests/posix_admin_media.py'}
+if($WithTests){$files+='tests/posix_broker_contract.c';$files+='tests/posix_broker.py'}
 $files=@($files|Sort-Object -Unique)
 $hashes=foreach($file in $files){$path=Join-Path $repo $file;if(!(Test-Path -LiteralPath $path -PathType Leaf)){throw "Missing input: $file"};((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()+'  '+$file)}
 [IO.File]::WriteAllText((Join-Path $runDir 'SOURCE_SHA256SUMS'),($hashes -join "`n")+"`n",[Text.UTF8Encoding]::new($false))
@@ -97,7 +98,7 @@ fi
     $artifactExit=$LASTEXITCODE
     $testVerified=$null
     if($WithTests -and $TestScope -ne 'all'){
-        $reportKind=@{'project-profile'='profile';'administrator-media'='admin-media';'command-identities'='commands'}[$TestScope]
+        $reportKind=@{'project-profile'='profile';'administrator-media'='admin-media';'administrator-broker'='admin-broker';'command-identities'='commands'}[$TestScope]
         $profileReport=Join-Path $runDir ($connection.name+'-'+$reportKind+'-report.json')
         & $scp @options ($connection.hostName+':'+$snapshot+'/build/'+$reportKind+'-test-report.json') $profileReport
         $testVerified=$false
@@ -132,6 +133,12 @@ fi
             if($LASTEXITCODE -ne 0){$testVerified=$false}else{
                 $adminResult=Get-Content -LiteralPath $adminReport -Raw|ConvertFrom-Json
                 $testVerified=$testVerified -and $adminResult.status -ceq 'passed' -and $adminResult.sha256 -ceq $testResult.sha256
+            }
+            $brokerReport=Join-Path $runDir ($connection.name+'-admin-broker-report.json')
+            & $scp @options ($connection.hostName+':'+$snapshot+'/build/admin-broker-test-report.json') $brokerReport
+            if($LASTEXITCODE -ne 0){$testVerified=$false}else{
+                $brokerResult=Get-Content -LiteralPath $brokerReport -Raw|ConvertFrom-Json
+                $testVerified=$testVerified -and $brokerResult.status -ceq 'passed' -and $brokerResult.sha256 -ceq $testResult.sha256
             }
             & $scp @options ($connection.hostName+':'+$snapshot+'/build/commands-test-report.json') $commandsReport
             if($LASTEXITCODE -ne 0){$testVerified=$false}else{
