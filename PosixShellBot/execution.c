@@ -1,6 +1,7 @@
 #include "posix.h"
 #include "sb_projects.h"
 #include "restricted.h"
+#include "command_tree.h"
 #include <sys/socket.h>
 #include <unistd.h>
 #include <stdlib.h>
@@ -272,14 +273,20 @@ yyjson_mut_val *sb_execution_status(sb_execution *x, yyjson_mut_doc *d) {
     yyjson_mut_obj_add_str(d, v, "containment",
                            x && x->profile == SB_EXEC_CONTROLLED
                                ? "native filesystem isolation, no network, no child processes"
-                               : "process groups; account commands are not a filesystem sandbox");
+                               : "per-command descendant supervision; account commands are not a filesystem sandbox");
+    yyjson_mut_obj_add_str(d, v, "process_tree_scope", sb_command_tree_scope());
+    yyjson_mut_obj_add_str(d, v, "memory_accounting", sb_command_tree_memory());
+    yyjson_mut_obj_add_uint(d, v, "memory_sample_interval_ms", SB_COMMAND_TREE_SAMPLE_MS);
+    yyjson_mut_obj_add_uint(d, v, "memory_failure_grace_samples", 3);
+    yyjson_mut_obj_add_uint(d, v, "sampled_process_limit", SB_COMMAND_TREE_PROCESS_LIMIT);
+    yyjson_mut_obj_add_bool(d, v, "memory_allocation_hard_limit", false);
+    yyjson_mut_obj_add_bool(d, v, "hostile_account_process_sandbox", false);
 #ifdef __linux__
-    yyjson_mut_obj_add_str(d, v, "memory_limit", "per-command RLIMIT_AS; excludes supervisor and worker");
+    yyjson_mut_obj_add_str(d, v, "memory_limit", "per-process RLIMIT_AS plus sampled descendant RSS; excludes supervisors and worker");
+    yyjson_mut_obj_add_bool(d, v, "orphan_descendants_adopted", true);
 #else
-    yyjson_mut_obj_add_str(d, v, "memory_limit", "sampled command process-group physical footprint; kill on excess; excludes supervisor and worker");
-    yyjson_mut_obj_add_uint(d,v,"memory_sample_interval_ms",20);
-    yyjson_mut_obj_add_uint(d,v,"memory_failure_grace_samples",3);
-    yyjson_mut_obj_add_bool(d,v,"memory_allocation_hard_limit",false);
+    yyjson_mut_obj_add_str(d, v, "memory_limit", "sampled identified descendant physical footprint; excludes supervisors and worker");
+    yyjson_mut_obj_add_bool(d, v, "orphan_descendants_adopted", false);
 #endif
     return v;
 }

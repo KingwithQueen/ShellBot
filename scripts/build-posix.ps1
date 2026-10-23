@@ -5,7 +5,7 @@ param(
     [ValidateSet('Debug','Release')][string]$Configuration='Debug',
     [switch]$WithTests,
     [switch]$Sanitizers,
-    [ValidateSet('all','project-profile','administrator-media','administrator-broker','administrator-ui','service-ui','remote-desktop','command-identities')][string]$TestScope='all'
+    [ValidateSet('all','project-profile','administrator-media','administrator-broker','administrator-ui','service-ui','remote-desktop','process-tree','command-identities')][string]$TestScope='all'
 )
 $ErrorActionPreference='Stop'
 if($TestScope -ne 'all' -and !$WithTests){throw 'TestScope requires -WithTests.'}
@@ -39,6 +39,7 @@ $files+='docs/POSIX_PROJECTS.md'
 $files+='docs/POSIX_ACCEPTANCE.md'
 $files+='config/posix-restricted.example.json';$files+='config/posix-admin.example.json'
 if($WithTests){$files+='tests/posix_commands.py';$files+='tests/posix_command_fixture.c'}
+if($WithTests){$files+='tests/posix_process_tree.py';$files+='tests/posix_tree_fixture.c'}
 if($WithTests){$files+='tests/posix_profile.py'}
 if($WithTests){$files+='tests/posix_admin_contract.c';$files+='tests/posix_admin_media.py'}
 if($WithTests){$files+='tests/posix_broker_contract.c';$files+='tests/posix_broker.py';$files+='tests/posix_admin_ui_contract.c';$files+='tests/posix_admin_ui.py';$files+='tests/posix_service_ui.py';$files+='tests/posix_service_contract.c'}
@@ -98,7 +99,7 @@ fi
     $artifactExit=$LASTEXITCODE
     $testVerified=$null
     if($WithTests -and $TestScope -ne 'all'){
-        $reportKind=@{'project-profile'='profile';'administrator-media'='admin-media';'administrator-broker'='admin-broker';'administrator-ui'='admin-ui';'service-ui'='service-ui';'remote-desktop'='remote-desktop';'command-identities'='commands'}[$TestScope]
+        $reportKind=@{'project-profile'='profile';'administrator-media'='admin-media';'administrator-broker'='admin-broker';'administrator-ui'='admin-ui';'service-ui'='service-ui';'remote-desktop'='remote-desktop';'process-tree'='process-tree';'command-identities'='commands'}[$TestScope]
         $profileReport=Join-Path $runDir ($connection.name+'-'+$reportKind+'-report.json')
         & $scp @options ($connection.hostName+':'+$snapshot+'/build/'+$reportKind+'-test-report.json') $profileReport
         $testVerified=$false
@@ -128,6 +129,12 @@ fi
             }
             $startupReport=Join-Path $runDir ($connection.name+'-startup-report.json')
             $commandsReport=Join-Path $runDir ($connection.name+'-commands-report.json')
+            $treeReport=Join-Path $runDir ($connection.name+'-process-tree-report.json')
+            & $scp @options ($connection.hostName+':'+$snapshot+'/build/process-tree-test-report.json') $treeReport
+            if($LASTEXITCODE -ne 0){$testVerified=$false}else{
+                $treeResult=Get-Content -LiteralPath $treeReport -Raw|ConvertFrom-Json
+                $testVerified=$testVerified -and $treeResult.status -ceq 'passed' -and $treeResult.sha256 -ceq $testResult.sha256
+            }
             $adminReport=Join-Path $runDir ($connection.name+'-admin-media-report.json')
             & $scp @options ($connection.hostName+':'+$snapshot+'/build/admin-media-test-report.json') $adminReport
             if($LASTEXITCODE -ne 0){$testVerified=$false}else{

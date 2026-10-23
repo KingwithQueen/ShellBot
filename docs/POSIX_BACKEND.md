@@ -1,4 +1,4 @@
-# Linux / macOS 后台开发版：第十四阶段
+# Linux / macOS 后台开发版：第十五阶段
 
 这是独立的 C17 POSIX 后台入口，不是 Windows 正式包或完整桌面版。正式 Windows 1.0.3 的 MSBuild 入口和 Win32 后端继续使用原有构建方式。当前已使用 Linux x86_64 和 Intel macOS 实机通过 SSH 编译运行；不能据此宣称所有发行版、旧系统或 Apple Silicon 已验收。
 
@@ -19,7 +19,7 @@
 
 第四阶段加入 Mac Cocoa / Linux GTK 4 原生项目窗口、审批与 OAuth 连接管理，以及菜单栏/StatusNotifier 托盘；参见 [管理界面与托盘](POSIX_DESKTOP.md)。界面默认构建；无桌面环境可明确设置 `-DSHELLBOT_DESKTOP=OFF`。
 
-第十一至十三阶段补充多项目共享管理员监督器、原生授权与审批池、独立后台服务管理。第十四阶段补充 Linux Wayland 多屏流和明确的坐标空间、当前有效 XKB 布局文字输入及动态 XI 2.1 设备观察；详细能力与系统限制见 [远程桌面](POSIX_REMOTE_DESKTOP.md)。进程树资源边界、长 Data 路径及发行准备仍需继续，集中验收见 [人工验收清单](POSIX_ACCEPTANCE.md)。
+第十一至十三阶段补充多项目共享管理员监督器、原生授权与审批池、独立后台服务管理。第十四阶段补充 Linux Wayland 多屏流和明确的坐标空间、当前有效 XKB 布局文字输入及动态 XI 2.1 设备观察；详细能力与系统限制见 [远程桌面](POSIX_REMOTE_DESKTOP.md)。第十五阶段为每条命令增加独立监督进程，按已识别后代合计采样内存，并在取消、超时、配额超限及连接消失时回收；Linux 使用 subreaper 和 pidfd，Mac 保留出生身份匹配的后代记录，快速且未被观察的孤儿仍有明确限制，见 [命令身份与资源控制](POSIX_COMMANDS.md)。长 Data 路径及发行准备仍需继续，集中验收见 [人工验收清单](POSIX_ACCEPTANCE.md)。
 
 ## 原生构建
 
@@ -31,7 +31,7 @@ cmake --build build/posix-native --parallel 4
 build/posix-native/ShellBot --version
 ```
 
-在 Mac 上使用已安装的 Apple 开发工具链。构建默认针对当前机器架构；跨架构编译不能代替相应硬件运行验收。Linux 二进制依赖构建机器的 libc，不是面向旧发行版的通用包。
+在 Mac 上使用已安装的 Apple 开发工具链。构建默认针对当前机器架构；跨架构编译不能代替相应硬件运行验收。Linux 命令监督需要支持 pidfd 的内核（5.3+）、允许相关系统调用，并能读取自身的 /proc 进程及子进程信息；缺失时拒绝启动命令，不降级为数值 PID 追踪。Linux 二进制依赖构建机器的 libc，不是面向旧发行版的通用包。
 
 可选 `cmake --install build/posix-native --prefix /absolute/private/install-dir` 会安装命令行程序和 ShellBot、yyjson、CivetWeb 许可，不注册系统服务。
 
@@ -123,9 +123,9 @@ ShellBot --project-remove example --projects /private/projects.json --output /pr
 
 任务只继承系统生成的 HOME/USER/LOGNAME、固定 PATH、LANG 和 TMPDIR，不继承宿主 bearer 或自定义环境变量。当前实例的输出留在受限内存缓冲区；历史保留每流最多 8192 字节前缀与截断标记，以及命令元数据和 stdin 投递回执。任务与审计 Data 沿用私有权限保护；项目凭据及 OAuth 状态可使用第三阶段独立的加密存储。
 
-取消、超时、暂停和正常退出会停止任务进程组中的普通后代。工作进程崩溃时独立监督进程检测通道关闭并清理进程组；管理器异常退出后，工作进程因私有通道关闭而退出并停止任务。没有按进程名批量终止其他程序，也不自动恢复任务或 stdin。主动脱离进程组的守护进程、恶意同 UID 程序、监督进程本身被强杀均不属于已验证的完整任务树隔离。
+取消、超时、暂停和正常退出会由每条命令的独立监督进程回收已识别后代；工作进程或任务代理异常消失也会触发清理。Linux 使用 subreaper 接管孤儿并以 pidfd 绑定身份；Mac 保留已观察进程的出生身份，改换进程组后仍可回收，快速且未被观察的孤儿存在平台限制。管理器异常退出后，工作进程因私有通道关闭而退出并停止任务。没有按进程名批量终止其他程序，也不自动恢复任务或 stdin；恶意同 UID 程序、命令监督进程本身被强杀不属于已验证的完整任务树隔离。
 
-`worker_memory_mb` 在 Linux 用作单条命令的地址空间限制。Intel Mac 采样命令进程组的物理占用总量，超额终止并返回 `memory_limit`，查询失败则返回 `memory_monitor_unavailable`；不是分配时硬上限，名义采样周期 20 毫秒。能力响应、任务峰值和口径见 [命令身份](POSIX_COMMANDS.md)。两者均排除监督进程与工作进程。任务数、输出、输入、超时及关闭 core dump 的限制分别生效，不能把它们当作账户权限或抵抗主动脱离进程组的完整资源沙箱。
+`worker_memory_mb` 在 Linux 同时保留普通命令的每进程地址空间限制。两平台名义每 20 毫秒合计采样已识别后代内存：Linux 为 RSS，Intel Mac 为 physical footprint；超额返回 `memory_limit`，连续三次查询失败返回 `resource_monitor_unavailable`，采样存活进程数超过 1024 返回 `process_limit`。峰值、清理结果与平台范围见 [命令身份](POSIX_COMMANDS.md)。合计采样不是分配时硬上限，并排除监督进程与工作进程；任务数、输出、输入、超时及关闭 core dump 的限制分别生效，不构成抵抗恶意账户命令的资源沙箱。
 
 ## 文件边界与限制
 

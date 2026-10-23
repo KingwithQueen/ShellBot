@@ -27,6 +27,15 @@ struct sb_restricted {
     size_t nr, nf;
 };
 static const char *str(yyjson_val *v, const char *k) { return sb_string(yyjson_obj_get(v, k)); }
+bool sb_restricted_has_fd(const sb_restricted *r, int fd) {
+    if (r) {
+        for (size_t i = 0; i < r->nr; i++)
+            if (r->roots[i].fd == fd) return true;
+        for (size_t i = 0; i < r->nf; i++)
+            if (r->files[i].fd == fd) return true;
+    }
+    return false;
+}
 static bool within(const char *parent, const char *child) {
     size_t n = strlen(parent);
     return !strncmp(parent, child, n) && (!child[n] || child[n] == '/' || n == 1);

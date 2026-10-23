@@ -55,11 +55,19 @@ Mac 的实际 uid 可用 id -u 查询，常见为 501；Linux 示例值不能照
 
 管理员文件操作的私有备份、写入暂存、审批及审计都存放在上述 root 独立状态中。产物每次 open/read/write/commit/status/cancel 都保留 identity:administrator；传输绑定原调用者、项目及本次管理员会话，普通后端不能接续。关闭或撤销代理会丢弃未提交上传，不会创建目标；已完成文件操作不自动回滚或重放。图片/文档沿用固定依赖及读取、像素、页数、解包和输出预算，不运行宏、脚本或外部文档资源。管理员 PDFium 运行库也必须 root 拥有、不可被其他账户改写；解析器在管理员进程内运行，不是独立解析沙箱。
 
-## 命令内存配额
+## 命令进程树与资源配额
 
-Linux 继续在命令执行前设置单条命令的 RLIMIT_AS 地址空间上限。Intel Mac 使用公开 libproc 接口，按命令进程组内存活进程的 physical footprint 合计，名义每 20 毫秒采样一次；超出 worker_memory_mb 时终止该组并报告 memory_limit。连续三次无法完整查询时终止并报告 memory_monitor_unavailable，不伪造成功采样；退出中的进程按实际退出结果回收。收据返回 memory_peak_bytes 和采样口径；高水位只包含被采到的值。
+第十五阶段为每条命令创建独立监督进程，保留原命令 PID，直到清理结束才回收。返回的 process_id 仍是实际命令，supervisor_process_id 是监督进程。正常退出也先清理仍在运行的已识别后代；取消、超时、输出或内存超限、工作进程/任务代理消失都会触发清理。三秒清理期限内没有观察到空集合时，process_tree_cleanup_complete 为 false，并记录错误；不将超时清理算作成功。该字段仅描述当前平台能够识别的集合，不证明任意账户命令均被完全隔离。
 
-Mac 的采样限制不是分配时硬上限，短时峰值可超过预算；共享页合计可能保守重复计算。监督进程与工作进程不在配额中。普通或管理员命令若主动脱离进程组，可逃离该组的核算与回收；因此这不是防御恶意账户命令的进程树资源沙箱。受限命令本来就禁止创建子进程。任务数、输出、超时和账户权限仍分别生效。
+Linux 监督进程使用 PR_SET_CHILD_SUBREAPER 接管双重派生、setsid 后的孤儿，以 pidfd 绑定已观察及接管的进程；发送信号不退回可能复用的数值 PID。退出前额外核对当前直接子进程，避免进程扫描与孤儿接管的竞态。需要内核 5.3+ 的 pidfd_open/pidfd_send_signal 支持，以及可读的 /proc；缺失或被系统策略禁止时拒绝命令。进程组仅在原命令仍为本监督进程的未回收子进程时辅助回收。
+
+Intel Mac 通过公开 libproc 按父子关系发现后代，并核对 PID 和出生时间；已观察进程即使更换进程组仍继续核算及回收，发送信号前再次核对身份。公开接口没有 Linux subreaper，已不支持的 kqueue NOTE_TRACK 也不能提供可靠递归追踪。快速双重派生并在采样前脱离祖先的孤儿可能逃离观察；出生时间核对也不是原子的内核句柄。程序能力明确报告此边界，不将其包装为恶意账户命令的沙箱。
+
+两平台名义每 20 毫秒采样一次，按已识别存活后代合计内存：Linux 为 RSS，Mac 为 physical footprint。超出 worker_memory_mb 报告 memory_limit；Linux 普通命令同时保留每进程 RLIMIT_AS。连续三次查询失败则取消并报告 resource_monitor_unavailable；超过采样进程数 1024 则报告 process_limit。收据提供 memory_peak_bytes、memory_accounting 和 process_peak，峰值只包含实际采到的数值。监督进程与工作进程不在此配额中。
+
+合计采样不是分配时硬上限，短时内存峰值或派生数量可超过预算，共享页合计可能重复计算。没有使用需要额外委派权限的 cgroup，也不防御同账户命令主动攻击监督器、隐藏后代或操作其他账户进程。受限命令仍禁止创建子进程并保留原有隔离探针；任务数、输出、超时和账户权限分别生效。
+
+接口依据：[Linux 子进程接管](https://www.man7.org/linux/man-pages/man2/PR_SET_CHILD_SUBREAPER.2const.html)、[pidfd 信号](https://www.man7.org/linux/man-pages/man2/pidfd_send_signal.2.html)、[Apple libproc](https://github.com/apple-oss-distributions/xnu/blob/main/libsyscall/wrappers/libproc/libproc.h)、[Apple kqueue 接口限制](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/event.h)。
 
 Ctrl+C 退出代理、sudo ShellBot --stop --data-dir ADMIN_STATE，或暂停/停止普通项目都会撤销本次连接并取消所属任务；连接关闭不自动重连、重试、提权或降级。后续需所有者显式启动新代理和新项目实例。历史状态保留，不重放旧任务。不要将代理配置为无人确认的永久免密提权服务。
 

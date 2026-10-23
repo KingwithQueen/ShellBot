@@ -28,7 +28,7 @@ const sb_form_field sb_form_fields[] = {
  F("resources.max_output_bytes","每项任务输出预算（字节）","配额","number","262144","","",1024,262144),
  F("resources.max_timeout_ms","任务超时上限（毫秒）","配额","number","3600000","","",100,3600000),
  F("resources.max_approval_records","审批记录数","配额","number","64","","",1,64),
- F("resources.worker_memory_mb","命令内存配额（MiB；Mac 为进程组采样）","配额","number","512","","",16,4096)
+ F("resources.worker_memory_mb","命令内存配额（MiB；后代进程合计采样）","配额","number","512","","",16,4096)
 };
 const unsigned sb_form_field_count = sizeof(sb_form_fields)/sizeof(sb_form_fields[0]);
 yyjson_val *sb_form_get(yyjson_val *root, const char *path) {

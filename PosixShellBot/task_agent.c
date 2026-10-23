@@ -1,9 +1,8 @@
 #include "posix.h"
 #include "restricted.h"
-#include "command_memory.h"
+#include "command_tree.h"
 #include <sys/socket.h>
 #include <sys/wait.h>
-#include <sys/resource.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -12,12 +11,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <pwd.h>
-#ifdef __linux__
-#include <sys/prctl.h>
-#endif
 
-/* This single-threaded helper owns task groups. Loss of the worker channel
-   cancels them even when the multithreaded worker is killed abruptly. */
+/* This single-threaded helper owns per-command supervisors. Loss of the worker
+   channel cancels them even when the multithreaded worker is killed abruptly. */
 #define RECORDS 32
 #define INPUTS 16
 typedef struct {
@@ -35,9 +31,9 @@ typedef struct {
     unsigned char *bytes[2];
     size_t length[2];
     input inputs[INPUTS];
-    unsigned input_count,memory_failures;
-    char memory_error[256];
-    uint64_t started, timeout,memory_peak;
+    unsigned input_count;
+    sb_command_watch watch;
+    uint64_t started, timeout;
     bool prepared, running, finished, dirty, input_closed;
     int exit_code;
     const char *reason;
@@ -90,7 +86,7 @@ static yyjson_mut_val *snapshot(task *t, yyjson_mut_doc *d, bool history) {
     yyjson_mut_obj_add_strcpy(d, v, "request_key", t->key);
     yyjson_mut_obj_add_strcpy(d, v, "request_sha256", t->hash);
     yyjson_mut_obj_add_strcpy(d, v, "_actor", t->actor);
-    yyjson_mut_obj_add_uint(d, v, "process_id", t->pid > 0 ? (uint64_t)t->pid : 0);
+    yyjson_mut_obj_add_uint(d, v, "process_id", t->watch.command > 0 ? (uint64_t)t->watch.command : 0);
     yyjson_mut_obj_add_bool(d, v, "running", t->running);
     yyjson_mut_obj_add_bool(d, v, "finished", t->finished);
     yyjson_mut_obj_add_str(d, v, "status",
@@ -102,11 +98,16 @@ static yyjson_mut_val *snapshot(task *t, yyjson_mut_doc *d, bool history) {
         yyjson_mut_obj_add_int(d, v, "exit_code", t->exit_code);
     yyjson_mut_obj_add_uint(d, v, "stdout_bytes", t->length[0]);
     yyjson_mut_obj_add_uint(d, v, "stderr_bytes", t->length[1]);
-#ifdef __APPLE__
-    yyjson_mut_obj_add_uint(d,v,"memory_peak_bytes",t->memory_peak);
-    yyjson_mut_obj_add_str(d,v,"memory_accounting","sampled_process_group_physical_footprint");
-    if(*t->memory_error)yyjson_mut_obj_add_strcpy(d,v,"memory_monitor_error",t->memory_error);
-#endif
+    yyjson_mut_obj_add_uint(d, v, "supervisor_process_id", t->watch.supervisor > 0 ? (uint64_t)t->watch.supervisor : 0);
+    yyjson_mut_obj_add_uint(d, v, "memory_peak_bytes", t->watch.memory_peak);
+    yyjson_mut_obj_add_str(d, v, "memory_accounting", sb_command_tree_memory());
+    yyjson_mut_obj_add_uint(d, v, "process_peak", t->watch.process_peak);
+    if (t->finished)
+        yyjson_mut_obj_add_bool(d, v, "process_tree_cleanup_complete", t->pid <= 0 || (t->watch.final && t->watch.cleanup_complete));
+    if (*t->watch.error) {
+        yyjson_mut_obj_add_strcpy(d, v, "resource_monitor_error", t->watch.error);
+        yyjson_mut_obj_add_strcpy(d, v, "memory_monitor_error", t->watch.error);
+    }
     yyjson_mut_val *receipts = yyjson_mut_arr(d);
     for (unsigned i = 0; i < t->input_count; i++) {
         input *p = &t->inputs[i];
@@ -151,10 +152,7 @@ static task *find(agent *a, yyjson_val *args, bool key) {
 }
 static void stop_task(task *t, const char *reason) {
     if (t->running) {
-        kill(-t->pid, SIGKILL);
-        /* The unreaped leader cannot be reused. Account commands may move
-           themselves to another group; never signal that unrelated group. */
-        kill(t->pid,SIGKILL);
+        sb_command_watch_cancel(&t->watch);
         if (!t->reason)
             t->reason = reason;
     }
@@ -191,19 +189,12 @@ static void tick(agent *a) {
             continue;
         drain(t, 0, a);
         drain(t, 1, a);
-#ifdef __APPLE__
-        if(!t->reason){
-            uint64_t usage=0;sb_error error={0};
-            if(!sb_command_memory(t->pid,&usage,&error)){
-                /* libproc can lose a process during exit before waitid sees it.
-                   Three failed samples bound the grace period; no successful
-                   sample is fabricated and the exit is still reaped below. */
-                if(++t->memory_failures>=3){snprintf(t->memory_error,sizeof(t->memory_error),"%s",error.text);stop_task(t,"memory_monitor_unavailable");}
-            }
-            else {t->memory_failures=0;if(usage>t->memory_peak)t->memory_peak=usage;
-                if(usage>(uint64_t)a->limits.worker_memory_mb*1024u*1024u)stop_task(t,"memory_limit");}
-        }
-#endif
+        uint64_t previous_peak = t->watch.memory_peak;
+        unsigned previous_processes = t->watch.process_peak;
+        if (!sb_command_watch_poll(&t->watch)) stop_task(t, "resource_supervisor_lost");
+        if (!t->reason && *t->watch.reason && strcmp(t->watch.reason, "completed")) t->reason = t->watch.reason;
+        if (previous_peak != t->watch.memory_peak || previous_processes != t->watch.process_peak) t->dirty = true;
+
         if (sb_platform_millis() - t->started >= t->timeout)
             stop_task(t, "timed_out");
         for (unsigned j = 0; j < t->input_count; j++) {
@@ -243,12 +234,24 @@ static void tick(agent *a) {
         }
         siginfo_t info = {0};
         if (waitid(P_PID, (id_t)t->pid, &info, WEXITED | WNOHANG | WNOWAIT) == 0 && info.si_pid) {
-            /* Leave the leader unreaped until group cleanup: its pid cannot be reused. */
-            kill(-t->pid, SIGKILL);
+            /* The command supervisor has already cleaned its owned descendants. */
+            (void)sb_command_watch_poll(&t->watch);
+            /* FINAL can arrive between the first poll and observing supervisor
+             * exit. Preserve its resource/cleanup failure before completing. */
+            if (!t->reason && *t->watch.reason && strcmp(t->watch.reason, "completed"))
+                t->reason = t->watch.reason;
             int status = 0;
             while (waitpid(t->pid, &status, 0) < 0 && errno == EINTR) {
             }
-            t->exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+            t->exit_code = t->watch.final ? t->watch.exit_code : 127;
+            if (!t->watch.final) {
+                t->reason = "resource_supervisor_lost";
+                snprintf(t->watch.error, sizeof(t->watch.error),
+                         "Command supervisor exited without a final report (exit=%d, signal=%d).",
+                         WIFEXITED(status) ? WEXITSTATUS(status) : -1,
+                         WIFSIGNALED(status) ? WTERMSIG(status) : 0);
+            }
+            sb_command_watch_close(&t->watch);
             drain(t, 0, a);
             drain(t, 1, a);
             close_fd(&t->out[0]);
@@ -291,100 +294,25 @@ static bool launch(task *t, agent *a, sb_error *e) {
         sb_fail(e, "Prepared program or working directory changed; command was not launched.");
         return false;
     }
-    int pipes[4][2];
-    for (unsigned i = 0; i < 4; i++) {
-        pipes[i][0] = pipes[i][1] = -1;
-    }
+    int pipes[3][2];
+    for (unsigned i = 0; i < 3; i++) pipes[i][0] = pipes[i][1] = -1;
     bool ok = true;
-    for (unsigned i = 0; i < 4; i++)
-        if (pipe(pipes[i])) {
-            ok = false;
-            break;
-        } else {
-            fcntl(pipes[i][0], F_SETFD, FD_CLOEXEC);
-            fcntl(pipes[i][1], F_SETFD, FD_CLOEXEC);
-        }
-    pid_t pid = ok ? fork() : -1;
-    if (pid == 0) {
-        int failure = 0;
-        if (setpgid(0, 0) || dup2(pipes[0][0], 0) < 0 || dup2(pipes[1][1], 1) < 0 ||
-            dup2(pipes[2][1], 2) < 0 || fchdir(t->cwd->fd))
-            failure = errno;
-        struct rlimit core = {0, 0};
-        setrlimit(RLIMIT_CORE, &core);
-        struct rlimit cpu = {(rlim_t)(t->timeout / 1000 + 2), (rlim_t)(t->timeout / 1000 + 3)};
-        setrlimit(RLIMIT_CPU, &cpu);
-#ifdef __linux__
-        struct rlimit memory = {(rlim_t)a->limits.worker_memory_mb * 1024u * 1024u,
-                                (rlim_t)a->limits.worker_memory_mb * 1024u * 1024u};
-        if ((!a->restricted && setrlimit(RLIMIT_AS, &memory)) || prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0))
-            failure = errno;
-#else
-        (void)a;
-#endif
-        signal(SIGINT, SIG_DFL);
-        signal(SIGTERM, SIG_DFL);
-        signal(SIGPIPE, SIG_DFL);
-        sigset_t empty;
-        sigemptyset(&empty);
-        sigprocmask(SIG_SETMASK, &empty, NULL);
-        for (unsigned i = 0; i < 4; i++) {
-            if (pipes[i][0] > 2)
-                close(pipes[i][0]);
-            if (i < 3 && pipes[i][1] > 2)
-                close(pipes[i][1]);
-        }
-        if (!failure) {
-            if (a->restricted) {
-                sb_restricted_exec(a->restricted, argv[0], t->program->fd, argv, env,
-                                   a->limits.worker_memory_mb);
-                failure = errno;
-            } else {
-#ifdef __linux__
-                fexecve(t->program->fd, argv, env);
-#else
-                execve(argv[0], argv, env);
-#endif
-                failure = errno;
-            }
-        }
-        (void)write(pipes[3][1], &failure, sizeof(failure));
-        _exit(127);
+    for (unsigned i = 0; i < 3; i++) {
+        if (pipe(pipes[i])) { ok = false; break; }
+        fcntl(pipes[i][0], F_SETFD, FD_CLOEXEC);
+        fcntl(pipes[i][1], F_SETFD, FD_CLOEXEC);
     }
-    if (pid < 0) {
-        for (unsigned i = 0; i < 4; i++) {
-            close_fd(&pipes[i][0]);
-            close_fd(&pipes[i][1]);
-        }
-        sb_posix_error(e, "Fork command");
+    sb_command_spec spec = {.program = t->program->fd, .cwd = t->cwd->fd,
+        .input = pipes[0][0], .output = pipes[1][1], .error = pipes[2][1],
+        .argv = argv, .env = env, .restricted = a->restricted,
+        .memory_mb = a->limits.worker_memory_mb, .timeout_ms = t->timeout};
+    if (!ok || !sb_command_watch_start(&spec, &t->watch, e)) {
+        for (unsigned i = 0; i < 3; i++) { close_fd(&pipes[i][0]); close_fd(&pipes[i][1]); }
+        if (!ok) sb_posix_error(e, "Create command pipes");
         return false;
     }
-    t->pid = pid;
-    setpgid(pid, pid);
-    close_fd(&pipes[0][0]);
-    close_fd(&pipes[1][1]);
-    close_fd(&pipes[2][1]);
-    close_fd(&pipes[3][1]);
-    int exec_error = 0;
-    struct pollfd p = {.fd = pipes[3][0], .events = POLLIN};
-    int ready;
-    do {
-        ready = poll(&p, 1, 3000);
-    } while (ready < 0 && errno == EINTR);
-    ssize_t got = ready > 0 ? read(pipes[3][0], &exec_error, sizeof(exec_error)) : -1;
-    close_fd(&pipes[3][0]);
-    if (got != 0) {
-        kill(-pid, SIGKILL);
-        while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {
-        }
-        for (unsigned i = 0; i < 3; i++) {
-            close_fd(&pipes[i][0]);
-            close_fd(&pipes[i][1]);
-        }
-        errno = exec_error ? exec_error : ETIMEDOUT;
-        sb_posix_error(e, "Execute native command");
-        return false;
-    }
+    t->pid = t->watch.supervisor;
+    close_fd(&pipes[0][0]); close_fd(&pipes[1][1]); close_fd(&pipes[2][1]);
     t->in = pipes[0][1];
     t->out[0] = pipes[1][0];
     t->out[1] = pipes[2][0];
@@ -447,7 +375,7 @@ static yyjson_mut_val *handle(agent *a, const char *op, yyjson_val *args, yyjson
                     "Task capacity reached; retained request keys are never evicted within this instance.");
             goto fail;
         }
-        task fresh = {.in = -1, .out = {-1, -1}, .prepared = true, .dirty = false};
+        task fresh = {.in = -1, .out = {-1, -1}, .watch = {.fd = -1, .cancel_fd = -1}, .prepared = true, .dirty = false};
         const char *cwd = str(args, "cwd"), *exe = str(args, "executable"), *actor = str(args, "actor"),
                    *key = str(args, "request_key"), *hash = str(args, "request_sha256");
         if (!cwd || !exe || !actor || strlen(actor) >= 64 || !key || strlen(key) > 64 || !hash ||
@@ -695,10 +623,15 @@ int sb_posix_task_agent(int fd) {
     for (unsigned i = 0; i < a.count; i++) {
         task *t = &a.items[i];
         if (t->running) {
-            kill(-t->pid, SIGKILL);
-            while (waitpid(t->pid, NULL, 0) < 0 && errno == EINTR) {
+            sb_command_watch_cancel(&t->watch);
+            sb_command_watch_close(&t->watch);
+            int status;
+            if (!sb_posix_wait_child(t->pid, 3500, &status)) {
+                kill(t->pid, SIGTERM);
+                sb_posix_wait_child(t->pid, 3500, &status);
             }
         }
+        sb_command_watch_close(&t->watch);
         close_fd(&t->in);
         close_fd(&t->out[0]);
         close_fd(&t->out[1]);

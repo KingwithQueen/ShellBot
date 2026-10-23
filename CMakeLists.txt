@@ -47,7 +47,7 @@ add_executable(ShellBot
   PosixShellBot/manager.c PosixShellBot/credentials.c PosixShellBot/keyring.c PosixShellBot/oauth.c
   PosixShellBot/desktop.c PosixShellBot/desktop_png.c
   PosixShellBot/startup.c PosixShellBot/service_desktop.c
-  PosixShellBot/restricted.c PosixShellBot/admin.c PosixShellBot/admin_broker.c PosixShellBot/admin_desktop.c PosixShellBot/command_memory.c PosixShellBot/migration.c PosixShellBot/project_form.c
+  PosixShellBot/restricted.c PosixShellBot/admin.c PosixShellBot/admin_broker.c PosixShellBot/admin_desktop.c PosixShellBot/command_tree.c PosixShellBot/migration.c PosixShellBot/project_form.c
   core/config/config.c core/config/projects.c core/protocol/mcp.c
   core/policy/approval.c core/policy/audit.c core/policy/state.c core/policy/project_policy.c
   core/tools/tools.c core/tools/text.c core/tools/search.c core/tools/tasks.c
@@ -181,6 +181,13 @@ if(SHELLBOT_TESTS)
   set_tests_properties(startup-service PROPERTIES TIMEOUT 240)
   add_test(NAME command-identities COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/posix_commands.py $<TARGET_FILE:ShellBot>)
   set_tests_properties(command-identities PROPERTIES TIMEOUT 180)
+  foreach(test_file posix_process_tree.py posix_tree_fixture.c)
+    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/${test_file}")
+      message(FATAL_ERROR "Restore local tests/${test_file} before enabling SHELLBOT_TESTS.")
+    endif()
+  endforeach()
+  add_test(NAME process-tree COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/posix_process_tree.py $<TARGET_FILE:ShellBot>)
+  set_tests_properties(process-tree PROPERTIES TIMEOUT 180)
   add_test(NAME administrator-media COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/posix_admin_media.py $<TARGET_FILE:ShellBot> $<TARGET_FILE:sb_admin_contract>)
   set_tests_properties(administrator-media PROPERTIES TIMEOUT 180)
   add_test(NAME administrator-broker COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/posix_broker.py $<TARGET_FILE:ShellBot> $<TARGET_FILE:sb_broker_contract>)
