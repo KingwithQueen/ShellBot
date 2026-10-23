@@ -64,6 +64,9 @@ static void putText(NSTextView *view, NSString *text) {
 @property NSStatusItem *statusItem;
 @property NSTableView *projects, *requests;
 @property NSTextView *detail, *requestDetail, *desktopStatus;
+@property NSTextView *adminStatus;
+@property NSTextField *rootRegistry, *rootState;
+@property NSPopUpButton *approvalBackend;
 @property NSTextField *summary, *message, *port, *url, *startupStatus, *ownerEnv, *defaultProject;
 @property NSButton *http, *oauth, *persistent, *remoteOwner;
 @property NSMutableArray<NSDictionary *> *projectRows, *requestRows;
@@ -190,6 +193,9 @@ static void putText(NSTextView *view, NSString *text) {
     tab.view = desktopPage;
     [tabs addTabViewItem:tab];
     self.requests = [self table];
+    self.approvalBackend = [NSPopUpButton new];
+    [self.approvalBackend addItemsWithTitles:@[@"普通操作审批", @"管理员操作审批（独立审批池）"]];
+    self.approvalBackend.target = self; self.approvalBackend.action = @selector(approvalBackendChanged:);
     NSScrollView *requestList = scrolled(self.requests);
     [requestList.widthAnchor constraintEqualToConstant:300].active = YES;
     self.requestDetail = textView();
@@ -203,7 +209,7 @@ static void putText(NSTextView *view, NSString *text) {
         [self button:@"删除客户端" action:@"remove_client"]
     ]);
     NSStackView *requestRight = stack(
-        YES, @[ rd, self.persistent, label(@"未选中时为限时连接。连接授权不代替每次操作审批。"), decisions ]);
+        YES, @[ self.approvalBackend, rd, self.persistent, label(@"未选中时为限时连接。连接授权不代替每次操作审批。"), decisions ]);
     NSStackView *requests = stack(NO, @[ requestList, requestRight ]);
     [requestList.heightAnchor constraintEqualToAnchor:requests.heightAnchor].active = YES;
     [requestRight.heightAnchor constraintEqualToAnchor:requests.heightAnchor].active = YES;
@@ -213,6 +219,24 @@ static void putText(NSTextView *view, NSString *text) {
     tab.label = @"审批与连接";
     tab.view = requests;
     [tabs addTabViewItem:tab];
+    self.rootRegistry = [NSTextField new]; self.rootState = [NSTextField new]; self.adminStatus = textView();
+    NSScrollView *adminStatusScroll = scrolled(self.adminStatus);
+    [adminStatusScroll.heightAnchor constraintGreaterThanOrEqualToConstant:240].active = YES;
+    NSStackView *adminPage = stack(YES, @[
+        label(@"先把完整程序、与当前项目配置完全一致的注册表副本和独立状态目录放到 root 拥有的位置，再从该程序打开管理界面。系统授权只在点击启动时请求。"),
+        label(@"管理员项目配置副本"), self.rootRegistry, label(@"管理员独立状态目录"), self.rootState,
+        [self special:@"保存管理员设置" selector:@selector(adminSave:)],
+        stack(NO, @[[self special:@"启动管理员会话…" selector:@selector(adminStart:)],
+                    [self special:@"结束管理员会话…" selector:@selector(adminStop:)],
+                    [self special:@"取消授权等待" selector:@selector(adminCancel:)]]),
+        stack(NO, @[[self special:@"重启所选项目并连接…" selector:@selector(adminConnect:)],
+                    [self special:@"撤销所选项目授权…" selector:@selector(adminRevoke:)]]), adminStatusScroll
+    ]);
+    [self.rootRegistry.widthAnchor constraintEqualToAnchor:adminPage.widthAnchor].active = YES;
+    [self.rootState.widthAnchor constraintEqualToAnchor:adminPage.widthAnchor].active = YES;
+    [adminStatusScroll.widthAnchor constraintEqualToAnchor:adminPage.widthAnchor].active = YES;
+    tab = [[NSTabViewItem alloc] initWithIdentifier:@"administrator"]; tab.label = @"管理员";
+    tab.view = sb_macos_form_scroll(adminPage); [tabs addTabViewItem:tab];
     self.http = [NSButton checkboxWithTitle:@"启用本机 HTTP 网关（仅监听回环地址）" target:nil action:nil];
     self.oauth = [NSButton checkboxWithTitle:@"启用 OAuth 连接授权" target:nil action:nil];
     self.remoteOwner=[NSButton checkboxWithTitle:@"启用远程所有者操作审批（独立凭据）" target:nil action:nil];
@@ -406,6 +430,11 @@ static void putText(NSTextView *view, NSString *text) {
     char *desktopText = sb_gui_desktop_text([self value:"desktop"]);
     putText(self.desktopStatus, str(desktopText));
     free(desktopText);
+    char *adminText = sb_gui_admin_text([self value:"administrator"], self.selected.UTF8String,
+        sb_gui_bool(yyjson_doc_get_root(self.model), "administrator_connected"),
+        sb_gui_bool(yyjson_doc_get_root(self.model), "administrator_closing"));
+    putText(self.adminStatus, str(adminText)); free(adminText);
+    [self.approvalBackend selectItemAtIndex:!strcmp(sb_gui_string(yyjson_doc_get_root(self.model), "approval_backend"), "administrator") ? 1 : 0];
     if (!self.settingsLoaded) {
         yyjson_val *gateway = yyjson_obj_get([self value:"config"], "gateway"), *s = [self value:"settings"];
         self.port.stringValue = [NSString
@@ -416,6 +445,9 @@ static void putText(NSTextView *view, NSString *text) {
         self.remoteOwner.state=*sb_gui_string(gateway,"owner_token_env")?NSControlStateValueOn:NSControlStateValueOff;
         self.ownerEnv.stringValue=str(sb_gui_string(gateway,"owner_token_env"));self.defaultProject.stringValue=str(sb_gui_string(gateway,"default_project_id"));
         self.settingsLoaded = YES;
+        yyjson_val *admin = yyjson_obj_get(s, "administrator");
+        self.rootRegistry.stringValue = str(sb_gui_string(admin, "registry"));
+        self.rootState.stringValue = str(sb_gui_string(admin, "state"));
     }
     [self.projectRows removeAllObjects];
     size_t i, max;
@@ -485,7 +517,7 @@ static void putText(NSTextView *view, NSString *text) {
     if (self.busy)
         return;
     NSMutableDictionary *q = [request mutableCopy];
-    q[@"project"] = self.selected ?: @"";
+    if (![q[@"project"] isKindOfClass:[NSString class]]) q[@"project"] = self.selected ?: @"";
     NSData *bytes = [NSJSONSerialization dataWithJSONObject:q options:0 error:nil];
     NSString *json = [[NSString alloc] initWithData:bytes encoding:NSUTF8StringEncoding];
     self.busy = YES;
@@ -513,6 +545,37 @@ static void putText(NSTextView *view, NSString *text) {
 }
 - (void)submit:(NSString *)action {
     [self send:@{@"action" : action}];
+}
+- (void)approvalBackendChanged:(id)sender {
+    (void)sender;
+    if (self.rendering) return;
+    self.requestID = @""; self.requestType = @"";
+    [self send:@{@"action":@"approval_backend", @"backend":self.approvalBackend.indexOfSelectedItem == 1 ? @"administrator" : @"ordinary"}];
+}
+- (void)adminSave:(id)sender {
+    (void)sender;
+    [self send:@{@"action":@"admin_settings", @"root_registry":self.rootRegistry.stringValue, @"root_state":self.rootState.stringValue}];
+}
+- (void)adminStart:(id)sender {
+    (void)sender;
+    NSString *registry = [self.rootRegistry.stringValue copy], *state = [self.rootState.stringValue copy];
+    [self confirm:@"将按当前已保存的项目配置打开系统管理员授权。只有明确允许管理员操作的项目获得本次会话；启动后可重启所选项目以连接。ShellBot 不读取或保存密码。"
+        action:^{ [self send:@{@"action":@"admin_start", @"root_registry":registry, @"root_state":state}]; }];
+}
+- (void)adminStop:(id)sender {
+    (void)sender;
+    [self confirm:@"结束本窗口的管理员会话？所有所属管理员任务会结束，未提交上传会丢弃。普通项目可继续运行。" action:^{[self submit:@"admin_stop"];}];
+}
+- (void)adminCancel:(id)sender { (void)sender; sb_desktop_cancel(self.desktop); }
+- (void)adminConnect:(id)sender {
+    (void)sender; NSString *project = [self.selected copy];
+    [self confirm:[NSString stringWithFormat:@"重启项目 %@ 并连接管理员代理？该项目的当前任务会结束；其他项目保留。",project]
+        action:^{[self send:@{@"action":@"admin_connect_project",@"project":project}];}];
+}
+- (void)adminRevoke:(id)sender {
+    (void)sender; NSString *project = [self.selected copy];
+    [self confirm:[NSString stringWithFormat:@"撤销项目 %@ 的本次管理员授权？所属管理员任务会结束，其他项目保留。重新允许需要结束会话后再次授权。",project]
+        action:^{[self send:@{@"action":@"admin_revoke",@"project":project}];}];
 }
 - (void)desktopMenu:(NSMenuItem *)item {
     [self submit:item.representedObject];

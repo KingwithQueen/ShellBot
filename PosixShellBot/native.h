@@ -15,4 +15,5 @@ bool sb_gui_bool(yyjson_val *object, const char *key);
 char *sb_gui_project_text(yyjson_val *project, yyjson_val *gateway, yyjson_val *status);
 char *sb_gui_request_text(yyjson_val *request, yyjson_val *configuration);
 char *sb_gui_desktop_text(yyjson_val *state);
+char *sb_gui_admin_text(yyjson_val *state, const char *selected, bool connected, bool closing);
 #endif

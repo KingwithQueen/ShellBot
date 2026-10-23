@@ -1,5 +1,6 @@
 #include "admin.h"
 #include "admin_internal.h"
+#include "admin_desktop.h"
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <fcntl.h>
@@ -10,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 
 typedef struct {
     const sb_project *project;
@@ -28,6 +30,7 @@ struct admin_broker {
     uid_t uid;
     pthread_mutex_t mutex;
     bool failed;
+    int ui_fd;
     char id[33], snapshot[SB_PATH_CAP], snapshot_digest[65];
     admin_slot slots[SB_MAX_PROJECTS];
     bool (*spawn)(admin_broker *, admin_slot *, sb_error *);
@@ -202,8 +205,11 @@ static char *broker_request_locked(admin_broker *b, const char *bytes, size_t si
     for (size_t i = 0; i < b->registry.project_count; i++)
         if (!strcmp(id, b->slots[i].project->id))
             s = &b->slots[i];
-    if ((strcmp(command, "revoke") && strcmp(command, "restart")) || !s ||
-        !sb_config_keys(v, decision_keys, 5) || strcmp(broker_str(v, "expected_broker_id"), b->id) ||
+    bool project_owner = !strcmp(command, "project-owner");
+    static const char *const owner_keys[] = {"command", "project_id", "expected_broker_id",
+        "expected_project_sha256", "expected_generation", "request"};
+    if ((!project_owner && strcmp(command, "revoke") && strcmp(command, "restart")) || !s ||
+        !sb_config_keys(v, project_owner ? owner_keys : decision_keys, project_owner ? 6 : 5) || strcmp(broker_str(v, "expected_broker_id"), b->id) ||
         strcmp(broker_str(v, "expected_project_sha256"), s->digest) ||
         !yyjson_is_uint(yyjson_obj_get(v, "expected_generation")) ||
         yyjson_get_uint(yyjson_obj_get(v, "expected_generation")) != s->generation || !s->granted || b->failed) {
@@ -211,6 +217,21 @@ static char *broker_request_locked(admin_broker *b, const char *bytes, size_t si
         goto done;
     }
     sb_error e = {0};
+    if (project_owner) {
+        yyjson_val *request = yyjson_obj_get(v, "request");
+        const char *operation = broker_str(request, "command");
+        bool allowed = !strcmp(operation, "list") || !strcmp(operation, "inspect") ||
+            !strcmp(operation, "history") || !strcmp(operation, "approve") || !strcmp(operation, "deny") || !strcmp(operation, "revoke");
+        if (!allowed || !s->pid || strcmp(s->state, "connected"))
+            reply = sb_posix_json_error("管理员项目尚未连接，或该入口不接受此所有者操作。");
+        else {
+            char *wire = yyjson_val_write(request, 0, NULL);
+            reply = wire ? sb_owner_exchange(s->directory, wire, strlen(wire), &e) : NULL;
+            free(wire);
+            if (!reply) reply = sb_posix_json_error(*e.text ? e.text : "Administrator approval channel failed.");
+        }
+        goto done;
+    }
     if (!strcmp(command, "restart") && !snapshot_matches(b, &e)) {
         reply = sb_posix_json_error(e.text);
         goto done;
@@ -326,6 +347,7 @@ static bool broker_prepare(admin_broker *b, const char *bytes, size_t size, cons
     return broker_audit(b, NULL, "administrator_broker_started");
 }
 static void broker_release(admin_broker *b) {
+    if (b->ui_fd >= 0) { shutdown(b->ui_fd, SHUT_RDWR); close(b->ui_fd); b->ui_fd = -1; }
     /* Close every channel before waiting, so all project grants are revoked
        together even if one agent is slow to finish cancellation. */
     for (size_t i = 0; i < b->registry.project_count; i++)
@@ -341,20 +363,24 @@ static void broker_release(admin_broker *b) {
 }
 int sb_posix_admin_broker(int argc, char **argv) {
     sb_error e = {0};
-    const char *projects = NULL, *data = NULL, *owner = NULL;
+    const char *projects = NULL, *data = NULL, *owner = NULL, *ui_path = NULL, *ui_pid = NULL, *expected = NULL;
     int result = 2;
     admin_broker *b = calloc(1, sizeof(*b));
     char *bytes = NULL;
     if (!b)
         return 2;
+    b->ui_fd = -1;
     for (size_t i = 0; i < SB_MAX_PROJECTS; i++)
         b->slots[i].fd = -1;
     pthread_mutex_init(&b->mutex, NULL);
     for (int i = 2; i < argc; i++) {
         const char **slot = !strcmp(argv[i], "--projects") ? &projects : !strcmp(argv[i], "--owner-uid") ?
-                            &owner : !strcmp(argv[i], "--admin-dir") ? &data : NULL;
+                            &owner : !strcmp(argv[i], "--admin-dir") ? &data :
+                            !strcmp(argv[i], "--desktop-channel") ? &ui_path :
+                            !strcmp(argv[i], "--desktop-pid") ? &ui_pid :
+                            !strcmp(argv[i], "--expected-registry-sha256") ? &expected : NULL;
         if (!slot || *slot || i + 1 >= argc) {
-            sb_fail(&e, "Specify only projects, owner-uid and admin-dir for the shared administrator broker.");
+            sb_fail(&e, "Invalid or duplicate shared administrator broker option.");
             goto done;
         }
         *slot = argv[++i];
@@ -374,11 +400,28 @@ int sb_posix_admin_broker(int argc, char **argv) {
         goto done;
     }
     b->uid = (uid_t)uid;
+    unsigned long pid = 0;
+    if (ui_path || ui_pid || expected) {
+        errno = 0;
+        if (ui_pid && *ui_pid && strspn(ui_pid, "0123456789") == strlen(ui_pid)) pid = strtoul(ui_pid, NULL, 10);
+        if (!ui_path || !ui_pid || !expected || errno || pid <= 1 || pid > INT_MAX ||
+            strlen(expected) != 64 || strspn(expected, "0123456789abcdef") != 64) {
+            sb_fail(&e, "Native administrator startup requires a complete, bound UI request."); goto done;
+        }
+    }
     if (!sb_admin_trusted_path(sb_posix_program(), false, &e) ||
         !sb_admin_trusted_path(projects, false, &e) || !sb_admin_trusted_path(data, true, &e))
         goto done;
     size_t size;
     bytes = sb_platform_load_config(projects, &size, &e);
+    if (expected) {
+        char hash[65];
+        if (!bytes || !sb_platform_sha256(bytes, size, hash, &e) || strcmp(hash, expected)) {
+            sb_fail(&e, "Root registry does not exactly match the UI configuration reviewed for this authorization."); goto done;
+        }
+        b->ui_fd = sb_admin_desktop_connect(ui_path, b->uid, (pid_t)pid, &e);
+        if (b->ui_fd < 0) goto done;
+    }
     if (!bytes || !broker_prepare(b, bytes, size, data, &e))
         goto done;
     for (size_t i = 0; i < b->registry.project_count; i++)
@@ -387,6 +430,12 @@ int sb_posix_admin_broker(int argc, char **argv) {
     b->owner = sb_owner_start_handler(data, broker_request, b, &e);
     if (!b->owner)
         goto done;
+    if (b->ui_fd >= 0) {
+        char *hello = broker_request(b, "{\"command\":\"status\"}", 20);
+        bool sent = hello && sb_posix_frame_write(b->ui_fd, hello, 3000, &e);
+        free(hello);
+        if (!sent) goto done;
+    }
     fprintf(stderr, "Shared administrator broker %s started. Only the frozen, explicitly allowed projects "
                     "are granted. Ctrl+C revokes all sessions.\n", b->id);
     while (!sb_posix_signal && !sb_owner_stopping(b->owner)) {
@@ -397,6 +446,19 @@ int sb_posix_admin_broker(int argc, char **argv) {
         if (failed) {
             sb_fail(&e, "Shared administrator audit failed; revoking all project sessions.");
             goto done;
+        }
+        if (b->ui_fd >= 0) {
+            struct pollfd p = {.fd = b->ui_fd, .events = POLLIN};
+            if (poll(&p, 1, 0) > 0) {
+                if (p.revents & (POLLHUP | POLLERR | POLLNVAL)) break;
+                if (p.revents & POLLIN) {
+                    char *wire = sb_posix_frame_read(b->ui_fd, 3000, &e);
+                    if (!wire) break;
+                    char *reply = broker_request(b, wire, strlen(wire)); free(wire);
+                    bool sent = reply && sb_posix_frame_write(b->ui_fd, reply, 3000, &e); free(reply);
+                    if (!sent) break;
+                }
+            }
         }
         struct timespec pause = {.tv_nsec = 50000000};
         nanosleep(&pause, NULL);

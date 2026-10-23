@@ -3,6 +3,8 @@
 #include "project_form.h"
 #include "migration.h"
 #include "oauth.h"
+#include "admin_desktop.h"
+#include "admin_internal.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -28,6 +30,10 @@ struct sb_native_manager {
     atomic_bool cancel;
     pthread_mutex_t location_mutex;
     char *clipboard;
+    sb_admin_link administrator;
+    yyjson_doc *admin_state;
+    char approval_backend[16], inspected_backend[16], inspected_project[64], inspected_broker[33];
+    uint64_t inspected_generation;
 };
 const char *sb_gui_string(yyjson_val *o, const char *key) {
     const char *s = yyjson_get_str(yyjson_obj_get(o, key));
@@ -81,10 +87,12 @@ char *sb_gui_project_text(yyjson_val *p, yyjson_val *gateway, yyjson_val *status
              !strcmp(sb_gui_string(yyjson_obj_get(policy, "files"), "scope"), "current_user")
                  ? "当前账户可访问的文件"
                  : "仅所列目录");
-    add_text(out, &used, "普通命令：%s\n管理员权限：未启用\n\n目录：\n",
+    add_text(out, &used, "普通命令：%s\n管理员许可：%s\n\n目录：\n",
              sb_gui_bool(yyjson_obj_get(policy, "execution"), "enabled")
                  ? "允许以当前账户执行，仍按项目规则审批"
-                 : "未启用");
+                 : "未启用",
+             sb_gui_bool(yyjson_obj_get(policy, "execution"), "administrator_allowed")
+                 ? "已允许；当前会话状态见“管理员”页" : "未允许");
     const char *arrays[] = {"workspaces", "extra_directories"};
     for (unsigned j = 0; j < 2; j++)
         yyjson_arr_foreach(yyjson_obj_get(p, arrays[j]), i, max, v)
@@ -198,6 +206,7 @@ static bool online(sb_native_manager *g) {
     yyjson_doc_free(d);
     return ok;
 }
+static void admin_close(sb_native_manager *g);
 static bool private_dir(const char *path, sb_error *e) {
     if (mkdir(path, 0700) && errno != EEXIST) {
         sb_posix_error(e, "Create desktop directory");
@@ -510,6 +519,9 @@ done:
     return ok;
 }
 static bool stopped(sb_native_manager *g, sb_error *e) {
+    if (g->administrator.fd >= 0 || sb_admin_link_closing(&g->administrator)) {
+        sb_fail(e, "请先结束管理员会话，再修改或迁移项目配置。"); return false;
+    }
     if (online(g)) {
         sb_fail(e, "请先停止后台，再保存配置。停止会结束运行中的项目和命令。");
         return false;
@@ -824,12 +836,14 @@ static void copy_doc(yyjson_mut_doc *d, yyjson_mut_val *root, const char *key, y
     if (v)
         yyjson_mut_obj_add_val(d, root, key, v);
 }
+#include "native_admin.inl"
 #include "profile.inl"
 static char *snapshot(sb_native_manager *g) {
     yyjson_doc *cfg = registry(g), *state = exchange(g, "status", NULL, NULL), *s = settings(g),
                *oauth = NULL, *approvals = NULL, *desktop = NULL;
     sb_error startup_error={0};yyjson_doc *autostart=startup(g,"--startup-status",&startup_error);
     bool active = yyjson_obj_get(yyjson_doc_get_root(state), "manager_pid") != NULL;
+    sb_error admin_error = {0}; admin_refresh(g, &admin_error);
     if (!find(cfg, "projects", "id", g->selected)) {
         yyjson_val *first = yyjson_arr_get(yyjson_obj_get(yyjson_doc_get_root(cfg), "projects"), 0);
         snprintf(g->selected, sizeof(g->selected), "%s", sb_gui_string(first, "id"));
@@ -837,8 +851,11 @@ static char *snapshot(sb_native_manager *g) {
     if (active) {
         oauth = exchange(g, "oauth-status", NULL, NULL);
         sb_error e = {0};
-        approvals = parse(project_request(g, "{\"command\":\"list\"}", &e));
+        approvals = parse(approval_request(g, "{\"command\":\"list\"}", &e));
         desktop = parse(project_request(g, "{\"command\":\"desktop-status\"}", &e));
+    }
+    if (!active && !strcmp(g->approval_backend, "administrator")) {
+        sb_error e = {0}; approvals = parse(approval_request(g, "{\"command\":\"list\"}", &e));
     }
     yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
     yyjson_mut_val *v = yyjson_mut_obj(d);
@@ -852,6 +869,11 @@ static char *snapshot(sb_native_manager *g) {
     copy_doc(d, v, "oauth", oauth);
     copy_doc(d, v, "approvals", approvals);
     copy_doc(d, v, "desktop", desktop);
+    copy_doc(d, v, "administrator", g->admin_state);
+    yyjson_mut_obj_add_bool(d, v, "administrator_connected", g->administrator.fd >= 0);
+    yyjson_mut_obj_add_bool(d, v, "administrator_closing", g->administrator.fd < 0 && sb_admin_link_closing(&g->administrator));
+    yyjson_mut_obj_add_strcpy(d, v, "administrator_error", admin_error.text);
+    yyjson_mut_obj_add_strcpy(d, v, "approval_backend", g->approval_backend);
     copy_doc(d, v, "startup", autostart);
     yyjson_doc *pending=pending_migration(g);copy_doc(d,v,"migration_pending",pending);yyjson_doc_free(pending);
     yyjson_doc_free(autostart);
@@ -887,15 +909,17 @@ char *sb_desktop_work(sb_native_manager *g, const char *request) {
         g->child = 0;
     if (*project && strcmp(g->selected, project)) {
         snprintf(g->selected, sizeof(g->selected), "%s", project);
-        yyjson_doc_free(g->inspected);
-        g->inspected = NULL;
+        clear_inspection(g);
     }
     if (!strcmp(a, "refresh")) {
     } else if (!strcmp(a, "start_manager"))
         ok = launch(g, &e);
-    else if (!strcmp(a, "stop_manager"))
+    else if (!strcmp(a, "stop_manager")) {
+        admin_close(g);
         ok = stop_manager(g, &e);
+    }
     else if (!strcmp(a, "exit")) {
+        admin_close(g);
         if (g->child)
             ok = stop_manager(g, &e);
     } else if (!strcmp(a, "add") || !strcmp(a, "edit") || !strcmp(a, "remove") || !strcmp(a, "import"))
@@ -908,6 +932,20 @@ char *sb_desktop_work(sb_native_manager *g, const char *request) {
         ok = migrate_profile(g, q, !strcmp(a, "migrate_application"), &e);
     else if(!strcmp(a,"recover_migration"))
         ok=recover_migration(g,q,&e);
+    else if (!strcmp(a, "admin_settings")) ok = admin_save(g, q, &e);
+    else if (!strcmp(a, "admin_start")) {
+        if (yyjson_obj_get(q, "root_registry") || yyjson_obj_get(q, "root_state")) ok = admin_save(g, q, &e);
+        if (ok) ok = admin_start(g, &e);
+    }
+    else if (!strcmp(a, "admin_stop")) admin_close(g);
+    else if (!strcmp(a, "admin_revoke")) ok = admin_control(g, "revoke", &e);
+    else if (!strcmp(a, "admin_connect_project")) ok = admin_connect_project(g, &e);
+    else if (!strcmp(a, "approval_backend")) {
+        const char *backend = sb_gui_string(q, "backend");
+        ok = !strcmp(backend, "ordinary") || !strcmp(backend, "administrator");
+        if (ok) { snprintf(g->approval_backend, sizeof(g->approval_backend), "%s", backend); clear_inspection(g); }
+        else sb_fail(&e, "请选择普通或管理员审批池。");
+    }
     else if (!strcmp(a, "copy_owner_token"))
         ok = owner_credential(g, &e);
     else if (!strcmp(a,"startup_install") || !strcmp(a,"startup_uninstall")) {
@@ -941,7 +979,12 @@ char *sb_desktop_work(sb_native_manager *g, const char *request) {
         yyjson_mut_obj_add_str(out, v, "id", id);
         yyjson_val *inspected = yyjson_doc_get_root(g->inspected);
         if (strcmp(a, "inspect")) {
-            if (strcmp(id, sb_gui_string(inspected, "approval_id"))) {
+            bool anchor = !strcmp(g->inspected_backend, g->approval_backend) && !strcmp(g->inspected_project, g->selected);
+            if (anchor && !strcmp(g->approval_backend, "administrator")) {
+                anchor = admin_refresh(g, &e) && !strcmp(g->inspected_broker, sb_gui_string(yyjson_doc_get_root(g->admin_state), "broker_id")) &&
+                    g->inspected_generation == yyjson_get_uint(yyjson_obj_get(admin_selected(g), "generation"));
+            }
+            if (!anchor || strcmp(id, sb_gui_string(inspected, "approval_id"))) {
                 sb_fail(&e, "请先查看此操作的详细内容，再作出决定。");
                 ok = false;
             } else {
@@ -958,7 +1001,7 @@ char *sb_desktop_work(sb_native_manager *g, const char *request) {
             }
         }
         char *wire_bytes = sb_posix_json(out, v);
-        yyjson_doc *reply = ok ? parse(project_request(g, wire_bytes, &e)) : NULL;
+        yyjson_doc *reply = ok ? parse(approval_request(g, wire_bytes, &e)) : NULL;
         free(wire_bytes);
         if (ok) {
             ok = reply && !*sb_gui_string(yyjson_doc_get_root(reply), "error");
@@ -968,6 +1011,10 @@ char *sb_desktop_work(sb_native_manager *g, const char *request) {
         if (ok) {
             yyjson_doc_free(g->inspected);
             g->inspected = reply;
+            snprintf(g->inspected_backend, sizeof(g->inspected_backend), "%s", g->approval_backend);
+            snprintf(g->inspected_project, sizeof(g->inspected_project), "%s", g->selected);
+            snprintf(g->inspected_broker, sizeof(g->inspected_broker), "%s", sb_gui_string(yyjson_doc_get_root(g->admin_state), "broker_id"));
+            g->inspected_generation = yyjson_get_uint(yyjson_obj_get(admin_selected(g), "generation"));
         } else
             yyjson_doc_free(reply);
     } else if (!strcmp(a, "oauth-approve") || !strcmp(a, "oauth-deny") || !strcmp(a, "oauth-revoke") ||
@@ -1024,6 +1071,8 @@ sb_native_manager *sb_desktop_open(const char *directory, const char *key, sb_er
         return NULL;
     }
     g->lease = lease;
+    g->administrator.fd = -1;
+    snprintf(g->approval_backend, sizeof(g->approval_backend), "ordinary");
     atomic_init(&g->cancel, false);
     pthread_mutex_init(&g->location_mutex,NULL);
     snprintf(g->directory, sizeof(g->directory), "%s", lease->root->path);
@@ -1068,6 +1117,7 @@ void sb_desktop_cancel(sb_native_manager *g) { if (g) atomic_store(&g->cancel, t
 bool sb_desktop_raise(sb_native_manager *g) { pthread_mutex_lock(&g->location_mutex);bool raised=!unlinkat(g->lease->root->fd,"raise.request",0);pthread_mutex_unlock(&g->location_mutex);return raised; }
 void sb_desktop_close(sb_native_manager *g) {
     if (g) {
+        admin_close(g);
         yyjson_doc_free(g->inspected);
         if(g->clipboard){sb_posix_wipe(g->clipboard,strlen(g->clipboard));free(g->clipboard);}
         sb_platform_lease_close(g->lease);

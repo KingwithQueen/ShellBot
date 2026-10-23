@@ -13,6 +13,7 @@ typedef struct {
     GtkApplication *app;
     GtkWidget *window, *projects, *requests, *details, *request_detail, *message, *summary, *tray_label;
     GtkWidget *http, *oauth, *port, *url, *persistent, *desktop_status, *startup_status, *remote_owner, *owner_env, *default_project;
+    GtkWidget *admin_status, *root_registry, *root_state, *approval_backend;
     yyjson_doc *model;
     char project[64], request_id[65], request_type[32];
     bool busy, rendering, tray, quitting, settings_loaded;
@@ -143,6 +144,14 @@ static void render(void) {
         set_text(ui.desktop_status, status);
         free(status);
     }
+    if (ui.admin_status) {
+        char *status = sb_gui_admin_text(model("administrator"), ui.project,
+            sb_gui_bool(yyjson_doc_get_root(ui.model), "administrator_connected"),
+            sb_gui_bool(yyjson_doc_get_root(ui.model), "administrator_closing"));
+        set_text(ui.admin_status, status); free(status);
+    }
+    if (ui.approval_backend) gtk_drop_down_set_selected(GTK_DROP_DOWN(ui.approval_backend),
+        !strcmp(sb_gui_string(yyjson_doc_get_root(ui.model), "approval_backend"), "administrator") ? 1 : 0);
     if (!ui.settings_loaded) {
         yyjson_val *gateway = yyjson_obj_get(model("config"), "gateway"), *opts = model("settings");
         gtk_spin_button_set_value(GTK_SPIN_BUTTON(ui.port), yyjson_get_uint(yyjson_obj_get(gateway, "port")));
@@ -153,6 +162,9 @@ static void render(void) {
         gtk_editable_set_text(GTK_EDITABLE(ui.owner_env),sb_gui_string(gateway,"owner_token_env"));
         gtk_editable_set_text(GTK_EDITABLE(ui.default_project),sb_gui_string(gateway,"default_project_id"));
         ui.settings_loaded = true;
+        yyjson_val *admin = yyjson_obj_get(opts, "administrator");
+        gtk_editable_set_text(GTK_EDITABLE(ui.root_registry), sb_gui_string(admin, "registry"));
+        gtk_editable_set_text(GTK_EDITABLE(ui.root_state), sb_gui_string(admin, "state"));
     }
     clear_list(ui.projects);
     size_t i, max;
@@ -239,7 +251,7 @@ static void send_doc(yyjson_mut_doc *d, yyjson_mut_val *q) {
         yyjson_mut_doc_free(d);
         return;
     }
-    yyjson_mut_obj_add_strcpy(d, q, "project", ui.project);
+    if (!yyjson_mut_obj_get(q, "project")) yyjson_mut_obj_add_strcpy(d, q, "project", ui.project);
     char *bytes = sb_posix_json(d, q);
     ui.busy = true;
     GTask *task = g_task_new(NULL, NULL, done, NULL);
@@ -477,6 +489,56 @@ static void decision(GtkButton *b, gpointer data) {
     yyjson_mut_obj_add_bool(d, q, "persistent", gtk_check_button_get_active(GTK_CHECK_BUTTON(ui.persistent)));
     send_doc(d, q);
     gtk_check_button_set_active(GTK_CHECK_BUTTON(ui.persistent), FALSE);
+}
+static void approval_backend_changed(GObject *object, GParamSpec *spec, gpointer unused) {
+    (void)object; (void)spec; (void)unused;
+    if (ui.rendering || ui.busy) return;
+    ui.request_id[0] = ui.request_type[0] = 0;
+    yyjson_mut_doc *d = yyjson_mut_doc_new(NULL); yyjson_mut_val *q = yyjson_mut_obj(d);
+    yyjson_mut_obj_add_str(d, q, "action", "approval_backend");
+    yyjson_mut_obj_add_str(d, q, "backend", gtk_drop_down_get_selected(GTK_DROP_DOWN(ui.approval_backend)) == 1 ? "administrator" : "ordinary");
+    send_doc(d, q);
+}
+static void admin_save_clicked(GtkButton *button, gpointer unused) {
+    (void)button; (void)unused;
+    yyjson_mut_doc *d = yyjson_mut_doc_new(NULL); yyjson_mut_val *q = yyjson_mut_obj(d);
+    yyjson_mut_obj_add_str(d, q, "action", "admin_settings");
+    yyjson_mut_obj_add_strcpy(d, q, "root_registry", gtk_editable_get_text(GTK_EDITABLE(ui.root_registry)));
+    yyjson_mut_obj_add_strcpy(d, q, "root_state", gtk_editable_get_text(GTK_EDITABLE(ui.root_state)));
+    send_doc(d, q);
+}
+static void admin_cancel_clicked(GtkButton *button, gpointer unused) {
+    (void)button; (void)unused; sb_desktop_cancel(ui.desktop);
+}
+static void admin_confirmed(GObject *dialog, GAsyncResult *result, gpointer data) {
+    char *bytes = data;
+    if (gtk_alert_dialog_choose_finish(GTK_ALERT_DIALOG(dialog), result, NULL) == 0 && !ui.busy) {
+        yyjson_doc *q = yyjson_read(bytes, strlen(bytes), 0);
+        yyjson_mut_doc *d = yyjson_doc_mut_copy(q, NULL); yyjson_doc_free(q);
+        send_doc(d, yyjson_mut_doc_get_root(d));
+    }
+    free(bytes);
+}
+static void admin_clicked(GtkButton *button, gpointer data) {
+    (void)button; const char *action = data;
+    if (ui.busy) return;
+    yyjson_mut_doc *d = yyjson_mut_doc_new(NULL); yyjson_mut_val *q = yyjson_mut_obj(d);
+    yyjson_mut_obj_add_str(d, q, "action", action); yyjson_mut_obj_add_strcpy(d, q, "project", ui.project);
+    const char *message;
+    if (!strcmp(action, "admin_start")) {
+        yyjson_mut_obj_add_strcpy(d, q, "root_registry", gtk_editable_get_text(GTK_EDITABLE(ui.root_registry)));
+        yyjson_mut_obj_add_strcpy(d, q, "root_state", gtk_editable_get_text(GTK_EDITABLE(ui.root_state)));
+        message = "将按当前项目配置打开系统管理员授权。只有明确允许管理员操作的项目获得本次会话；启动后可重启所选项目以连接。ShellBot 不读取或保存密码。";
+    } else if (!strcmp(action, "admin_stop"))
+        message = "结束本窗口的全部管理员会话？所属管理员任务会结束，未提交上传会丢弃；普通项目保留。";
+    else if (!strcmp(action, "admin_revoke"))
+        message = "撤销所选项目的本次管理员授权？该项目的管理员任务会结束；其他项目保留。重新允许需要再次授权。";
+    else message = "重启所选项目并连接管理员代理？该项目当前任务会结束，其他项目保留。";
+    char *bytes = sb_posix_json(d, q);
+    GtkAlertDialog *dialog = gtk_alert_dialog_new("%s\n\n所选项目：%s", message, ui.project);
+    const char *buttons[] = {"继续", "取消", NULL}; gtk_alert_dialog_set_buttons(dialog, buttons);
+    gtk_alert_dialog_set_default_button(dialog, 1); gtk_alert_dialog_set_cancel_button(dialog, 1);
+    gtk_alert_dialog_choose(dialog, GTK_WINDOW(ui.window), NULL, admin_confirmed, bytes); g_object_unref(dialog);
 }
 /* KDE's deployed interface name is retained alongside the freedesktop interface. */
 static const char sni_xml[] =
@@ -921,6 +983,10 @@ static void activate(GtkApplication *app, gpointer data) {
     append(requests, rs);
     append(requests, rr);
     ui.request_detail = text();
+    const char *backends[] = {"普通操作审批", "管理员操作审批（独立审批池）", NULL};
+    ui.approval_backend = gtk_drop_down_new_from_strings(backends);
+    g_signal_connect(ui.approval_backend, "notify::selected", G_CALLBACK(approval_backend_changed), NULL);
+    append(rr, ui.approval_backend);
     append(rr, scroll(ui.request_detail));
     ui.persistent = gtk_check_button_new_with_label("持续授权至手动撤销：包括此项目今后允许的操作");
     append(rr, ui.persistent);
@@ -935,6 +1001,22 @@ static void activate(GtkApplication *app, gpointer data) {
     }
     append(rr, actions);
     gtk_notebook_append_page(GTK_NOTEBOOK(tabs), requests, gtk_label_new("审批与连接"));
+    GtkWidget *admin_box = box(true, 10);
+    append(admin_box, label("先把完整程序、与当前项目配置完全一致的注册表副本和独立状态目录放到 root 拥有的位置，再从该程序打开管理界面。系统授权只在点击启动时请求。"));
+    ui.root_registry = gtk_entry_new(); ui.root_state = gtk_entry_new(); ui.admin_status = text();
+    append(admin_box, label("管理员项目配置副本")); append(admin_box, ui.root_registry);
+    append(admin_box, label("管理员独立状态目录")); append(admin_box, ui.root_state);
+    b = gtk_button_new_with_label("保存管理员设置"); g_signal_connect(b, "clicked", G_CALLBACK(admin_save_clicked), NULL); append(admin_box, b);
+    GtkWidget *admin_actions = box(false, 6);
+    const char *admin_titles[] = {"启动管理员会话…", "结束会话…", "重启所选项目并连接…", "撤销所选项目授权…"};
+    const char *admin_verbs[] = {"admin_start", "admin_stop", "admin_connect_project", "admin_revoke"};
+    for (unsigned i = 0; i < 4; i++) {
+        if (i == 2) { append(admin_box, admin_actions); admin_actions = box(false, 6); }
+        b = gtk_button_new_with_label(admin_titles[i]); g_signal_connect(b, "clicked", G_CALLBACK(admin_clicked), (gpointer)admin_verbs[i]); append(admin_actions, b);
+        if (i == 1) { b = gtk_button_new_with_label("取消授权等待"); g_signal_connect(b, "clicked", G_CALLBACK(admin_cancel_clicked), NULL); append(admin_actions, b); }
+    }
+    append(admin_box, admin_actions); append(admin_box, scroll(ui.admin_status));
+    gtk_notebook_append_page(GTK_NOTEBOOK(tabs), admin_box, gtk_label_new("管理员"));
     GtkWidget *settings_box = box(true, 12);
     ui.http = gtk_check_button_new_with_label("启用本机 HTTP 网关（仅监听回环地址）");
     ui.oauth = gtk_check_button_new_with_label("启用 OAuth 连接授权");

@@ -145,6 +145,6 @@ POSIX `flock` 是协作式锁。目录定位与版本复核是文件工具的访
 
 脚本仅选择 CMake、POSIX 后端、共享 C 源码、源码依赖及已校验的 POSIX 媒体运行库，包含本机未提交的这些源码改动；不复制 `.git`、Windows 产物、Data 或 SSH 密钥。每次在远端指定根目录的 `.native-build/时间-随机值` 下新建源码和构建快照，核对逐文件 SHA-256 后编译，不覆盖现有文件，不运行安装操作。结果和取回的二进制保存在本机 `build/posix`，历史失败保留。
 
-现有约定将测试源保留在本机而不纳入 Git。恢复本机全部 `tests/posix_*` 副本后可增加 `-WithTests`。八组覆盖后台、桌面后端、媒体/产物、自启、命令、管理员文件/媒体请求、界面控制器及项目配置/审批/迁移；报告摘要须与取回的程序一致。管理员专项另构建不安装的 `sb_admin_contract`，以普通 UID 验证同一策略和私有 RPC，不代替真实 root 认证/权限效果。后台与控制器均使用独立夹具；托盘模拟和原生窗口检查另行记录。`-TestScope administrator-media`、`command-identities` 或 `project-profile` 仅运行相应专项，不代替完整回归。`-Sanitizers` 为相关自有代码启用地址/未定义行为检查，不声称系统框架和第三方静态库已插桩。生产构建使用 `SHELLBOT_TESTS=OFF`，不包含测试入口或管理员测试程序。
+现有约定将测试源保留在本机而不纳入 Git。恢复本机全部 `tests/posix_*` 副本后可增加 `-WithTests`。十组覆盖后台、桌面后端、媒体/产物、自启、命令、管理员文件/媒体请求、界面控制器、项目配置/审批/迁移、多项目管理员监督器和原生管理员管理；报告摘要须与取回的程序一致。管理员专项另构建不安装的 `sb_admin_contract`，以普通 UID 验证同一策略和私有 RPC，不代替真实 root 认证/权限效果。后台与控制器均使用独立夹具；托盘模拟和原生窗口检查另行记录。管理员管理另有普通 UID 的 `sb_admin_ui_contract`，验证控制器、监督器及审批策略的联通与失效绑定，不代替系统授权或实际 root。`-TestScope administrator-ui`、`administrator-broker`、`administrator-media`、`command-identities` 或 `project-profile` 仅运行相应专项，不代替完整回归。`-Sanitizers` 为相关自有代码启用地址/未定义行为检查，不声称系统框架和第三方静态库已插桩。生产构建使用 `SHELLBOT_TESTS=OFF`，不包含测试入口或管理员测试程序。
 
 本阶段的 SSH、原生后台、隔离文件与 HTTP 测试不等于真实 MCP 客户端、OAuth、GUI、物理桌面或跨发行版发布验收。

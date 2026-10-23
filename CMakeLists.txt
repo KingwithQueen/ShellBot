@@ -47,7 +47,7 @@ add_executable(ShellBot
   PosixShellBot/manager.c PosixShellBot/credentials.c PosixShellBot/keyring.c PosixShellBot/oauth.c
   PosixShellBot/desktop.c PosixShellBot/desktop_png.c
   PosixShellBot/startup.c
-  PosixShellBot/restricted.c PosixShellBot/admin.c PosixShellBot/admin_broker.c PosixShellBot/command_memory.c PosixShellBot/migration.c PosixShellBot/project_form.c
+  PosixShellBot/restricted.c PosixShellBot/admin.c PosixShellBot/admin_broker.c PosixShellBot/admin_desktop.c PosixShellBot/command_memory.c PosixShellBot/migration.c PosixShellBot/project_form.c
   core/config/config.c core/config/projects.c core/protocol/mcp.c
   core/policy/approval.c core/policy/audit.c core/policy/state.c core/policy/project_policy.c
   core/tools/tools.c core/tools/text.c core/tools/search.c core/tools/tasks.c
@@ -171,6 +171,16 @@ if(SHELLBOT_TESTS)
   add_test(NAME administrator-broker COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/posix_broker.py $<TARGET_FILE:ShellBot> $<TARGET_FILE:sb_broker_contract>)
   set_tests_properties(administrator-broker PROPERTIES TIMEOUT 180)
   if(SHELLBOT_DESKTOP)
+    get_target_property(admin_ui_sources ShellBot SOURCES)
+    list(FILTER admin_ui_sources EXCLUDE REGEX "PosixShellBot/(main\\.c|admin\\.c|admin_broker\\.c|admin_desktop\\.c|native\\.c|gtk\\.c|cocoa\\.m|cocoa_project\\.m)$")
+    add_executable(sb_admin_ui_contract tests/posix_admin_ui_contract.c ${admin_ui_sources})
+    target_include_directories(sb_admin_ui_contract PRIVATE $<TARGET_PROPERTY:ShellBot,INCLUDE_DIRECTORIES>)
+    target_compile_definitions(sb_admin_ui_contract PRIVATE $<TARGET_PROPERTY:ShellBot,COMPILE_DEFINITIONS>)
+    target_compile_options(sb_admin_ui_contract PRIVATE $<TARGET_PROPERTY:ShellBot,COMPILE_OPTIONS>)
+    target_link_options(sb_admin_ui_contract PRIVATE $<TARGET_PROPERTY:ShellBot,LINK_OPTIONS>)
+    target_link_libraries(sb_admin_ui_contract PRIVATE $<TARGET_PROPERTY:ShellBot,LINK_LIBRARIES>)
+    add_test(NAME administrator-ui COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/posix_admin_ui.py $<TARGET_FILE:ShellBot> $<TARGET_FILE:sb_admin_ui_contract>)
+    set_tests_properties(administrator-ui PROPERTIES TIMEOUT 180)
     if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/posix_desktop.py")
       message(FATAL_ERROR "Restore local tests/posix_desktop.py before enabling desktop tests.")
     endif()
