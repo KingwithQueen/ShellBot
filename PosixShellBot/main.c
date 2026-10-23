@@ -16,7 +16,7 @@
 #include <fcntl.h>
 volatile sig_atomic_t sb_posix_signal=0;
 static void interrupt(int signal_number){sb_posix_signal=signal_number;}
-static void usage(void){puts("ShellBot POSIX phase 9 (C17)\n"
+static void usage(void){puts("ShellBot POSIX phase 10 (C17)\n"
     "  sudo ShellBot --admin-agent --projects ROOT_OWNED_REGISTRY --project ID --owner-uid UID --admin-dir ROOT_PRIVATE_DIR\n"
     "  ShellBot --startup-plan|--startup-install --kind desktop|user-service|system-service --name ID --startup-dir ABS [runtime options]\n"
     "  ShellBot --startup-status|--startup-start|--startup-stop|--startup-uninstall --startup-dir ABS\n"
@@ -76,7 +76,7 @@ int main(int argc,char **argv){
     sb_error error={0};
     if(argc==2&&!strcmp(argv[1],"--help")){usage();return 0;}
     if(argc==2&&!strcmp(argv[1],"--desktop-permissions")){yyjson_mut_doc *doc=yyjson_mut_doc_new(NULL);char *text=sb_posix_json(doc,sb_os_desktop_permissions(doc));if(!text)return 2;puts(text);free(text);return 0;}
-    if(argc==2&&!strcmp(argv[1],"--version")){puts("ShellBot " SB_VERSION " (C17; POSIX phase 9)");return 0;}
+    if(argc==2&&!strcmp(argv[1],"--version")){puts("ShellBot " SB_VERSION " (C17; POSIX phase 10)");return 0;}
     if(argc==2&&!strcmp(argv[1],"--generate-token")){unsigned char b[32];if(!sb_platform_random(b,sizeof(b),&error))return 2;for(unsigned i=0;i<32;i++)printf("%02x",b[i]);puts("");memset(b,0,sizeof(b));return 0;}
     sb_host host={0};sb_config_defaults(&host.config);host.started_ms=sb_platform_millis();sb_project_registry registry={0};
     const char *config=NULL,*root=NULL,*data=NULL,*projects=NULL,*project_id=NULL,*port=NULL,*command=NULL,*id=NULL,*requestfile=NULL;

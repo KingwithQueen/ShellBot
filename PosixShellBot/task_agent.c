@@ -1,5 +1,6 @@
 #include "posix.h"
 #include "restricted.h"
+#include "command_memory.h"
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <sys/resource.h>
@@ -34,8 +35,9 @@ typedef struct {
     unsigned char *bytes[2];
     size_t length[2];
     input inputs[INPUTS];
-    unsigned input_count;
-    uint64_t started, timeout;
+    unsigned input_count,memory_failures;
+    char memory_error[256];
+    uint64_t started, timeout,memory_peak;
     bool prepared, running, finished, dirty, input_closed;
     int exit_code;
     const char *reason;
@@ -100,6 +102,11 @@ static yyjson_mut_val *snapshot(task *t, yyjson_mut_doc *d, bool history) {
         yyjson_mut_obj_add_int(d, v, "exit_code", t->exit_code);
     yyjson_mut_obj_add_uint(d, v, "stdout_bytes", t->length[0]);
     yyjson_mut_obj_add_uint(d, v, "stderr_bytes", t->length[1]);
+#ifdef __APPLE__
+    yyjson_mut_obj_add_uint(d,v,"memory_peak_bytes",t->memory_peak);
+    yyjson_mut_obj_add_str(d,v,"memory_accounting","sampled_process_group_physical_footprint");
+    if(*t->memory_error)yyjson_mut_obj_add_strcpy(d,v,"memory_monitor_error",t->memory_error);
+#endif
     yyjson_mut_val *receipts = yyjson_mut_arr(d);
     for (unsigned i = 0; i < t->input_count; i++) {
         input *p = &t->inputs[i];
@@ -145,6 +152,9 @@ static task *find(agent *a, yyjson_val *args, bool key) {
 static void stop_task(task *t, const char *reason) {
     if (t->running) {
         kill(-t->pid, SIGKILL);
+        /* The unreaped leader cannot be reused. Account commands may move
+           themselves to another group; never signal that unrelated group. */
+        kill(t->pid,SIGKILL);
         if (!t->reason)
             t->reason = reason;
     }
@@ -181,6 +191,19 @@ static void tick(agent *a) {
             continue;
         drain(t, 0, a);
         drain(t, 1, a);
+#ifdef __APPLE__
+        if(!t->reason){
+            uint64_t usage=0;sb_error error={0};
+            if(!sb_command_memory(t->pid,&usage,&error)){
+                /* libproc can lose a process during exit before waitid sees it.
+                   Three failed samples bound the grace period; no successful
+                   sample is fabricated and the exit is still reaped below. */
+                if(++t->memory_failures>=3){snprintf(t->memory_error,sizeof(t->memory_error),"%s",error.text);stop_task(t,"memory_monitor_unavailable");}
+            }
+            else {t->memory_failures=0;if(usage>t->memory_peak)t->memory_peak=usage;
+                if(usage>(uint64_t)a->limits.worker_memory_mb*1024u*1024u)stop_task(t,"memory_limit");}
+        }
+#endif
         if (sb_platform_millis() - t->started >= t->timeout)
             stop_task(t, "timed_out");
         for (unsigned j = 0; j < t->input_count; j++) {

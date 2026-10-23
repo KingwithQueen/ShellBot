@@ -58,6 +58,7 @@ static bool initialize(sb_error *error) {
     struct stat st, now;
     bool ok = file >= 0 && !fstat(file, &st) && S_ISREG(st.st_mode) && st.st_nlink == 1 && st.st_size > 0 &&
               st.st_size < 16 * 1024 * 1024;
+    if(geteuid()==0&&ok)ok=st.st_uid==0&&!(st.st_mode&0022);
     sb_sha sha;
     sb_sha_init(&sha);
     unsigned char bytes[32768];

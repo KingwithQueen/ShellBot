@@ -276,7 +276,10 @@ yyjson_mut_val *sb_execution_status(sb_execution *x, yyjson_mut_doc *d) {
 #ifdef __linux__
     yyjson_mut_obj_add_str(d, v, "memory_limit", "per-command RLIMIT_AS; excludes supervisor and worker");
 #else
-    yyjson_mut_obj_add_str(d, v, "memory_limit", "worker_memory_mb is not enforced on macOS");
+    yyjson_mut_obj_add_str(d, v, "memory_limit", "sampled command process-group physical footprint; kill on excess; excludes supervisor and worker");
+    yyjson_mut_obj_add_uint(d,v,"memory_sample_interval_ms",20);
+    yyjson_mut_obj_add_uint(d,v,"memory_failure_grace_samples",3);
+    yyjson_mut_obj_add_bool(d,v,"memory_allocation_hard_limit",false);
 #endif
     return v;
 }

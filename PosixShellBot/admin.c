@@ -1,5 +1,6 @@
 #include "admin.h"
 #include "sb_projects.h"
+#include "media.h"
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -19,9 +20,8 @@ typedef struct {
 } connection;
 static const char *str(yyjson_val *v, const char *k) { return sb_string(yyjson_obj_get(v, k)); }
 static bool eligible(const sb_project *p) {
-    return p && p->enabled && !p->legacy_compatibility && p->policy.execution_enabled &&
-           p->policy.administrator_allowed && p->policy.default_identity == SB_ID_CURRENT_USER &&
-           p->policy.file_scope == SB_FILES_CURRENT_USER;
+    return p && p->enabled && !p->legacy_compatibility && p->policy.administrator_allowed &&
+           p->policy.default_identity == SB_ID_CURRENT_USER && p->policy.file_scope == SB_FILES_CURRENT_USER;
 }
 static bool digest(const sb_project *p, char hash[65], sb_error *e) {
     yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
@@ -35,6 +35,7 @@ static bool digest(const sb_project *p, char hash[65], sb_error *e) {
     yyjson_mut_obj_add_uint(d, v, "revision", p->policy_revision);
     yyjson_mut_obj_add_uint(d, v, "tools", p->policy.tools);
     yyjson_mut_obj_add_uint(d, v, "approval", p->policy.approval_mode);
+    yyjson_mut_obj_add_bool(d, v, "execution_enabled", p->policy.execution_enabled);
     yyjson_mut_obj_add_uint(d, v, "ttl", p->approval_ttl_seconds);
     yyjson_mut_obj_add_uint(d, v, "audit", p->audit_max_bytes);
     yyjson_mut_obj_add_bool(d, v, "read_only", p->policy.current_user_read_only);
@@ -177,11 +178,14 @@ void sb_posix_admin_close(sb_host *h) {
     h->administrator_context = NULL;
     h->administrator_backend = false;
 }
+static bool proxied_tool(const char *name) {
+    int tool = sb_project_tool_index(name);
+    return tool >= 2 && (tool < 15 || tool >= 27);
+}
 char *sb_posix_administrator_call(sb_host *h, const char *actor, const char *name, yyjson_val *args) {
-    bool task = !strncmp(name, "task_", 5),
-         approval = !strcmp(name, "approval_status") || !strcmp(name, "approval_cancel");
-    if (!task && !approval && strcmp(name, "owner-request"))
-        return sb_posix_json_error("POSIX administrator backend grants command tasks only.");
+    if (!name || (!proxied_tool(name) && strcmp(name, "owner-request")))
+        return sb_posix_json_error(
+            "Administrator proxy accepts enabled file, media, transfer and task tools only.");
     if (!eligible(h->project) || !sb_posix_administrator_available(h))
         return sb_posix_json_error("Project administrator agent is unavailable; the local owner must "
                                    "explicitly start and bind a new session.");
@@ -198,19 +202,20 @@ char *sb_posix_administrator_call(sb_host *h, const char *actor, const char *nam
     sb_error e = {0};
     bool sent = wire && sb_posix_frame_write(c->fd, wire, 5000, &e);
     free(wire);
-    char *reply = sent ? sb_posix_frame_read(c->fd, 8000, &e) : NULL;
+    char *reply = sent ? sb_posix_frame_read(c->fd, 30000, &e) : NULL;
     if (!reply) {
         shutdown(c->fd, SHUT_RDWR);
         h->administrator_backend = false;
     }
     pthread_mutex_unlock(&c->mutex);
     return reply ? reply
-                 : sb_posix_json_error("Administrator channel closed; inspect existing task effects. No "
+                 : sb_posix_json_error("Administrator channel closed; inspect possible operation effects. No "
                                        "request was replayed or downgraded.");
 }
 char *sb_posix_admin_owner(sb_host *h, const char *request) {
     yyjson_doc *d = yyjson_read(request, strlen(request), 0);
-    char *reply = d ? sb_posix_administrator_call(h, "remote-owner", "owner-request", yyjson_doc_get_root(d)) : NULL;
+    char *reply =
+        d ? sb_posix_administrator_call(h, "remote-owner", "owner-request", yyjson_doc_get_root(d)) : NULL;
     yyjson_doc_free(d);
     return reply;
 }
@@ -255,7 +260,7 @@ static bool initialize(sb_host *h, const sb_project *p, const char *data, const 
     h->started_ms = sb_platform_millis();
     sb_config_defaults(&h->config);
     h->config.data_dir = sb_strdup(data);
-    h->config.execution_enabled = true;
+    h->config.execution_enabled = p->policy.execution_enabled;
     h->config.execution_profile = SB_EXEC_ADMINISTRATOR;
     h->config.limits = p->limits;
     h->config.approval_ttl_seconds = p->approval_ttl_seconds;
@@ -287,11 +292,39 @@ static bool initialize(sb_host *h, const sb_project *p, const char *data, const 
         return false;
     sb_policy_store(h->policy, h->store);
     sb_policy_limit(h->policy, p->limits.approval_records);
+    h->transfers = sb_transfers_new(e);
+    if (!h->transfers)
+        return false;
     if (!sb_posix_execution_bind(h->execution, h, e))
         return false;
     h->owner = sb_owner_start(h, e);
     return h->owner && sb_audit_project(h->audit, "administrator_session_bound", p->id, p->policy_revision,
                                         (uint64_t)getpid());
+}
+static char *dispatch(sb_host *h, yyjson_val *v) {
+    static const char *const keys[] = {"actor", "name", "args"};
+    const char *actor = str(v, "actor"), *name = str(v, "name");
+    yyjson_val *args = yyjson_obj_get(v, "args");
+    if (!sb_config_keys(v, keys, 3) || !actor || !*actor || strlen(actor) >= 64 || !name ||
+        !yyjson_is_obj(args))
+        return sb_posix_json_error("Invalid private administrator operation envelope.");
+    if (!strcmp(actor, "remote-owner") && !strcmp(name, "owner-request")) {
+        char *operation = yyjson_val_write(args, 0, NULL);
+        char *reply =
+            operation ? sb_policy_owner_request_actor(h->policy, operation, strlen(operation), actor) : NULL;
+        free(operation);
+        return reply ? reply : sb_posix_json_error("Administrator owner request unavailable.");
+    }
+    if (!proxied_tool(name))
+        return sb_posix_json_error("Administrator operation request rejected.");
+    yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
+    if (!d)
+        return sb_posix_json_error("Out of memory.");
+    yyjson_mut_val *reply = sb_tool_call(h, actor, name, args, d);
+    if (reply)
+        return sb_posix_json(d, reply);
+    yyjson_mut_doc_free(d);
+    return sb_posix_json_error("Administrator operation request rejected.");
 }
 int sb_posix_admin_agent(int argc, char **argv) {
     sb_error e = {0};
@@ -334,7 +367,7 @@ int sb_posix_admin_agent(int argc, char **argv) {
         goto done;
     const sb_project *p = sb_project_find(&registry, id);
     if (!eligible(p)) {
-        sb_fail(&e, "Selected project does not grant administrator commands.");
+        sb_fail(&e, "Selected project does not grant administrator operations.");
         goto done;
     }
     char wanted[65];
@@ -412,30 +445,7 @@ int sb_posix_admin_agent(int argc, char **argv) {
             break;
         yyjson_doc *request = yyjson_read(wire, strlen(wire), 0);
         free(wire);
-        yyjson_val *v = yyjson_doc_get_root(request);
-        const char *actor = str(v, "actor"), *name = str(v, "name");
-        yyjson_val *args = yyjson_obj_get(v, "args");
-        bool owner = actor && !strcmp(actor, "remote-owner") && name && !strcmp(name, "owner-request");
-        bool allowed = actor && *actor && strlen(actor) < 64 && name &&
-                       (!strncmp(name, "task_", 5) || !strcmp(name, "approval_status") ||
-                        !strcmp(name, "approval_cancel")) &&
-                       yyjson_is_obj(args);
-        if (owner && yyjson_is_obj(args)) {
-            char *operation = yyjson_val_write(args, 0, NULL);
-            wire = operation ? sb_policy_owner_request_actor(h.policy, operation, strlen(operation), "remote-owner") : NULL;
-            free(operation);
-            yyjson_doc_free(request);
-            bool sent = wire && sb_posix_frame_write(fd, wire, 5000, &e);
-            free(wire);
-            if (!sent) break;
-            continue;
-        }
-        yyjson_mut_doc *d = yyjson_mut_doc_new(NULL);
-        yyjson_mut_val *reply = allowed && d ? sb_tool_call(&h, actor, name, args, d) : NULL;
-        wire =
-            reply ? sb_posix_json(d, reply) : sb_posix_json_error("Administrator command request rejected.");
-        if (!reply)
-            yyjson_mut_doc_free(d);
+        wire = dispatch(&h, yyjson_doc_get_root(request));
         yyjson_doc_free(request);
         bool sent = wire && sb_posix_frame_write(fd, wire, 5000, &e);
         free(wire);
@@ -451,6 +461,7 @@ done:
     if (bound)
         unlink(address.sun_path);
     sb_owner_stop(h.owner);
+    sb_transfers_free(h.transfers);
     sb_execution_free(h.execution);
     sb_policy_free(h.policy);
     sb_store_free(h.store);
@@ -458,6 +469,7 @@ done:
     sb_platform_lease_close(h.lease);
     sb_config_free(&h.config);
     sb_projects_free(&registry);
+    sb_media_shutdown();
     if (result)
         fprintf(stderr, "ShellBot administrator: %s\n",
                 *e.text ? e.text : "Native agent initialization failed.");

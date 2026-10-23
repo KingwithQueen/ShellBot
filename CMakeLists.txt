@@ -47,7 +47,7 @@ add_executable(ShellBot
   PosixShellBot/manager.c PosixShellBot/credentials.c PosixShellBot/keyring.c PosixShellBot/oauth.c
   PosixShellBot/desktop.c PosixShellBot/desktop_png.c
   PosixShellBot/startup.c
-  PosixShellBot/restricted.c PosixShellBot/admin.c PosixShellBot/migration.c PosixShellBot/project_form.c
+  PosixShellBot/restricted.c PosixShellBot/admin.c PosixShellBot/command_memory.c PosixShellBot/migration.c PosixShellBot/project_form.c
   core/config/config.c core/config/projects.c core/protocol/mcp.c
   core/policy/approval.c core/policy/audit.c core/policy/state.c core/policy/project_policy.c
   core/tools/tools.c core/tools/text.c core/tools/search.c core/tools/tasks.c
@@ -118,6 +118,21 @@ if(SHELLBOT_SANITIZERS)
 endif()
 if(SHELLBOT_TESTS)
   target_compile_definitions(ShellBot PRIVATE SHELLBOT_TESTS=1)
+  # A separate, non-installed test host uses the actual administrator dispatcher
+  # without root. No diagnostic command is added to the production executable.
+  foreach(test_file posix_admin_contract.c posix_admin_media.py)
+    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/${test_file}")
+      message(FATAL_ERROR "Restore local tests/${test_file} before enabling SHELLBOT_TESTS.")
+    endif()
+  endforeach()
+  get_target_property(admin_contract_sources ShellBot SOURCES)
+  list(FILTER admin_contract_sources EXCLUDE REGEX "PosixShellBot/(main\\.c|admin\\.c|native\\.c|gtk\\.c|cocoa\\.m|cocoa_project\\.m)$")
+  add_executable(sb_admin_contract tests/posix_admin_contract.c ${admin_contract_sources})
+  target_include_directories(sb_admin_contract PRIVATE $<TARGET_PROPERTY:ShellBot,INCLUDE_DIRECTORIES>)
+  target_compile_definitions(sb_admin_contract PRIVATE $<TARGET_PROPERTY:ShellBot,COMPILE_DEFINITIONS>)
+  target_compile_options(sb_admin_contract PRIVATE $<TARGET_PROPERTY:ShellBot,COMPILE_OPTIONS>)
+  target_link_options(sb_admin_contract PRIVATE $<TARGET_PROPERTY:ShellBot,LINK_OPTIONS>)
+  target_link_libraries(sb_admin_contract PRIVATE $<TARGET_PROPERTY:ShellBot,LINK_LIBRARIES>)
   enable_testing()
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
   add_library(sb_test_clock SHARED tests/posix_clock.c)
@@ -138,6 +153,8 @@ if(SHELLBOT_TESTS)
   set_tests_properties(startup-service PROPERTIES TIMEOUT 240)
   add_test(NAME command-identities COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/posix_commands.py $<TARGET_FILE:ShellBot>)
   set_tests_properties(command-identities PROPERTIES TIMEOUT 180)
+  add_test(NAME administrator-media COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/posix_admin_media.py $<TARGET_FILE:ShellBot> $<TARGET_FILE:sb_admin_contract>)
+  set_tests_properties(administrator-media PROPERTIES TIMEOUT 180)
   if(SHELLBOT_DESKTOP)
     if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/posix_desktop.py")
       message(FATAL_ERROR "Restore local tests/posix_desktop.py before enabling desktop tests.")
@@ -158,6 +175,7 @@ install(FILES docs/POSIX_MEDIA.md DESTINATION share/ShellBot)
 install(FILES docs/POSIX_STARTUP.md DESTINATION share/ShellBot)
 install(FILES docs/POSIX_COMMANDS.md DESTINATION share/ShellBot)
 install(FILES docs/POSIX_PROJECTS.md DESTINATION share/ShellBot)
+install(FILES docs/POSIX_ACCEPTANCE.md DESTINATION share/ShellBot)
 install(FILES config/posix-media.example.json DESTINATION share/ShellBot/examples)
 install(FILES LICENSE.txt DESTINATION share/ShellBot/licenses)
 install(FILES third_party/yyjson/LICENSE DESTINATION share/ShellBot/licenses RENAME yyjson-LICENSE)

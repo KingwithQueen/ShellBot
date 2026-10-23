@@ -1,10 +1,11 @@
 param(
     [ValidateSet('all','mac','linux')][string]$Target='all',
     [string]$ConnectionFile,
+    [string]$SshDirectory,
     [ValidateSet('Debug','Release')][string]$Configuration='Debug',
     [switch]$WithTests,
     [switch]$Sanitizers,
-    [ValidateSet('all','project-profile')][string]$TestScope='all'
+    [ValidateSet('all','project-profile','administrator-media','command-identities')][string]$TestScope='all'
 )
 $ErrorActionPreference='Stop'
 if($TestScope -ne 'all' -and !$WithTests){throw 'TestScope requires -WithTests.'}
@@ -35,9 +36,11 @@ $files+='docs/POSIX_STARTUP.md';$files+='docs/POSIX_MEDIA.md';$files+='config/po
 if($WithTests){$files+='tests/posix_media.py';$files+='tests/posix_startup.py'}
 $files+='docs/POSIX_COMMANDS.md'
 $files+='docs/POSIX_PROJECTS.md'
+$files+='docs/POSIX_ACCEPTANCE.md'
 $files+='config/posix-restricted.example.json';$files+='config/posix-admin.example.json'
 if($WithTests){$files+='tests/posix_commands.py';$files+='tests/posix_command_fixture.c'}
 if($WithTests){$files+='tests/posix_profile.py'}
+if($WithTests){$files+='tests/posix_admin_contract.c';$files+='tests/posix_admin_media.py'}
 $files=@($files|Sort-Object -Unique)
 $hashes=foreach($file in $files){$path=Join-Path $repo $file;if(!(Test-Path -LiteralPath $path -PathType Leaf)){throw "Missing input: $file"};((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()+'  '+$file)}
 [IO.File]::WriteAllText((Join-Path $runDir 'SOURCE_SHA256SUMS'),($hashes -join "`n")+"`n",[Text.UTF8Encoding]::new($false))
@@ -49,8 +52,10 @@ if($LASTEXITCODE -ne 0){throw 'Cannot archive selected source inputs.'}
 & tar -rf $archive -C $runDir SOURCE_SHA256SUMS
 if($LASTEXITCODE -ne 0){throw 'Cannot append source verification manifest.'}
 function Quote-Sh([string]$Text){return "'"+$Text.Replace("'","'\''")+"'"}
-$ssh=Join-Path $env:WINDIR 'System32\OpenSSH\ssh.exe'
-$scp=Join-Path $env:WINDIR 'System32\OpenSSH\scp.exe'
+if(!$SshDirectory){$SshDirectory=Join-Path $env:WINDIR 'System32\OpenSSH'}
+$ssh=Join-Path $SshDirectory 'ssh.exe'
+$scp=Join-Path $SshDirectory 'scp.exe'
+if(!(Test-Path -LiteralPath $ssh -PathType Leaf) -or !(Test-Path -LiteralPath $scp -PathType Leaf)){throw 'SshDirectory must contain ssh.exe and scp.exe.'}
 $results=@()
 foreach($connection in $connections){
     if($Target -ne 'all' -and $Target -ne $connection.name){continue}
@@ -83,7 +88,7 @@ if [ __TESTS__ = ON ]; then
     if ctest --test-dir build __TEST_SELECTION__ --output-on-failure > test.log 2>&1; then cat test.log; else cat test.log; exit 1; fi
 fi
 '@
-    $selection=if($TestScope -eq 'all'){''}else{"-R '^project-profile$'"}
+    $selection=if($TestScope -eq 'all'){''}else{"-R '^$TestScope$'"}
     $remote=$remote.Replace('__SNAPSHOT__',$snapshotQuoted).Replace('__CONFIG__',$Configuration).Replace('__TESTS__',$testFlag).Replace('__SANITIZERS__',$sanitizerFlag).Replace('__TEST_SELECTION__',$selection).Replace("`r`n","`n")
     $log=Join-Path $runDir ($connection.name+'-build.log')
     & $ssh @options -T $connection.hostName ('sh -c '+(Quote-Sh $remote)) 2>&1 | Tee-Object -FilePath $log
@@ -91,9 +96,10 @@ fi
     & $scp @options ($connection.hostName+':'+$snapshot+'/build/ShellBot') (Join-Path $runDir ($connection.name+'-ShellBot'))
     $artifactExit=$LASTEXITCODE
     $testVerified=$null
-    if($WithTests -and $TestScope -eq 'project-profile'){
-        $profileReport=Join-Path $runDir ($connection.name+'-profile-report.json')
-        & $scp @options ($connection.hostName+':'+$snapshot+'/build/profile-test-report.json') $profileReport
+    if($WithTests -and $TestScope -ne 'all'){
+        $reportKind=@{'project-profile'='profile';'administrator-media'='admin-media';'command-identities'='commands'}[$TestScope]
+        $profileReport=Join-Path $runDir ($connection.name+'-'+$reportKind+'-report.json')
+        & $scp @options ($connection.hostName+':'+$snapshot+'/build/'+$reportKind+'-test-report.json') $profileReport
         $testVerified=$false
         if($LASTEXITCODE -eq 0 -and $artifactExit -eq 0){
             $profileResult=Get-Content -LiteralPath $profileReport -Raw|ConvertFrom-Json
@@ -121,6 +127,12 @@ fi
             }
             $startupReport=Join-Path $runDir ($connection.name+'-startup-report.json')
             $commandsReport=Join-Path $runDir ($connection.name+'-commands-report.json')
+            $adminReport=Join-Path $runDir ($connection.name+'-admin-media-report.json')
+            & $scp @options ($connection.hostName+':'+$snapshot+'/build/admin-media-test-report.json') $adminReport
+            if($LASTEXITCODE -ne 0){$testVerified=$false}else{
+                $adminResult=Get-Content -LiteralPath $adminReport -Raw|ConvertFrom-Json
+                $testVerified=$testVerified -and $adminResult.status -ceq 'passed' -and $adminResult.sha256 -ceq $testResult.sha256
+            }
             & $scp @options ($connection.hostName+':'+$snapshot+'/build/commands-test-report.json') $commandsReport
             if($LASTEXITCODE -ne 0){$testVerified=$false}else{
                 $commandsResult=Get-Content -LiteralPath $commandsReport -Raw|ConvertFrom-Json

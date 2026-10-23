@@ -45,7 +45,13 @@
           "task_input",
           "task_cancel",
           "approval_status",
-          "approval_cancel"
+          "approval_cancel",
+          "image_view",
+          "document_info",
+          "document_read",
+          "document_preview",
+          "artifact_download",
+          "artifact_upload"
         ]
       },
       "resources": {

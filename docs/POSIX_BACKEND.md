@@ -1,4 +1,4 @@
-# Linux / macOS 后台开发版：第八阶段
+# Linux / macOS 后台开发版：第十阶段
 
 这是独立的 C17 POSIX 后台入口，不是 Windows 正式包或完整桌面版。正式 Windows 1.0.3 的 MSBuild 入口和 Win32 后端继续使用原有构建方式。当前已使用 Linux x86_64 和 Intel macOS 实机通过 SSH 编译运行；不能据此宣称所有发行版、旧系统或 Apple Silicon 已验收。
 
@@ -123,7 +123,7 @@ ShellBot --project-remove example --projects /private/projects.json --output /pr
 
 取消、超时、暂停和正常退出会停止任务进程组中的普通后代。工作进程崩溃时独立监督进程检测通道关闭并清理进程组；管理器异常退出后，工作进程因私有通道关闭而退出并停止任务。没有按进程名批量终止其他程序，也不自动恢复任务或 stdin。主动脱离进程组的守护进程、恶意同 UID 程序、监督进程本身被强杀均不属于已验证的完整任务树隔离。
 
-`worker_memory_mb` 在 Linux 当前实现中用作单条命令的地址空间限制，排除监督进程和工作进程；macOS 暂不执行该内存限制，能力响应会明确标注。两平台都有任务数、输出、输入、超时及关闭 core dump 的限制；不能把它们当作账户权限或整个进程树资源沙箱。
+`worker_memory_mb` 在 Linux 用作单条命令的地址空间限制。Intel Mac 采样命令进程组的物理占用总量，超额终止并返回 `memory_limit`，查询失败则返回 `memory_monitor_unavailable`；不是分配时硬上限，名义采样周期 20 毫秒。能力响应、任务峰值和口径见 [命令身份](POSIX_COMMANDS.md)。两者均排除监督进程与工作进程。任务数、输出、输入、超时及关闭 core dump 的限制分别生效，不能把它们当作账户权限或抵抗主动脱离进程组的完整资源沙箱。
 
 ## 文件边界与限制
 
@@ -137,12 +137,14 @@ POSIX `flock` 是协作式锁。目录定位与版本复核是文件工具的访
 
 在 Windows PowerShell 7.3 或更新版本运行 `scripts/build-posix.ps1`。将 `config/remote-build.example.json` 复制到被忽略的私有配置位置，填写已验证的 SSH 主机、项目目录、专用密钥和固定 known_hosts；不把私钥或密码写入仓库。
 
+默认使用系统 OpenSSH；若客户端退出时发生挂起 I/O 错误，可用 `-SshDirectory 'C:\Program Files\Git\usr\bin'` 明确选择本机已有的 Git OpenSSH。脚本不修改系统 SSH、主机信任或网络设置。
+
 ```powershell
 .\scripts\build-posix.ps1 -ConnectionFile .\config\remote-build.local.json -Configuration Release
 ```
 
 脚本仅选择 CMake、POSIX 后端、共享 C 源码、源码依赖及已校验的 POSIX 媒体运行库，包含本机未提交的这些源码改动；不复制 `.git`、Windows 产物、Data 或 SSH 密钥。每次在远端指定根目录的 `.native-build/时间-随机值` 下新建源码和构建快照，核对逐文件 SHA-256 后编译，不覆盖现有文件，不运行安装操作。结果和取回的二进制保存在本机 `build/posix`，历史失败保留。
 
-现有约定将测试源保留在本机而不纳入 Git。恢复本地 `tests/posix_integration.py`、`posix_phase2.py`、`posix_oauth.py`、`posix_clock.c`、`posix_desktop.py`、`posix_tray.py`、`posix_remote.py` 和 `posix_remote_fixture.c` 后可增加 `-WithTests`。后台与界面控制器测试仅在远端项目下独立夹具中读写，保留报告和备份，退出自己启动的进程；托盘模拟和原生窗口检查单独运行。三份功能报告摘要须与取回的程序一致才视为通过。`-Sanitizers` 对后台、控制器与共享核心启用地址/未定义行为检查；不声称系统界面库及第三方静态库已插桩。
+现有约定将测试源保留在本机而不纳入 Git。恢复本机全部 `tests/posix_*` 副本后可增加 `-WithTests`。八组覆盖后台、桌面后端、媒体/产物、自启、命令、管理员文件/媒体请求、界面控制器及项目配置/审批/迁移；报告摘要须与取回的程序一致。管理员专项另构建不安装的 `sb_admin_contract`，以普通 UID 验证同一策略和私有 RPC，不代替真实 root 认证/权限效果。后台与控制器均使用独立夹具；托盘模拟和原生窗口检查另行记录。`-TestScope administrator-media`、`command-identities` 或 `project-profile` 仅运行相应专项，不代替完整回归。`-Sanitizers` 为相关自有代码启用地址/未定义行为检查，不声称系统框架和第三方静态库已插桩。生产构建使用 `SHELLBOT_TESTS=OFF`，不包含测试入口或管理员测试程序。
 
 本阶段的 SSH、原生后台、隔离文件与 HTTP 测试不等于真实 MCP 客户端、OAuth、GUI、物理桌面或跨发行版发布验收。
