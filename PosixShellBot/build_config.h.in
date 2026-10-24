@@ -1,0 +1,5 @@
+#ifndef SB_POSIX_BUILD_CONFIG_H
+#define SB_POSIX_BUILD_CONFIG_H
+/* The original vendor bytes are checked before signing. Pin the actual shipped copy. */
+#define SB_POSIX_PDFIUM_SHA256 "@SHELLBOT_PDFIUM_RUNTIME_HASH@"
+#endif

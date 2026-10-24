@@ -1,6 +1,7 @@
 #include "media.h"
 #include "fpdfview.h"
 #include "fpdf_text.h"
+#include "sb_posix_build.h"
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -41,12 +42,11 @@ static bool initialize(sb_error *error) {
     if (module)
         return true;
 #ifdef __APPLE__
-    const char *base = "libpdfium.dylib",
-               *expected = "94e955ba3a27ce93a602f43629fe55ebfa7658def9d367a36a614c9d8a75f088";
+    const char *base = "libpdfium.dylib";
 #else
-    const char *base = "libpdfium.so",
-               *expected = "e995a89f11d48605a79a0e44f101ca3a621e5c3ef9ee311a1405e03b44dc5b19";
+    const char *base = "libpdfium.so";
 #endif
+    const char *expected = SB_POSIX_PDFIUM_SHA256;
     char path[SB_PATH_CAP];
     const char *program = sb_posix_program(), *slash = program ? strrchr(program, '/') : NULL;
     if (!slash || (size_t)(slash - program) + strlen(base) + 2 > sizeof(path)) {

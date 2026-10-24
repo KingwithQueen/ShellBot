@@ -1,5 +1,8 @@
 # Generate the bundle and native icon from the adopted branding, without changing source assets.
 set(bundle "${OUTPUT}/ShellBot.app/Contents")
+if((NOT DEFINED IDENTITY OR IDENTITY STREQUAL "") AND EXISTS "${bundle}/_CodeSignature")
+  message(FATAL_ERROR "Use a fresh build directory when switching a signed bundle to an unsigned build.")
+endif()
 file(MAKE_DIRECTORY "${bundle}/MacOS" "${bundle}/Resources" "${OUTPUT}/ShellBot.iconset")
 configure_file("${PROGRAM}" "${bundle}/MacOS/ShellBot" COPYONLY)
 configure_file("${OUTPUT}/ShellBot-RestrictedProbe" "${bundle}/MacOS/ShellBot-RestrictedProbe" COPYONLY)
@@ -11,7 +14,7 @@ configure_file("${SOURCE}/third_party/stb/LICENSE" "${bundle}/Resources/licenses
 configure_file("${SOURCE}/LICENSE.txt" "${bundle}/Resources/licenses/LICENSE.txt" COPYONLY)
 configure_file("${SOURCE}/third_party/yyjson/LICENSE" "${bundle}/Resources/licenses/yyjson-LICENSE" COPYONLY)
 configure_file("${SOURCE}/third_party/civetweb/LICENSE.md" "${bundle}/Resources/licenses/civetweb-LICENSE.md" COPYONLY)
-configure_file("${SOURCE}/PosixShellBot/Info.plist" "${bundle}/Info.plist" COPYONLY)
+configure_file("${OUTPUT}/bundle-metadata/Info.plist" "${bundle}/Info.plist" COPYONLY)
 configure_file("${SOURCE}/assets/branding/shellbot-v1/shellbot-icon-small.png" "${bundle}/Resources/shellbot-icon-small.png" COPYONLY)
 foreach(size 16 32 128 256 512)
   foreach(scale 1 2)
@@ -34,4 +37,9 @@ execute_process(COMMAND /usr/bin/iconutil -c icns "${OUTPUT}/ShellBot.iconset" -
   RESULT_VARIABLE result ERROR_VARIABLE error)
 if(NOT result EQUAL 0)
   message(FATAL_ERROR "Cannot package native icon: ${error}")
+endif()
+if(DEFINED IDENTITY AND NOT IDENTITY STREQUAL "")
+  # Nested library and probe were signed first. Never re-sign the library after pinning it.
+  set(TARGET "${OUTPUT}/ShellBot.app")
+  include("${SOURCE}/PosixShellBot/sign.cmake")
 endif()

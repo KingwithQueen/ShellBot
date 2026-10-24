@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "version": "@PROJECT_VERSION@",
+  "posix_build": @SHELLBOT_POSIX_BUILD_NUMBER@,
+  "system": "@CMAKE_SYSTEM_NAME@",
+  "architecture": "x86_64",
+  "macos_minimum": "@CMAKE_OSX_DEPLOYMENT_TARGET@",
+  "configuration": "@CMAKE_BUILD_TYPE@",
+  "tests": @SHELLBOT_TESTS_JSON@,
+  "sanitizers": @SHELLBOT_SANITIZERS_JSON@,
+  "desktop": @SHELLBOT_DESKTOP_JSON@,
+  "signature_mode": "@SHELLBOT_SIGNATURE_MODE@",
+  "pdfium_source_sha256": "@PDFIUM_HASH@",
+  "pdfium_runtime_sha256": "@SHELLBOT_PDFIUM_RUNTIME_HASH@"
+}

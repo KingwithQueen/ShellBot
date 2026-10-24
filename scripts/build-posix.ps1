@@ -5,6 +5,7 @@ param(
     [ValidateSet('Debug','Release')][string]$Configuration='Debug',
     [switch]$WithTests,
     [switch]$Sanitizers,
+    [string]$MacSignIdentity='',
     [ValidateSet('all','project-profile','administrator-media','administrator-broker','administrator-ui','service-ui','remote-desktop','process-tree','command-identities','long-data')][string]$TestScope='all'
 )
 $ErrorActionPreference='Stop'
@@ -15,13 +16,18 @@ $PSNativeCommandUseErrorActionPreference=$false
 $repo=Split-Path -Parent $PSScriptRoot
 if(!$ConnectionFile){$ConnectionFile=Join-Path $repo 'build\remote-dev-20261022\connections.json'}
 $connections=Get-Content -LiteralPath $ConnectionFile -Raw | ConvertFrom-Json
+if($MacSignIdentity -and ($WithTests -or $Sanitizers -or $Configuration -ne 'Release')){throw 'Mac signing requires a Release build without tests or sanitizers.'}
+if($MacSignIdentity -match '[;\r\n]'){throw 'Invalid Mac signing identity.'}
+$sourceCommit=(& git -C $repo rev-parse HEAD).Trim()
+if($LASTEXITCODE -ne 0){throw 'Cannot read source commit.'}
+$sourceDirty=[bool]@(& git -C $repo status --porcelain --untracked-files=normal).Count
 $runId=(Get-Date -Format 'yyyyMMdd-HHmmss')+'-'+[guid]::NewGuid().ToString('N').Substring(0,8)
 $runDir=Join-Path $repo "build\posix\$runId"
 New-Item -ItemType Directory -Path $runDir -Force | Out-Null
 $files=@('CMakeLists.txt','LICENSE.txt','third_party/yyjson/LICENSE','third_party/civetweb/LICENSE.md','docs/POSIX_BACKEND.md','docs/POSIX_OAUTH.md','config/posix-projects.example.json','config/posix-commands.example.json','config/posix-oauth.example.json')
 foreach($folder in @('core','PosixShellBot','third_party/yyjson','third_party/civetweb/src','third_party/civetweb/include')){
     foreach($item in Get-ChildItem -LiteralPath (Join-Path $repo $folder) -Recurse -File){
-        if($item.Extension -in @('.c','.h','.inl','.m','.plist','.desktop','.cmake')){$files+=[IO.Path]::GetRelativePath($repo,$item.FullName).Replace('\','/')}
+        if($item.Extension -in @('.c','.h','.inl','.m','.plist','.desktop','.cmake','.in','.py')){$files+=[IO.Path]::GetRelativePath($repo,$item.FullName).Replace('\','/')}
     }
 }
 $files+='assets/branding/shellbot-v1/shellbot-icon.png';$files+='assets/branding/shellbot-v1/shellbot-icon-small.png'
@@ -37,10 +43,12 @@ if($WithTests){$files+='tests/posix_media.py';$files+='tests/posix_startup.py'}
 $files+='docs/POSIX_COMMANDS.md'
 $files+='docs/POSIX_PROJECTS.md'
 $files+='docs/POSIX_ACCEPTANCE.md'
+$files+='docs/POSIX_DISTRIBUTION.md';$files+='scripts/build-posix.ps1';$files+='scripts/package-posix.ps1'
 $files+='config/posix-restricted.example.json';$files+='config/posix-admin.example.json'
 if($WithTests){$files+='tests/posix_commands.py';$files+='tests/posix_command_fixture.c'}
 if($WithTests){$files+='tests/posix_process_tree.py';$files+='tests/posix_tree_fixture.c'}
 if($WithTests){$files+='tests/posix_long_data.py'}
+if($WithTests){$files+='tests/posix_distribution.py'}
 if($WithTests){$files+='tests/posix_profile.py'}
 if($WithTests){$files+='tests/posix_admin_contract.c';$files+='tests/posix_admin_media.py'}
 if($WithTests){$files+='tests/posix_broker_contract.c';$files+='tests/posix_broker.py';$files+='tests/posix_admin_ui_contract.c';$files+='tests/posix_admin_ui.py';$files+='tests/posix_service_ui.py';$files+='tests/posix_service_contract.c'}
@@ -84,7 +92,7 @@ tar -xf source.tar -C src
 cd src
 if command -v sha256sum >/dev/null 2>&1; then sha256sum -c SOURCE_SHA256SUMS > ../source-verification.log; else shasum -a 256 -c SOURCE_SHA256SUMS > ../source-verification.log; fi
 cd ..
-if cmake -S src -B build -G Ninja -DCMAKE_BUILD_TYPE=__CONFIG__ -DSHELLBOT_TESTS=__TESTS__ -DSHELLBOT_SANITIZERS=__SANITIZERS__ > configure.log 2>&1; then cat configure.log; else cat configure.log; exit 1; fi
+if cmake -S src -B build -G Ninja -DCMAKE_BUILD_TYPE=__CONFIG__ -DSHELLBOT_TESTS=__TESTS__ -DSHELLBOT_SANITIZERS=__SANITIZERS__ __SIGNING__ > configure.log 2>&1; then cat configure.log; else cat configure.log; exit 1; fi
 if cmake --build build --parallel 4 > build.log 2>&1; then cat build.log; else cat build.log; exit 1; fi
 build/ShellBot --version
 if [ __TESTS__ = ON ]; then
@@ -92,7 +100,8 @@ if [ __TESTS__ = ON ]; then
 fi
 '@
     $selection=if($TestScope -eq 'all'){''}else{"-R '^$TestScope$'"}
-    $remote=$remote.Replace('__SNAPSHOT__',$snapshotQuoted).Replace('__CONFIG__',$Configuration).Replace('__TESTS__',$testFlag).Replace('__SANITIZERS__',$sanitizerFlag).Replace('__TEST_SELECTION__',$selection).Replace("`r`n","`n")
+    $signing=if($connection.name -eq 'mac' -and $MacSignIdentity){Quote-Sh ('-DSHELLBOT_MAC_SIGN_IDENTITY='+$MacSignIdentity)}else{''}
+    $remote=$remote.Replace('__SNAPSHOT__',$snapshotQuoted).Replace('__CONFIG__',$Configuration).Replace('__TESTS__',$testFlag).Replace('__SANITIZERS__',$sanitizerFlag).Replace('__TEST_SELECTION__',$selection).Replace('__SIGNING__',$signing).Replace("`r`n","`n")
     $log=Join-Path $runDir ($connection.name+'-build.log')
     $remoteFile=Join-Path $runDir ($connection.name+'-build.sh')
     [IO.File]::WriteAllText($remoteFile,$remote,[Text.UTF8Encoding]::new($false))
@@ -198,7 +207,7 @@ fi
     }
     $results+=[ordered]@{target=$connection.name;remote_snapshot=$snapshot;build_exit=$buildExit;artifact_copied=($artifactExit -eq 0);tests_requested=[bool]$WithTests;test_scope=$TestScope;test_report_verified=$testVerified;configuration=$Configuration;sanitizers=[bool]$Sanitizers}
 }
-$receipt=[ordered]@{run_id=$runId;source_archive_sha256=(Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash;input_count=$files.Count;results=$results}
+$receipt=[ordered]@{run_id=$runId;source_commit=$sourceCommit;source_dirty=$sourceDirty;source_archive_sha256=(Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash;input_count=$files.Count;results=$results}
 $receipt | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $runDir 'receipt.json') -Encoding utf8
 Write-Host "Build records: $runDir"
 if(!$results.Count -or @($results|Where-Object {$_.build_exit -ne 0 -or !$_.artifact_copied -or ($_.tests_requested -and !$_.test_report_verified)}).Count){throw 'One or more native builds failed; see saved logs and receipt.'}

@@ -1,4 +1,4 @@
-# Linux / macOS 后台开发版：第十五阶段
+# Linux / macOS 候选发行版：第十七阶段
 
 这是独立的 C17 POSIX 后台入口，不是 Windows 正式包或完整桌面版。正式 Windows 1.0.3 的 MSBuild 入口和 Win32 后端继续使用原有构建方式。当前已使用 Linux x86_64 和 Intel macOS 实机通过 SSH 编译运行；不能据此宣称所有发行版、旧系统或 Apple Silicon 已验收。
 
@@ -19,7 +19,7 @@
 
 第四阶段加入 Mac Cocoa / Linux GTK 4 原生项目窗口、审批与 OAuth 连接管理，以及菜单栏/StatusNotifier 托盘；参见 [管理界面与托盘](POSIX_DESKTOP.md)。界面默认构建；无桌面环境可明确设置 `-DSHELLBOT_DESKTOP=OFF`。
 
-第十一至十三阶段补充多项目共享管理员监督器、原生授权与审批池、独立后台服务管理。第十四阶段补充 Linux Wayland 多屏流和明确的坐标空间、当前有效 XKB 布局文字输入及动态 XI 2.1 设备观察；详细能力与系统限制见 [远程桌面](POSIX_REMOTE_DESKTOP.md)。第十五阶段为每条命令增加独立监督进程，按已识别后代合计采样内存，并在取消、超时、配额超限及连接消失时回收；Linux 使用 subreaper 和 pidfd，Mac 保留出生身份匹配的后代记录，快速且未被观察的孤儿仍有明确限制，见 [命令身份与资源控制](POSIX_COMMANDS.md)。长 Data 路径及发行准备仍需继续，集中验收见 [人工验收清单](POSIX_ACCEPTANCE.md)。
+第十一至十三阶段补充多项目共享管理员监督器、原生授权与审批池、独立后台服务管理。第十四阶段补充 Linux Wayland 多屏流和明确的坐标空间、当前有效 XKB 布局文字输入及动态 XI 2.1 设备观察；详细能力与系统限制见 [远程桌面](POSIX_REMOTE_DESKTOP.md)。第十五阶段为每条命令增加独立监督进程，按已识别后代合计采样内存，并在取消、超时、配额超限及连接消失时回收；Linux 使用 subreaper 和 pidfd，Mac 保留出生身份匹配的后代记录，快速且未被观察的孤儿仍有明确限制，见 [命令身份与资源控制](POSIX_COMMANDS.md)。第十六阶段补齐长 Data；第十七阶段提供候选包生成、完整性/运行依赖检查、Linux 用户菜单登记和 Mac 签名摘要绑定，见 [发行与升级](POSIX_DISTRIBUTION.md)。真实发布签名/公证和集中验收仍待完成，验收见 [人工验收清单](POSIX_ACCEPTANCE.md)。
 
 ## 原生构建
 
