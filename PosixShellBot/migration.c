@@ -50,7 +50,8 @@ static bool copy_tree(int source, int target, unsigned depth, sb_migration *s, s
         struct stat st, opened, final;
         if (fstatat(source, name, &st, AT_SYMLINK_NOFOLLOW) || st.st_uid != geteuid()) { ok = false; break; }
         if (!strcmp(name, "host.lock") && S_ISREG(st.st_mode) && st.st_nlink == 1 && !(st.st_mode & 077)) continue;
-        if ((!strcmp(name, "owner.sock") && S_ISSOCK(st.st_mode)) || !strcmp(name, "raise.request")) continue;
+        if ((!strcmp(name, "owner.sock") && S_ISSOCK(st.st_mode)) || !strcmp(name, "raise.request") ||
+            !strcmp(name, "owner.endpoint.json") || !strncmp(name, ".owner-endpoint-", 16)) continue;
         bool directory = S_ISDIR(st.st_mode);
         if ((!directory && (!S_ISREG(st.st_mode) || st.st_nlink != 1)) || (st.st_mode & (S_ISUID | S_ISGID)) ||
             (directory && (st.st_mode & 0022))) { ok = false; break; }

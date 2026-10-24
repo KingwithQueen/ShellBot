@@ -40,7 +40,7 @@ target_include_directories(sb_http PUBLIC third_party/civetweb/include)
 target_compile_definitions(sb_http PRIVATE NO_SSL NO_CGI NO_FILES NO_FILESYSTEM NO_WEBSOCKET USE_IPV6=0)
 target_link_libraries(sb_http PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
 add_executable(ShellBot
-  PosixShellBot/main.c PosixShellBot/transport.c PosixShellBot/owner.c
+  PosixShellBot/main.c PosixShellBot/transport.c PosixShellBot/owner.c PosixShellBot/local_socket.c
   PosixShellBot/platform.c PosixShellBot/sha256.c PosixShellBot/image.c
   PosixShellBot/document.c PosixShellBot/pdf.c PosixShellBot/office.c PosixShellBot/media_png.c
   PosixShellBot/process.c PosixShellBot/execution.c PosixShellBot/task_agent.c
@@ -188,6 +188,15 @@ if(SHELLBOT_TESTS)
   endforeach()
   add_test(NAME process-tree COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/posix_process_tree.py $<TARGET_FILE:ShellBot>)
   set_tests_properties(process-tree PROPERTIES TIMEOUT 180)
+  if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/posix_long_data.py")
+    message(FATAL_ERROR "Restore local tests/posix_long_data.py before enabling SHELLBOT_TESTS.")
+  endif()
+  if(SHELLBOT_DESKTOP)
+    add_test(NAME long-data COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/posix_long_data.py $<TARGET_FILE:ShellBot> $<TARGET_FILE:ShellBot>)
+  else()
+    add_test(NAME long-data COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/posix_long_data.py $<TARGET_FILE:ShellBot>)
+  endif()
+  set_tests_properties(long-data PROPERTIES TIMEOUT 240)
   add_test(NAME administrator-media COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/posix_admin_media.py $<TARGET_FILE:ShellBot> $<TARGET_FILE:sb_admin_contract>)
   set_tests_properties(administrator-media PROPERTIES TIMEOUT 180)
   add_test(NAME administrator-broker COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/posix_broker.py $<TARGET_FILE:ShellBot> $<TARGET_FILE:sb_broker_contract>)

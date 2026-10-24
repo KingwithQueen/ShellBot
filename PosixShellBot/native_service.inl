@@ -8,19 +8,22 @@ static bool service_json_hash(yyjson_val *v, char hash[65], sb_error *e) {
     char *bytes = v ? yyjson_val_write(v, 0, NULL) : NULL;
     bool ok = bytes && sb_platform_sha256(bytes, strlen(bytes), hash, e); free(bytes); return ok;
 }
-static void service_defaults(sb_native_manager *g, char name[64], char user[SB_PATH_CAP], char system[SB_PATH_CAP]) {
-    char hash[65] = {0}; sb_error e = {0}; sb_platform_sha256(g->directory, strlen(g->directory), hash, &e);
-    snprintf(name, 64, "backend-%.20s", hash); snprintf(user, SB_PATH_CAP, "%s/service", g->directory);
+static bool service_defaults(sb_native_manager *g, char name[64], char user[SB_PATH_CAP], char system[SB_PATH_CAP], sb_error *e) {
+    char hash[65] = {0};
+    if (!sb_platform_sha256(g->directory, strlen(g->directory), hash, e) ||
+        !native_path(name, 64, e, "backend-%.20s", hash) ||
+        !native_path(user, SB_PATH_CAP, e, "%s/service", g->directory)) return false;
 #ifdef __APPLE__
-    snprintf(system, SB_PATH_CAP, "/Library/Application Support/ShellBotStartup-ui-%.20s", hash);
+    return native_path(system, SB_PATH_CAP, e, "/Library/Application Support/ShellBotStartup-ui-%.20s", hash);
 #else
-    snprintf(system, SB_PATH_CAP, "/var/lib/ShellBotStartup-ui-%.20s", hash);
+    return native_path(system, SB_PATH_CAP, e, "/var/lib/ShellBotStartup-ui-%.20s", hash);
 #endif
 }
-static yyjson_doc *service_options(sb_native_manager *g) {
+static yyjson_doc *service_options(sb_native_manager *g, sb_error *e) {
     yyjson_doc *s = settings(g); yyjson_val *saved = yyjson_obj_get(yyjson_doc_get_root(s), "backend_service");
     if (saved) { char *bytes = yyjson_val_write(saved, 0, NULL); yyjson_doc_free(s); return parse(bytes); }
-    char name[64], user[SB_PATH_CAP], system[SB_PATH_CAP]; service_defaults(g, name, user, system);
+    char name[64], user[SB_PATH_CAP], system[SB_PATH_CAP];
+    if (!service_defaults(g, name, user, system, e)) { yyjson_doc_free(s); return NULL; }
     yyjson_mut_doc *d = yyjson_mut_doc_new(NULL); yyjson_mut_val *v = yyjson_mut_obj(d);
     yyjson_mut_obj_add_str(d, v, "kind", "user-service"); yyjson_mut_obj_add_strcpy(d, v, "name", name);
     yyjson_mut_obj_add_strcpy(d, v, "directory", user); yyjson_mut_obj_add_strcpy(d, v, "key", g->key);
@@ -46,7 +49,10 @@ bad:
     sb_fail(e, "服务设置需要有效类型、名称、规范绝对路径、独立启动项目列表和 OAuth 开关。"); return false;
 }
 static yyjson_doc *service_form(sb_native_manager *g, yyjson_val *q, sb_error *e) {
-    yyjson_doc *old = service_options(g); yyjson_mut_doc *d = yyjson_doc_mut_copy(old, NULL);
+    yyjson_doc *old = service_options(g, e);
+    if (!old) return NULL;
+    yyjson_mut_doc *d = yyjson_doc_mut_copy(old, NULL);
+    if (!d) { yyjson_doc_free(old); sb_fail(e, "Out of memory."); return NULL; }
     yyjson_mut_val *v = yyjson_mut_doc_get_root(d);
     const char *keys[] = {"kind", "name", "directory", "key", "oauth", "starts"};
     for (unsigned i = 0; i < 6; i++) {
@@ -54,7 +60,8 @@ static yyjson_doc *service_form(sb_native_manager *g, yyjson_val *q, sb_error *e
         if (value) { yyjson_mut_obj_remove_key(v, keys[i]); yyjson_mut_obj_add_val(d, v, keys[i], yyjson_val_mut_copy(d, value)); }
     }
     if (yyjson_obj_get(q, "kind") && !yyjson_obj_get(q, "directory") && strcmp(sb_gui_string(q, "kind"), sb_gui_string(yyjson_doc_get_root(old), "kind"))) {
-        char name[64], user[SB_PATH_CAP], system[SB_PATH_CAP]; service_defaults(g, name, user, system);
+        char name[64], user[SB_PATH_CAP], system[SB_PATH_CAP];
+        if (!service_defaults(g, name, user, system, e)) { yyjson_mut_doc_free(d); yyjson_doc_free(old); return NULL; }
         yyjson_mut_obj_remove_key(v, "directory"); yyjson_mut_obj_add_strcpy(d, v, "directory", service_system(q) ? system : user);
     }
     yyjson_doc *out = parse(sb_posix_json(d, v)); yyjson_doc_free(old);
@@ -150,10 +157,11 @@ static bool service_accept(sb_native_manager *g, yyjson_doc *state, yyjson_val *
 static bool service_refresh_user(sb_native_manager *g, yyjson_val *o, sb_error *e) {
     yyjson_doc *s = service_cli(g, "status", o, NULL, NULL, e); bool ok = service_accept(g, s, o, e); yyjson_doc_free(s); return ok;
 }
-static bool service_may_exist(sb_native_manager *g, yyjson_val *o) {
+static bool service_may_exist(sb_native_manager *g, yyjson_val *o, sb_error *e) {
     if (sb_gui_bool(yyjson_doc_get_root(g->service_state), "registered")) return true;
     if (!service_system(o) && g->service_state && !sb_gui_bool(yyjson_doc_get_root(g->service_state), "stale") && !*g->service_error) return false;
-    char record[SB_PATH_CAP]; snprintf(record, sizeof(record), "%s/startup.json", sb_gui_string(o, "directory"));
+    char record[SB_PATH_CAP];
+    if (!native_path(record, sizeof(record), e, "%s/startup.json", sb_gui_string(o, "directory"))) return true;
     struct stat st; if (lstat(record, &st) && errno == ENOENT) return false;
     /* Ordinary UI cannot inspect a retained root-private receipt directory.
        A recent explicit absent observation permits the following edit; old
@@ -163,11 +171,13 @@ static bool service_may_exist(sb_native_manager *g, yyjson_val *o) {
         !*g->service_error && now >= g->service_checked_at && now - g->service_checked_at <= 30);
 }
 static bool service_blocked(sb_native_manager *g, sb_error *e) {
-    yyjson_doc *d = service_options(g); yyjson_val *o = yyjson_doc_get_root(d); bool blocked = !service_valid(o, e);
+    yyjson_doc *d = service_options(g, e);
+    if (!d) return true;
+    yyjson_val *o = yyjson_doc_get_root(d); bool blocked = !service_valid(o, e);
     if (!blocked) {
         service_cache_load(g, o);
         if (!service_system(o) && !service_refresh_user(g, o, e)) blocked = true;
-        bool potential = service_may_exist(g, o);
+        bool potential = service_may_exist(g, o, e);
         if (potential && service_system(o) && !sb_gui_bool(yyjson_doc_get_root(g->service_state), "registered") && !*e->text)
             sb_fail(e, "系统服务的归属状态需要重新核对；请先在“服务”页明确检查状态，再修改或迁移。");
         blocked = blocked || potential;
@@ -177,8 +187,8 @@ static bool service_blocked(sb_native_manager *g, sb_error *e) {
     return blocked;
 }
 static bool service_save_options(sb_native_manager *g, yyjson_val *q, sb_error *e) {
-    yyjson_doc *next = service_form(g, q, e), *old = service_options(g); char before[65], after[65];
-    bool ok = next && service_json_hash(yyjson_doc_get_root(old), before, e) && service_json_hash(yyjson_doc_get_root(next), after, e);
+    yyjson_doc *next = service_form(g, q, e), *old = next ? service_options(g, e) : NULL; char before[65], after[65];
+    bool ok = next && old && service_json_hash(yyjson_doc_get_root(old), before, e) && service_json_hash(yyjson_doc_get_root(next), after, e);
     if (ok && !strcmp(before, after)) { yyjson_doc_free(next); yyjson_doc_free(old); return true; }
     if (ok && service_blocked(g, e)) ok = false;
     if (ok && !service_system(yyjson_doc_get_root(next))) {
@@ -206,7 +216,11 @@ static bool service_data_idle(sb_native_manager *g, sb_error *e) {
     sb_lease *lease = sb_platform_lease(g->data, e); if (!lease) return false; sb_platform_lease_close(lease); return true;
 }
 static bool service_prepare_credentials(sb_native_manager *g, yyjson_val *o, sb_error *e) {
-    char original[SB_PATH_CAP]; snprintf(original, sizeof(original), "%s", g->key); snprintf(g->key, sizeof(g->key), "%s", sb_gui_string(o, "key"));
+    char original[SB_PATH_CAP];
+    if (!native_path(original, sizeof(original), e, "%s", g->key)) return false;
+    if (!native_path(g->key, sizeof(g->key), e, "%s", sb_gui_string(o, "key"))) {
+        memcpy(g->key, original, strlen(original) + 1); return false;
+    }
     yyjson_doc *cfg = registry(g); yyjson_val *projects = yyjson_obj_get(yyjson_doc_get_root(cfg), "projects");
     bool ok = yyjson_arr_size(projects) && credentials(g, projects, e);
     if (ok) {
@@ -221,7 +235,7 @@ static bool service_prepare_credentials(sb_native_manager *g, yyjson_val *o, sb_
         yyjson_doc_free(catalog);
         if (!ok && !*e->text) sb_fail(e, "服务不能依赖本窗口环境中的凭据；请先用凭据工具把原凭据保存到加密存储。");
     }
-    snprintf(g->key, sizeof(g->key), "%s", original); yyjson_doc_free(cfg); return ok;
+    memcpy(g->key, original, strlen(original) + 1); yyjson_doc_free(cfg); return ok;
 }
 static yyjson_doc *service_privileged(sb_native_manager *g, const char *action, yyjson_val *o, yyjson_val *pins, const char *hash, sb_error *e) {
     yyjson_mut_doc *d = yyjson_mut_doc_new(NULL); yyjson_mut_val *v = yyjson_mut_obj(d);
@@ -237,8 +251,9 @@ static yyjson_doc *service_privileged(sb_native_manager *g, const char *action, 
 static bool service_action(sb_native_manager *g, const char *action, yyjson_val *q, sb_error *e) {
     if (!strcmp(action, "settings")) return service_save_options(g, q, e);
     if (!strcmp(action, "plan") && !service_save_options(g, q, e)) return false;
-    yyjson_doc *d = service_options(g); yyjson_val *o = yyjson_doc_get_root(d); service_cache_load(g, o);
-    bool ok = service_valid(o, e) && service_current_form(g, q, o, e); yyjson_doc *reply = NULL;
+    yyjson_doc *d = service_options(g, e); yyjson_val *o = yyjson_doc_get_root(d);
+    if (d) service_cache_load(g, o);
+    bool ok = d && service_valid(o, e) && service_current_form(g, q, o, e); yyjson_doc *reply = NULL;
     if (!ok) goto done;
     if (!strcmp(action, "plan")) {
         service_clear_preview(g); char *bytes = load(g->registry);
@@ -299,16 +314,21 @@ done:
     yyjson_doc_free(reply); yyjson_doc_free(d); return ok;
 }
 static void service_snapshot(sb_native_manager *g, yyjson_mut_doc *d, yyjson_mut_val *v) {
-    yyjson_doc *opts = service_options(g); yyjson_val *o = yyjson_doc_get_root(opts); sb_error e = {0}; service_cache_load(g, o);
+    sb_error e = {0}; yyjson_doc *opts = service_options(g, &e); yyjson_val *o = yyjson_doc_get_root(opts);
+    if (opts) service_cache_load(g, o);
     char previous_error[sizeof(g->service_error)]; snprintf(previous_error, sizeof(previous_error), "%s", g->service_error);
-    if (service_valid(o, &e) && !service_system(o)) service_refresh_user(g, o, &e);
+    if (opts && service_valid(o, &e) && !service_system(o)) service_refresh_user(g, o, &e);
     else if (*e.text) snprintf(g->service_error, sizeof(g->service_error), "%s", e.text);
     if (!*g->service_error && *previous_error) snprintf(g->service_error, sizeof(g->service_error), "%s", previous_error);
     copy_doc(d, v, "service_settings", opts); copy_doc(d, v, "service", g->service_state); copy_doc(d, v, "service_plan", g->service_preview);
-    yyjson_mut_obj_add_strcpy(d, v, "service_plan_sha256", g->service_plan_hash); yyjson_mut_obj_add_strcpy(d, v, "service_error", g->service_error);
+    yyjson_mut_obj_add_strcpy(d, v, "service_plan_sha256", g->service_plan_hash);
     yyjson_mut_obj_add_uint(d, v, "service_checked_at", g->service_checked_at);
-    char name[64], user[SB_PATH_CAP], system[SB_PATH_CAP]; service_defaults(g, name, user, system); yyjson_mut_val *defaults = yyjson_mut_obj(d);
-    yyjson_mut_obj_add_strcpy(d, defaults, "user-service", user); yyjson_mut_obj_add_strcpy(d, defaults, "system-service", system); yyjson_mut_obj_add_val(d, v, "service_default_directories", defaults);
+    char name[64], user[SB_PATH_CAP], system[SB_PATH_CAP]; yyjson_mut_val *defaults = yyjson_mut_obj(d);
+    if (service_defaults(g, name, user, system, &e)) {
+        yyjson_mut_obj_add_strcpy(d, defaults, "user-service", user); yyjson_mut_obj_add_strcpy(d, defaults, "system-service", system);
+    } else snprintf(g->service_error, sizeof(g->service_error), "%s", e.text);
+    yyjson_mut_obj_add_val(d, v, "service_default_directories", defaults);
+    yyjson_mut_obj_add_strcpy(d, v, "service_error", g->service_error);
     yyjson_doc_free(opts);
 }
 char *sb_gui_service_text(yyjson_val *status, yyjson_val *plan, bool system, const char *error) {

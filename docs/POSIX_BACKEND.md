@@ -147,6 +147,16 @@ POSIX `flock` 是协作式锁。目录定位与版本复核是文件工具的访
 
 脚本仅选择 CMake、POSIX 后端、共享 C 源码、源码依赖及已校验的 POSIX 媒体运行库，包含本机未提交的这些源码改动；不复制 `.git`、Windows 产物、Data 或 SSH 密钥。每次在远端指定根目录的 `.native-build/时间-随机值` 下新建源码和构建快照，核对逐文件 SHA-256 后编译，不覆盖现有文件，不运行安装操作。结果和取回的二进制保存在本机 `build/posix`，历史失败保留。
 
-现有约定将测试源保留在本机而不纳入 Git。恢复本机全部 `tests/posix_*` 副本后可增加 `-WithTests`。十一组覆盖后台、桌面后端、媒体/产物、自启、命令、管理员文件/媒体请求、界面控制器、项目配置/审批/迁移、多项目管理员监督器、原生管理员管理和原生服务管理；报告摘要须与取回的程序一致。管理员专项另构建不安装的 `sb_admin_contract`，以普通 UID 验证同一策略和私有 RPC，不代替真实 root 认证/权限效果。后台与控制器均使用独立夹具；托盘模拟和原生窗口检查另行记录。管理员管理另有普通 UID 的 `sb_admin_ui_contract`，验证控制器、监督器及审批策略的联通与失效绑定，不代替系统授权或实际 root。Linux 桌面专项另有普通 UID 的 `sb_desktop_contract`，只在测试构建内验证真实解析、映射、帧边界和私有总线输入发送；不代替实际 Wayland 共享授权。`-TestScope remote-desktop`、`service-ui`、`administrator-ui`、`administrator-broker`、`administrator-media`、`command-identities` 或 `project-profile` 仅运行相应专项，不代替完整回归。`-Sanitizers` 为相关自有代码启用地址/未定义行为检查，不声称系统框架和第三方静态库已插桩。生产构建使用 `SHELLBOT_TESTS=OFF`，不包含测试入口或管理员、服务及桌面测试程序。
+现有约定将测试源保留在本机而不纳入 Git。恢复本机全部 `tests/posix_*` 副本后可增加 `-WithTests`。十三组覆盖长 Data、本地通信安全、命令进程树、后台、桌面后端、媒体/产物、自启、命令、管理员文件/媒体请求、界面控制器、项目配置/审批/迁移、多项目管理员监督器、原生管理员管理和原生服务管理；报告摘要须与取回的程序一致。管理员专项另构建不安装的 `sb_admin_contract`，以普通 UID 验证同一策略和私有 RPC，不代替真实 root 认证/权限效果。后台与控制器均使用独立夹具；托盘模拟和原生窗口检查另行记录。管理员管理另有普通 UID 的 `sb_admin_ui_contract`，验证控制器、监督器及审批策略的联通与失效绑定，不代替系统授权或实际 root。Linux 桌面专项另有普通 UID 的 `sb_desktop_contract`，只在测试构建内验证真实解析、映射、帧边界和私有总线输入发送；不代替实际 Wayland 共享授权。`-TestScope long-data`、`process-tree`、`remote-desktop`、`service-ui`、`administrator-ui`、`administrator-broker`、`administrator-media`、`command-identities` 或 `project-profile` 仅运行相应专项，不代替完整回归。`-Sanitizers` 为相关自有代码启用地址/未定义行为检查，不声称系统框架和第三方静态库已插桩。生产构建使用 `SHELLBOT_TESTS=OFF`，不包含测试入口或管理员、服务及桌面测试程序。
 
 本阶段的 SSH、原生后台、隔离文件与 HTTP 测试不等于真实 MCP 客户端、OAuth、GUI、物理桌面或跨发行版发布验收。
+
+## 长 Data 与本地通信
+
+Linux 和 Intel Mac 支持超过 Unix socket 地址长度、超过 512 字节的中文 Data 路径。短路径继续使用 Data 内的 `owner.sock`；长路径将通信 socket 放在系统固定临时目录下随机命名的当前 UID 私有 0700 目录，socket 权限为 0600。Mac 使用真实的 `/private/tmp`，Linux 使用 `/tmp`，忽略 `TMPDIR`。管理员和服务授权的临时通道也采用同样的短目录，原有 root、PID 与程序身份检查继续生效。
+
+长 Data 内的 `owner.endpoint.json` 仅保存版本、Data 设备号/inode 身份和随机 128 位 token，不接受任意连接路径。读取时核对文件类型、0600 权限、UID、单链接、大小、内容及目录绑定；连接前后核对运行时目录和 socket 的身份，再检查对端 UID。发现记录损坏、权限变化、链接替代或身份不匹配时拒绝，不自动切换通道、重新连接或重放审批/停止操作。
+
+正常退出只清理本实例保存身份的记录与通信对象。崩溃重启持有 Data 独占锁后，仅对严格验证且明确已拒绝连接的旧端点进行回收；活动、超时和状态不明的对象保留并报错。不扫描或递归清理系统临时目录。若进程恰在随机目录建立后、发现记录发布前被强制终止，可能留下未被记录引用的小型私有目录；不声称任意崩溃时刻都无残留。迁移不复制这些临时通信记录，目标启动时生成自己的端点。Data、凭据、历史和审计不作为临时文件清理。
+
+管理界面的应用/管理器路径及重定向不再使用 220、240、256 或 512 字节限制，所有派生路径均检查截断。启动与迁移复制前检查规范绝对路径，并为私有文件保留 64 字节的原生 `PATH_MAX` 预算；这不绕过文件系统组件、系统路径上限、目录权限或同 UID 信任边界。长路径专项与既有短路径回归分别运行；真实 root 授权、系统隐私许可、外部客户端和登录重启仍须人工验收。

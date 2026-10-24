@@ -25,7 +25,7 @@
 extern char **environ;
 struct sb_native_manager {
     sb_lease *lease;
-    char directory[256], registry[SB_PATH_CAP], data[512], key[SB_PATH_CAP];
+    char directory[SB_PATH_CAP], registry[SB_PATH_CAP], data[SB_PATH_CAP], key[SB_PATH_CAP];
     char selected[64], message[768];
     yyjson_doc *inspected;
     pid_t child;
@@ -48,6 +48,18 @@ const char *sb_gui_string(yyjson_val *o, const char *key) {
     return s ? s : "";
 }
 bool sb_gui_bool(yyjson_val *o, const char *key) { return yyjson_get_bool(yyjson_obj_get(o, key)); }
+static bool native_path(char *out, size_t capacity, sb_error *e, const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    int n = vsnprintf(out, capacity, format, args);
+    va_end(args);
+    if (n < 0 || (size_t)n >= capacity) {
+        if (capacity) out[0] = 0;
+        sb_fail(e, "数据路径过长；没有使用被截断的路径。");
+        return false;
+    }
+    return true;
+}
 static void add_text(char *out, size_t *used, const char *format, ...) {
     if (*used >= SB_RESPONSE_LIMIT)
         return;
@@ -234,9 +246,10 @@ static bool save(sb_native_manager *g, const char *name, const char *json, sb_er
         return false;
     for (unsigned i = 0; i < 16; i++)
         snprintf(nonce + 2 * i, 3, "%02x", random[i]);
-    snprintf(target, sizeof(target), "%s/%s", g->directory, name);
-    snprintf(output, sizeof(output), "%s/new-%s.json", g->directory, nonce);
-    snprintf(backup, sizeof(backup), "%s/backup-%s.json", g->directory, nonce);
+    if (!native_path(target, sizeof(target), e, "%s/%s", g->directory, name) ||
+        !native_path(output, sizeof(output), e, "%s/new-%s.json", g->directory, nonce) ||
+        !native_path(backup, sizeof(backup), e, "%s/backup-%s.json", g->directory, nonce))
+        return false;
     char *old = load(target);
     bool ok = sb_platform_export_config(output, backup, json, strlen(json), old ? old : "{}",
                                         old ? strlen(old) : 2, e);
@@ -259,7 +272,7 @@ static bool save_registry(sb_native_manager *g, const char *json, sb_error *e) {
 }
 static yyjson_doc *settings(sb_native_manager *g) {
     char path[SB_PATH_CAP];
-    snprintf(path, sizeof(path), "%s/desktop.json", g->directory);
+    if (!native_path(path, sizeof(path), NULL, "%s/desktop.json", g->directory)) return NULL;
     yyjson_doc *d = parse(load(path));
     if (!d)
         d = yyjson_read("{\"http\":true,\"oauth\":false}", 27, 0);
@@ -268,7 +281,7 @@ static yyjson_doc *settings(sb_native_manager *g) {
 static char *run(sb_native_manager *g, char *const argv[], bool daemon, sb_error *e);
 static yyjson_doc *startup(sb_native_manager *g, const char *action, sb_error *e) {
     char state[SB_PATH_CAP], id[64], hash[65];
-    snprintf(state,sizeof(state),"%s/startup",g->directory);
+    if (!native_path(state,sizeof(state),e,"%s/startup",g->directory)) return NULL;
     sb_platform_sha256(g->directory,strlen(g->directory),hash,e);
     snprintf(id,sizeof(id),"desktop-%.20s",hash);
     char *args[16]={(char *)sb_posix_program(),(char *)action,"--startup-dir",state,NULL};
@@ -293,7 +306,10 @@ static char *run(sb_native_manager *g, char *const argv[], bool daemon, sb_error
     posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0);
     if (daemon) {
         char log[SB_PATH_CAP];
-        snprintf(log, sizeof(log), "%s/backend.log", g->directory);
+        if (!native_path(log, sizeof(log), e, "%s/backend.log", g->directory)) {
+            close(pipes[0]); close(pipes[1]); posix_spawn_file_actions_destroy(&fa);
+            return NULL;
+        }
         int fd = open(log, O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW | O_CLOEXEC, 0600);
         struct stat st;
         if (fd < 0 || fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_nlink != 1 || st.st_uid != geteuid() ||
@@ -645,7 +661,11 @@ static bool edit(sb_native_manager *g, yyjson_val *q, sb_error *e) {
         yyjson_mut_obj_remove_key(p, "id");
         yyjson_mut_obj_add_str(d, p, "id", id);
         char data[SB_PATH_CAP], env[64];
-        snprintf(data, sizeof(data), "%s/project-%s", g->directory, id);
+        if (!existing && (!native_path(data, sizeof(data), e, "%s/project-%s", g->directory, id) ||
+            !sb_posix_socket_preflight(data, e))) {
+            yyjson_mut_doc_free(d); sb_platform_root_close(r); yyjson_doc_free(cfg);
+            goto done;
+        }
         /* Hashing avoids environment-name truncation/case collisions. */
         char hash[65];
         sb_platform_sha256(id, strlen(id), hash, e);
@@ -1058,13 +1078,12 @@ char *sb_desktop_work(sb_native_manager *g, const char *request) {
     return snapshot(g);
 }
 sb_native_manager *sb_desktop_open(const char *directory, const char *key, sb_error *e) {
-    if (!directory || *directory != '/' || strlen(directory) > 240) {
-        sb_fail(e, "Desktop requires an absolute data directory.");
+    if (!sb_posix_socket_preflight(directory, e)) {
         return NULL;
     }
     if (!private_dir(directory, e))
         return NULL;
-    char redirected[256];
+    char redirected[SB_PATH_CAP];
     if(!follow_location(directory,redirected,sizeof(redirected),e))return NULL;
     directory=redirected;
     sb_lease *lease = sb_platform_lease(directory, e);
@@ -1089,14 +1108,12 @@ sb_native_manager *sb_desktop_open(const char *directory, const char *key, sb_er
     snprintf(g->approval_backend, sizeof(g->approval_backend), "ordinary");
     atomic_init(&g->cancel, false);
     pthread_mutex_init(&g->location_mutex,NULL);
-    snprintf(g->directory, sizeof(g->directory), "%s", lease->root->path);
-    snprintf(g->registry, sizeof(g->registry), "%s/projects.json", g->directory);
-    snprintf(g->data, sizeof(g->data), "%s/manager", g->directory);
-    if (key)
-        snprintf(g->key, sizeof(g->key), "%s", key);
+    if (!native_path(g->directory, sizeof(g->directory), e, "%s", lease->root->path) ||
+        !native_path(g->registry, sizeof(g->registry), e, "%s/projects.json", g->directory) ||
+        !native_path(g->data, sizeof(g->data), e, "%s/manager", g->directory) ||
+        (key && !native_path(g->key, sizeof(g->key), e, "%s", key))) goto fail;
     if (!active_profile(g, e)) goto fail;
-    char sock[SB_PATH_CAP];
-    if (!sb_posix_socket_path(g->data, sock, 104, e) || !private_dir(g->data, e))
+    if (!sb_posix_socket_preflight(g->data, e) || !private_dir(g->data, e))
         goto fail;
     struct stat st;
     if (fstatat(lease->root->fd, "projects.json", &st, AT_SYMLINK_NOFOLLOW)) {

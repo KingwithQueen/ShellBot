@@ -206,12 +206,12 @@ void sb_platform_mutex_lock(sb_mutex *m){pthread_mutex_lock(&m->value);}
 void sb_platform_mutex_unlock(sb_mutex *m){pthread_mutex_unlock(&m->value);}
 char *sb_platform_default_data_dir(sb_error *e){(void)e;return sb_strdup("Data");}
 char *sb_platform_program_directory(sb_error *e){(void)e;return getcwd(NULL,0);}
-bool sb_platform_storage_path(const char *path,sb_error *e){if(path&&*path=='/')return true;sb_fail(e,"Data directory must be absolute.");return false;}
+bool sb_platform_storage_path(const char *path,sb_error *e){return sb_posix_socket_preflight(path,e);}
 bool sb_platform_prepare_runtime(const char *directory,sb_error *e){(void)directory;(void)e;return true;}
 bool sb_posix_private(sb_root *r,sb_error *e){struct stat st;if(fstat(r->fd,&st)||st.st_uid!=geteuid()||(st.st_mode&077)){sb_fail(e,"Data directory must belong to this user with mode 0700.");return false;}return true;}
 sb_lease *sb_platform_lease(const char *directory,sb_error *e){return sb_platform_lease_bound(directory,NULL,e);}
 sb_lease *sb_platform_lease_bound(const char *directory,const char *expected,sb_error *e) {
-    if(!directory||*directory!='/'){sb_fail(e,"An explicit absolute private data directory is required.");return NULL;}
+    if(!sb_posix_socket_preflight(directory,e))return NULL;
     if(mkdir(directory,0700)&&errno!=EEXIST){sb_posix_error(e,"Create data directory");return NULL;}
     sb_root *r=sb_platform_root(directory,e);if(!r)return NULL;
     char actual[50];

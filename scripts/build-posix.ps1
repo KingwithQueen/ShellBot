@@ -5,7 +5,7 @@ param(
     [ValidateSet('Debug','Release')][string]$Configuration='Debug',
     [switch]$WithTests,
     [switch]$Sanitizers,
-    [ValidateSet('all','project-profile','administrator-media','administrator-broker','administrator-ui','service-ui','remote-desktop','process-tree','command-identities')][string]$TestScope='all'
+    [ValidateSet('all','project-profile','administrator-media','administrator-broker','administrator-ui','service-ui','remote-desktop','process-tree','command-identities','long-data')][string]$TestScope='all'
 )
 $ErrorActionPreference='Stop'
 if($TestScope -ne 'all' -and !$WithTests){throw 'TestScope requires -WithTests.'}
@@ -40,6 +40,7 @@ $files+='docs/POSIX_ACCEPTANCE.md'
 $files+='config/posix-restricted.example.json';$files+='config/posix-admin.example.json'
 if($WithTests){$files+='tests/posix_commands.py';$files+='tests/posix_command_fixture.c'}
 if($WithTests){$files+='tests/posix_process_tree.py';$files+='tests/posix_tree_fixture.c'}
+if($WithTests){$files+='tests/posix_long_data.py'}
 if($WithTests){$files+='tests/posix_profile.py'}
 if($WithTests){$files+='tests/posix_admin_contract.c';$files+='tests/posix_admin_media.py'}
 if($WithTests){$files+='tests/posix_broker_contract.c';$files+='tests/posix_broker.py';$files+='tests/posix_admin_ui_contract.c';$files+='tests/posix_admin_ui.py';$files+='tests/posix_service_ui.py';$files+='tests/posix_service_contract.c'}
@@ -93,13 +94,19 @@ fi
     $selection=if($TestScope -eq 'all'){''}else{"-R '^$TestScope$'"}
     $remote=$remote.Replace('__SNAPSHOT__',$snapshotQuoted).Replace('__CONFIG__',$Configuration).Replace('__TESTS__',$testFlag).Replace('__SANITIZERS__',$sanitizerFlag).Replace('__TEST_SELECTION__',$selection).Replace("`r`n","`n")
     $log=Join-Path $runDir ($connection.name+'-build.log')
-    & $ssh @options -T $connection.hostName ('sh -c '+(Quote-Sh $remote)) 2>&1 | Tee-Object -FilePath $log
+    $remoteFile=Join-Path $runDir ($connection.name+'-build.sh')
+    [IO.File]::WriteAllText($remoteFile,$remote,[Text.UTF8Encoding]::new($false))
+    $remotePath=$snapshot+'/build-native.sh'
+    & $scp @options $remoteFile ($connection.hostName+':'+$remotePath)
+    if($LASTEXITCODE -ne 0){throw "Cannot transfer the native build script to $($connection.name)."}
+    $quotedScript=Quote-Sh $remotePath
+    & $ssh @options -T $connection.hostName ("sh -n $quotedScript && sh $quotedScript") 2>&1 | Tee-Object -FilePath $log
     $buildExit=$LASTEXITCODE
     & $scp @options ($connection.hostName+':'+$snapshot+'/build/ShellBot') (Join-Path $runDir ($connection.name+'-ShellBot'))
     $artifactExit=$LASTEXITCODE
     $testVerified=$null
     if($WithTests -and $TestScope -ne 'all'){
-        $reportKind=@{'project-profile'='profile';'administrator-media'='admin-media';'administrator-broker'='admin-broker';'administrator-ui'='admin-ui';'service-ui'='service-ui';'remote-desktop'='remote-desktop';'process-tree'='process-tree';'command-identities'='commands'}[$TestScope]
+        $reportKind=@{'project-profile'='profile';'administrator-media'='admin-media';'administrator-broker'='admin-broker';'administrator-ui'='admin-ui';'service-ui'='service-ui';'remote-desktop'='remote-desktop';'process-tree'='process-tree';'command-identities'='commands';'long-data'='long-data'}[$TestScope]
         $profileReport=Join-Path $runDir ($connection.name+'-'+$reportKind+'-report.json')
         & $scp @options ($connection.hostName+':'+$snapshot+'/build/'+$reportKind+'-test-report.json') $profileReport
         $testVerified=$false
@@ -115,6 +122,12 @@ fi
         if($LASTEXITCODE -eq 0 -and $artifactExit -eq 0){
             $testResult=Get-Content -LiteralPath $testReport -Raw | ConvertFrom-Json
             $testVerified=$testResult.status -ceq 'passed' -and $testResult.sha256 -ceq (Get-FileHash -LiteralPath (Join-Path $runDir ($connection.name+'-ShellBot')) -Algorithm SHA256).Hash.ToLowerInvariant()
+            $longReport=Join-Path $runDir ($connection.name+'-long-data-report.json')
+            & $scp @options ($connection.hostName+':'+$snapshot+'/build/long-data-test-report.json') $longReport
+            if($LASTEXITCODE -ne 0){$testVerified=$false}else{
+                $longResult=Get-Content -LiteralPath $longReport -Raw|ConvertFrom-Json
+                $testVerified=$testVerified -and $longResult.status -ceq 'passed' -and $longResult.sha256 -ceq $testResult.sha256
+            }
             $desktopReport=Join-Path $runDir ($connection.name+'-desktop-report.json')
             $profileReport=Join-Path $runDir ($connection.name+'-profile-report.json')
             & $scp @options ($connection.hostName+':'+$snapshot+'/build/profile-test-report.json') $profileReport

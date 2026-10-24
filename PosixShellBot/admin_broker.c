@@ -261,7 +261,7 @@ static char *broker_request(void *context, const char *bytes, size_t size) {
     return reply;
 }
 static bool broker_prepare(admin_broker *b, const char *bytes, size_t size, const char *data, sb_error *e) {
-    if (!sb_projects_parse(&b->registry, bytes, size, e))
+    if (!sb_posix_socket_preflight(data, e) || !sb_projects_parse(&b->registry, bytes, size, e))
         return false;
     unsigned granted = 0;
     for (size_t i = 0; i < b->registry.project_count; i++) {
@@ -317,6 +317,7 @@ static bool broker_prepare(admin_broker *b, const char *bytes, size_t size, cons
             sb_fail(e, "Administrator project state path is too long.");
             return false;
         }
+        if (!sb_posix_socket_preflight(s->directory, e)) return false;
         for (size_t j = 0; j < i; j++)
             if (!strcmp(s->directory, b->slots[j].directory)) {
                 sb_fail(e, "Administrator project state identity collision.");
@@ -328,8 +329,6 @@ static bool broker_prepare(admin_broker *b, const char *bytes, size_t size, cons
         }
         sb_root *r = sb_platform_root(s->directory, e);
         bool private = r && sb_posix_private(r, e);
-        char socket_path[104];
-        private = private && sb_posix_socket_path(s->directory, socket_path, sizeof(socket_path), e);
         for (size_t j = 0; private && j < s->project->directory_count; j++) {
             sb_root *exposed = sb_platform_root(s->project->directories[j].path, e);
             private = exposed && !sb_platform_roots_overlap(b->lease->root, exposed);

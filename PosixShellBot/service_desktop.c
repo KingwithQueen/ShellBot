@@ -1,6 +1,7 @@
 #include "service_desktop.h"
 #include "admin_desktop.h"
 #include "admin_internal.h"
+#include "local_socket.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -256,27 +257,22 @@ char *sb_service_system_call(const char *directory, const char *request, atomic_
     }
     sb_root *root = sb_platform_root(directory, e);
     if (!root || !sb_posix_private(root, e)) { sb_platform_root_close(root); return NULL; }
-    char nonce[17], name[64] = {0}, path[104], log_name[64], user[24], pid[24], sha[65];
-    unsigned char random[8]; int listener = -1, log = -1, channel = -1; bool bound = false; pid_t launcher = 0;
+    char log_name[64], user[24], pid[24], sha[65];
+    int listener = -1, log = -1, channel = -1; pid_t launcher = 0;
     char *reply = NULL;
-    if (!sb_platform_random(random, sizeof(random), e) || !sb_platform_sha256(request, strlen(request), sha, e)) goto done;
-    for (unsigned i = 0; i < 8; i++) snprintf(nonce + 2 * i, 3, "%02x", random[i]);
-    snprintf(name, sizeof(name), "service-%s.sock", nonce);
-    int count = snprintf(path, sizeof(path), "%s/%s", directory, name);
-    if (count < 0 || (size_t)count >= sizeof(path)) { sb_fail(e, "系统服务授权连接目录过长，请使用较短的私有应用数据目录。"); goto done; }
-    struct sockaddr_un address = {.sun_family = AF_UNIX}; snprintf(address.sun_path, sizeof(address.sun_path), "%s", path);
+    sb_local_socket *endpoint = sb_local_socket_create(e);
+    if (!endpoint || !sb_platform_sha256(request, strlen(request), sha, e)) goto done;
+    const char *path = sb_local_socket_path(endpoint), *nonce = sb_local_socket_token(endpoint);
     listener = socket(AF_UNIX, SOCK_STREAM, 0);
     if (listener < 0) goto done;
     fcntl(listener, F_SETFD, FD_CLOEXEC);
-    if (bind(listener, (struct sockaddr *)&address, sizeof(address))) goto done;
-    bound = true;
-    if (chmod(path, 0600) || listen(listener, 2)) goto done;
+    if (!sb_local_socket_bind(endpoint, listener, 2, e)) goto done;
     snprintf(log_name, sizeof(log_name), "service-launch-%s.log", nonce);
     log = openat(root->fd, log_name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (log < 0) goto done;
     snprintf(user, sizeof(user), "%u", (unsigned)geteuid()); snprintf(pid, sizeof(pid), "%ld", (long)getpid());
     char *args[] = {(char *)sb_posix_program(), "--service-desktop", "--owner-uid", user,
-        "--desktop-channel", path, "--desktop-pid", pid, "--expected-request-sha256", sha, NULL};
+        "--desktop-channel", (char *)path, "--desktop-pid", pid, "--expected-request-sha256", sha, NULL};
     if (atomic_load(cancel) || sb_posix_signal) goto done;
     if (!sb_admin_authorize_launch(args, log, &launcher, e)) goto done;
     uint64_t deadline = sb_platform_millis() + 120000;
@@ -307,7 +303,7 @@ done:
     if (channel >= 0) { shutdown(channel, SHUT_RDWR); close(channel); }
     if (listener >= 0) close(listener);
     if (log >= 0) close(log);
-    if (bound) unlinkat(root->fd, name, 0);
+    sb_local_socket_close(endpoint);
     sb_platform_root_close(root);
     if (launcher) service_finish_launcher(launcher, !reply);
     if (!reply && !*e->text) sb_fail(e, "系统服务授权取消、超时或连接失败；没有自动重试。请检查保留的授权日志和服务状态。");

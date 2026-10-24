@@ -2,32 +2,39 @@ static bool profile_name(const char *s) {
     return s && *s && strlen(s) < 96 && !strchr(s, '/') && !strstr(s, "..") && strspn(s, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.") == strlen(s);
 }
 static bool follow_location(const char *initial, char *out, size_t capacity, sb_error *e) {
-    snprintf(out,capacity,"%s",initial);
-    char visited[8][256];
+    char *visited[8]={0};bool ok=false;
+    if(!sb_posix_socket_preflight(initial,e)||!native_path(out,capacity,e,"%s",initial))return false;
     for(unsigned hop=0;hop<8;hop++){
-        for(unsigned i=0;i<hop;i++)if(!strcmp(visited[i],out)){sb_fail(e,"数据位置引用出现循环。");return false;}
-        snprintf(visited[hop],sizeof(visited[hop]),"%s",out);
-        sb_root *r=sb_platform_root(out,e);if(!r||!sb_posix_private(r,e)){sb_platform_root_close(r);return false;}
-        struct stat st;int found=fstatat(r->fd,"relocation.json",&st,AT_SYMLINK_NOFOLLOW);sb_platform_root_close(r);
-        if(found){if(errno==ENOENT)return true;return false;}
-        char path[SB_PATH_CAP];snprintf(path,sizeof(path),"%s/relocation.json",out);
+        for(unsigned i=0;i<hop;i++)if(!strcmp(visited[i],out)){sb_fail(e,"数据位置引用出现循环。");goto done;}
+        visited[hop]=sb_strdup(out);if(!visited[hop]){sb_fail(e,"Out of memory.");goto done;}
+        sb_root *r=sb_platform_root(out,e);if(!r||!sb_posix_private(r,e)){sb_platform_root_close(r);goto done;}
+        struct stat st;int found=fstatat(r->fd,"relocation.json",&st,AT_SYMLINK_NOFOLLOW),found_error=errno;sb_platform_root_close(r);
+        if(found){ok=found_error==ENOENT;goto done;}
+        char path[SB_PATH_CAP];if(!native_path(path,sizeof(path),e,"%s/relocation.json",out))goto done;
         yyjson_doc *d=parse(load(path));yyjson_val *v=yyjson_doc_get_root(d);const char *next=sb_gui_string(v,"target");
-        bool ok=d&&yyjson_obj_size(v)==1&&S_ISREG(st.st_mode)&&st.st_nlink==1&&st.st_uid==geteuid()&&!(st.st_mode&077)&&
+        bool valid=d&&yyjson_obj_size(v)==1&&S_ISREG(st.st_mode)&&st.st_nlink==1&&st.st_uid==geteuid()&&!(st.st_mode&077)&&
             sb_project_path_valid(next)&&strlen(next)<capacity;
-        if(ok)snprintf(out,capacity,"%s",next);yyjson_doc_free(d);
-        if(!ok){sb_fail(e,"数据位置引用不可用；原文件保留，没有创建空配置。");return false;}
+        if(valid)valid=sb_posix_socket_preflight(next,e)&&native_path(out,capacity,e,"%s",next);yyjson_doc_free(d);
+        if(!valid){if(!*e->text)sb_fail(e,"数据位置引用不可用；原文件保留，没有创建空配置。");goto done;}
     }
-    sb_fail(e,"数据位置引用过多，请直接打开最新数据目录。");return false;
+    sb_fail(e,"数据位置引用过多，请直接打开最新数据目录。");
+done:
+    for(unsigned i=0;i<8;i++)free(visited[i]);return ok;
 }
 static bool active_profile(sb_native_manager *g, sb_error *e) {
-    char path[SB_PATH_CAP]; snprintf(path, sizeof(path), "%s/active.json", g->directory);
+    char path[SB_PATH_CAP];if(!native_path(path,sizeof(path),e,"%s/active.json",g->directory))return false;
     struct stat st;
     if (lstat(path, &st)) return errno == ENOENT;
     yyjson_doc *d = parse(load(path)); yyjson_val *v = yyjson_doc_get_root(d);
     const char *r = sb_gui_string(v, "registry"), *m = sb_gui_string(v, "manager");
     bool ok = d && S_ISREG(st.st_mode) && st.st_nlink == 1 && st.st_uid == geteuid() && !(st.st_mode & 077) &&
         yyjson_obj_size(v) == 2 && profile_name(r) && profile_name(m);
-    if (ok) { snprintf(g->registry, sizeof(g->registry), "%s/%s", g->directory,r); snprintf(g->data,sizeof(g->data),"%s/%s",g->directory,m); }
+    if (ok) {
+        char registry[SB_PATH_CAP],data[SB_PATH_CAP];
+        ok=native_path(registry,sizeof(registry),e,"%s/%s",g->directory,r)&&
+            native_path(data,sizeof(data),e,"%s/%s",g->directory,m)&&sb_posix_socket_preflight(data,e);
+        if(ok){memcpy(g->registry,registry,strlen(registry)+1);memcpy(g->data,data,strlen(data)+1);}
+    }
     else sb_fail(e,"活动配置位置损坏；没有创建替代数据。");
     yyjson_doc_free(d); return ok;
 }
@@ -85,12 +92,13 @@ static bool owner_credential(sb_native_manager *g, sb_error *e) {
     else if (!*e->text) sb_fail(e,"请先在连接设置中启用远程所有者审批。");
     yyjson_doc_free(cfg); sb_secrets_close(s); sb_platform_lease_close(lease); return g->clipboard!=NULL;
 }
-static void relocate_path(yyjson_mut_doc *d, yyjson_mut_val *object, const char *key, const char *from, const char *to) {
+static bool relocate_path(yyjson_mut_doc *d, yyjson_mut_val *object, const char *key, const char *from, const char *to, sb_error *e) {
     const char *path = yyjson_mut_get_str(yyjson_mut_obj_get(object,key)); size_t n = strlen(from);
     if (path && !strncmp(path,from,n) && (!path[n] || path[n]=='/')) {
-        char result[SB_PATH_CAP]; snprintf(result,sizeof(result),"%s%s",to,path+n);
+        char result[SB_PATH_CAP];if(!native_path(result,sizeof(result),e,"%s%s",to,path+n))return false;
         yyjson_mut_obj_remove_key(object,key); yyjson_mut_obj_add_strcpy(d,object,key,result);
     }
+    return true;
 }
 static size_t migration_bindings(sb_project_registry *r, sb_secrets *s, sb_oauth_project out[SB_MAX_PROJECTS]) {
     for (size_t i=0;i<r->project_count;i++) {
@@ -112,22 +120,22 @@ static bool migration_guard(sb_lease *lease,const char *text,struct stat *identi
     bool ok=!fstat(fd,identity)&&sb_posix_write(fd,text,strlen(text),e)&&!fsync(fd)&&!fsync(lease->root->fd);close(fd);return ok;
 }
 static bool publication_matches(sb_root *root,const char *name,const char *text){
-    char path[SB_PATH_CAP];snprintf(path,sizeof(path),"%s/%s",root->path,name);char *actual=load(path);
+    char path[SB_PATH_CAP];if(!native_path(path,sizeof(path),NULL,"%s/%s",root->path,name))return false;char *actual=load(path);
     bool same=actual&&!strcmp(actual,text);free(actual);return same;
 }
 static yyjson_doc *pending_migration(sb_native_manager *g){
-    char path[SB_PATH_CAP];snprintf(path,sizeof(path),"%s/migration-guard.json",g->data);return parse(load(path));
+    char path[SB_PATH_CAP];if(!native_path(path,sizeof(path),NULL,"%s/migration-guard.json",g->data))return NULL;return parse(load(path));
 }
 static bool recover_migration(sb_native_manager *g,yyjson_val *q,sb_error *e){
     if(!stopped(g,e))return false;
-    char active_path[SB_PATH_CAP];snprintf(active_path,sizeof(active_path),"%s/relocation.json",g->directory);
+    char active_path[SB_PATH_CAP];if(!native_path(active_path,sizeof(active_path),e,"%s/relocation.json",g->directory))return false;
     struct stat st;if(!lstat(active_path,&st)){sb_fail(e,"此位置已发布迁移，请关闭窗口后从原入口重新打开。");return false;}
     yyjson_doc *pending=pending_migration(g);yyjson_val *v=yyjson_doc_get_root(pending);
     const char *id=sb_gui_string(v,"migration_id");
     bool valid=strlen(id)==32&&strspn(id,"0123456789abcdef")==32&&!strcmp(id,sb_gui_string(q,"migration_id"))&&
         strcmp(g->data,sb_gui_string(v,"manager"))&&strcmp(g->registry,sb_gui_string(v,"registry"));
     if(!valid){yyjson_doc_free(pending);sb_fail(e,"没有匹配的未完成迁移；请刷新并核对记录。");return false;}
-    snprintf(active_path,sizeof(active_path),"%s/active.json",g->directory);yyjson_doc *active=parse(load(active_path));
+    if(!native_path(active_path,sizeof(active_path),e,"%s/active.json",g->directory)){yyjson_doc_free(pending);return false;}yyjson_doc *active=parse(load(active_path));
     if(active&&strcmp(sb_gui_string(yyjson_doc_get_root(active),"manager"),strrchr(g->data,'/')+1)){
         yyjson_doc_free(active);yyjson_doc_free(pending);sb_fail(e,"活动配置已切换，请重新打开管理窗口。");return false;
     }yyjson_doc_free(active);
@@ -143,7 +151,7 @@ static bool recover_migration(sb_native_manager *g,yyjson_val *q,sb_error *e){
             if(i && errno==ENOENT){identities[i].st_ino=0;continue;}ok=false;break;
         }
         struct stat *identity=&identities[i];
-        char path[SB_PATH_CAP];snprintf(path,sizeof(path),"%s/migration-guard.json",leases[i]->root->path);
+        char path[SB_PATH_CAP];if(!native_path(path,sizeof(path),e,"%s/migration-guard.json",leases[i]->root->path)){ok=false;break;}
         yyjson_doc *record=parse(load(path));
         ok=record&&S_ISREG(identity->st_mode)&&identity->st_nlink==1&&identity->st_uid==geteuid()&&!(identity->st_mode&077)&&
             !strcmp(sb_gui_string(yyjson_doc_get_root(record),"migration_id"),id);
@@ -164,7 +172,7 @@ static bool recover_migration(sb_native_manager *g,yyjson_val *q,sb_error *e){
 static bool migrate_profile(sb_native_manager *g, yyjson_val *q, bool application, sb_error *e) {
     if (!stopped(g,e)) return false;
     const char *destination=sb_gui_string(q,"path");
-    if (!*destination || strlen(destination)>220) { sb_fail(e,"请选择较短的绝对目标目录，以满足本机 socket 路径限制。");return false; }
+    if(!sb_posix_socket_preflight(destination,e))return false;
     sb_error startup_error={0}; yyjson_doc *autostart=startup(g,"--startup-status",&startup_error);
     bool installed=sb_gui_bool(yyjson_doc_get_root(autostart),"installed"); yyjson_doc_free(autostart);
     if(application && (installed || *startup_error.text)){sb_fail(e,"迁移应用数据前请先取消登录自启；迁移后可在新位置重新启用。");return false;}
@@ -189,36 +197,21 @@ static bool migrate_profile(sb_native_manager *g, yyjson_val *q, bool applicatio
         if(lstat(before.projects[i].data_dir,&st)){if(errno==ENOENT)continue;goto done;}
         project_leases[i]=sb_platform_lease(before.projects[i].data_dir,e);if(!project_leases[i]||!sb_migration_can_start(project_leases[i],e))goto done;
     }
-    target=sb_migration_destination(destination,e);if(!target)goto done;
-    if(sb_platform_roots_overlap(g->lease->root,target) || sb_platform_roots_overlap(manager_lease->root,target)){
-        sb_fail(e,"迁移目标不能与应用原数据重叠。");goto done;
-    }
-    for(size_t i=0;i<before.project_count;i++){
-        for(size_t j=0;j<before.projects[i].directory_count;j++){
-            sb_root *r=sb_platform_root(before.projects[i].directories[j].path,e);
-            bool bad=!r||sb_platform_roots_overlap(r,target);sb_platform_root_close(r);
-            if(bad){sb_fail(e,"迁移目标不能位于已授权文件目录内或与其重叠。");goto done;}
-        }
-        if(project_leases[i]&&sb_platform_roots_overlap(project_leases[i]->root,target)){
-            sb_fail(e,"迁移目标不能与其他项目的数据目录重叠。");goto done;
-        }
-    }
-    target_lease=sb_platform_lease(destination,e);if(!target_lease)goto done;
-    sb_root *source=application?g->lease->root:NULL;
-    for(size_t i=0;!source&&i<before.project_count;i++)if(&before.projects[i]==selected&&project_leases[i])source=project_leases[i]->root;
-    if(source&&!sb_migration_copy(source,target,&state,e))goto done;
-    d=yyjson_doc_mut_copy(cfg,NULL);yyjson_mut_val *root=yyjson_mut_doc_get_root(d),*projects=yyjson_mut_obj_get(root,"projects");
+    d=yyjson_doc_mut_copy(cfg,NULL);
+    if(!d){sb_fail(e,"Out of memory.");goto done;}
+    yyjson_mut_val *root=yyjson_mut_doc_get_root(d),*projects=yyjson_mut_obj_get(root,"projects");
     size_t i,n;yyjson_mut_val *p;
     yyjson_mut_arr_foreach(projects,i,n,p){
         if(application){
-            relocate_path(d,p,"data_dir",g->directory,destination);
+            if(!relocate_path(d,p,"data_dir",g->directory,destination,e))goto done;
             const char *arrays[]={"workspaces","extra_directories"};
-            for(unsigned a=0;a<2;a++){size_t j,m;yyjson_mut_val *item;yyjson_mut_arr_foreach(yyjson_mut_obj_get(p,arrays[a]),j,m,item)relocate_path(d,item,"path",g->directory,destination);}
+            for(unsigned a=0;a<2;a++){size_t j,m;yyjson_mut_val *item;yyjson_mut_arr_foreach(yyjson_mut_obj_get(p,arrays[a]),j,m,item)if(!relocate_path(d,item,"path",g->directory,destination,e))goto done;}
             yyjson_mut_val *execution=yyjson_mut_obj_get(yyjson_mut_obj_get(p,"policy"),"execution"),*runtime=yyjson_mut_obj_get(execution,"runtime_files");
             for(size_t j=0;j<yyjson_mut_arr_size(runtime);j++){
                 const char *path=yyjson_mut_get_str(yyjson_mut_arr_get(runtime,j));size_t prefix=strlen(g->directory);
                 if(path&&!strncmp(path,g->directory,prefix)&&path[prefix]=='/'){
-                    char moved_path[SB_PATH_CAP];snprintf(moved_path,sizeof(moved_path),"%s%s",destination,path+prefix);yyjson_mut_arr_replace(runtime,j,yyjson_mut_strcpy(d,moved_path));
+                    char moved_path[SB_PATH_CAP];if(!native_path(moved_path,sizeof(moved_path),e,"%s%s",destination,path+prefix))goto done;
+                    yyjson_mut_arr_replace(runtime,j,yyjson_mut_strcpy(d,moved_path));
                 }
             }
         }else if(!strcmp(yyjson_mut_get_str(yyjson_mut_obj_get(p,"id")),g->selected)){
@@ -233,19 +226,38 @@ static bool migrate_profile(sb_native_manager *g, yyjson_val *q, bool applicatio
     if(!sb_platform_random(random,sizeof(random),e))goto done;
     for(unsigned k=0;k<16;k++)snprintf(nonce+k*2,3,"%02x",random[k]);
     if(application){
-        snprintf(new_manager,sizeof(new_manager),"%s/%s",destination,strrchr(g->data,'/')+1);
-        snprintf(new_registry,sizeof(new_registry),"%s/%s",destination,strrchr(g->registry,'/')+1);
+        if(!native_path(new_manager,sizeof(new_manager),e,"%s/%s",destination,strrchr(g->data,'/')+1)||
+            !native_path(new_registry,sizeof(new_registry),e,"%s/%s",destination,strrchr(g->registry,'/')+1))goto done;
     }else{
-        snprintf(new_manager,sizeof(new_manager),"%s/manager-%.16s",g->directory,nonce);
-        snprintf(new_registry,sizeof(new_registry),"%s/projects-%.16s.json",g->directory,nonce);
+        if(!native_path(new_manager,sizeof(new_manager),e,"%s/manager-%.16s",g->directory,nonce)||
+            !native_path(new_registry,sizeof(new_registry),e,"%s/projects-%.16s.json",g->directory,nonce))goto done;
+    }
+    /* Validate every new Data path before creating or copying the target. */
+    if(!sb_posix_socket_preflight(new_manager,e))goto done;
+    for(size_t k=0;k<after.project_count;k++)if(!sb_posix_socket_preflight(after.projects[k].data_dir,e))goto done;
+    target=sb_migration_destination(destination,e);if(!target)goto done;
+    if(sb_platform_roots_overlap(g->lease->root,target) || sb_platform_roots_overlap(manager_lease->root,target)){
+        sb_fail(e,"迁移目标不能与应用原数据重叠。");goto done;
+    }
+    for(size_t k=0;k<before.project_count;k++){
+        for(size_t j=0;j<before.projects[k].directory_count;j++){
+            sb_root *r=sb_platform_root(before.projects[k].directories[j].path,e);
+            bool bad=!r||sb_platform_roots_overlap(r,target);sb_platform_root_close(r);
+            if(bad){sb_fail(e,"迁移目标不能位于已授权文件目录内或与其重叠。");goto done;}
+        }
+        if(project_leases[k]&&sb_platform_roots_overlap(project_leases[k]->root,target)){
+            sb_fail(e,"迁移目标不能与其他项目的数据目录重叠。");goto done;
+        }
+    }
+    target_lease=sb_platform_lease(destination,e);if(!target_lease)goto done;
+    sb_root *source=application?g->lease->root:NULL;
+    for(size_t k=0;!source&&k<before.project_count;k++)if(&before.projects[k]==selected&&project_leases[k])source=project_leases[k]->root;
+    if(source&&!sb_migration_copy(source,target,&state,e))goto done;
+    if(!application){
         if(mkdir(new_manager,0700))goto done;
         sb_root *r=sb_platform_root(new_manager,e);bool copied=r&&sb_migration_copy(manager_lease->root,r,&state,e);sb_platform_root_close(r);if(!copied)goto done;
     }
     new_manager_lease=sb_platform_lease(new_manager,e);if(!new_manager_lease)goto done;
-    if(strlen(new_manager)>=sizeof(g->data)){sb_fail(e,"目标管理目录过长。");goto done;}
-    char socket_path[104];
-    if(!sb_posix_socket_path(new_manager,socket_path,sizeof(socket_path),e))goto done;
-    for(size_t k=0;k<after.project_count;k++)if(!sb_posix_socket_path(after.projects[k].data_dir,socket_path,sizeof(socket_path),e))goto done;
     const char *sealed[]={"credentials.sealed","oauth.sealed","owner.sealed"};bool has_secrets=false;
     DIR *entries=fdopendir(openat(manager_lease->root->fd,".",O_RDONLY|O_DIRECTORY|O_CLOEXEC));if(!entries)goto done;struct dirent *entry;
     bool scan_ok=true;
@@ -289,10 +301,10 @@ static bool migrate_profile(sb_native_manager *g, yyjson_val *q, bool applicatio
         free(text);if(!published)goto done;committed=true;
         pthread_mutex_lock(&g->location_mutex);
         sb_platform_lease_close(g->lease);g->lease=target_lease;target_lease=NULL;
-        snprintf(g->directory,sizeof(g->directory),"%s",destination);
+        memcpy(g->directory,destination,strlen(destination)+1);
         pthread_mutex_unlock(&g->location_mutex);
     }
-    snprintf(g->registry,sizeof(g->registry),"%s",new_registry);memcpy(g->data,new_manager,strlen(new_manager)+1);
+    memcpy(g->registry,new_registry,strlen(new_registry)+1);memcpy(g->data,new_manager,strlen(new_manager)+1);
     yyjson_doc_free(g->inspected);g->inspected=NULL;
     snprintf(g->message,sizeof(g->message),"迁移完成：%llu 个文件，%llu 字节已逐文件校验。原目录保留；后台和项目需重新启动。",(unsigned long long)state.files,(unsigned long long)state.bytes);
     ok=durable;

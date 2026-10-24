@@ -18,7 +18,7 @@ void sb_sha_finish(sb_sha *ctx, char hex[65]);
 void sb_posix_error(sb_error *error, const char *operation);
 bool sb_posix_write(int fd, const void *bytes, size_t length, sb_error *error);
 bool sb_posix_private(sb_root *root, sb_error *error);
-bool sb_posix_socket_path(const char *directory, char *out, size_t capacity, sb_error *error);
+bool sb_posix_socket_preflight(const char *directory, sb_error *error);
 extern volatile sig_atomic_t sb_posix_signal;
 void sb_posix_set_program(const char *argv0);
 const char *sb_posix_program(void);
