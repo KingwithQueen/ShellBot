@@ -10,16 +10,16 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define PART_LIMIT (8u*1024u*1024u)
-#define UNIT_LIMIT 256
-#define EVENT_LIMIT 1000000
+#define PART_LIMIT (32u*1024u*1024u)
+#define UNIT_LIMIT 1024
+#define EVENT_LIMIT 4000000
 typedef struct {char *value;size_t size,capacity;bool truncated;} text_buffer;
 typedef struct {wchar_t id[128];char name[256];} office_unit;
 typedef struct {
     const char *format;office_unit units[UNIT_LIMIT];unsigned count;
     char **shared;size_t shared_count,shared_bytes;
     text_buffer text,cell;char cell_type[16],reference[32];
-    unsigned capture_depth,skip_depth,cell_depth;bool in_shared;
+    unsigned capture_depth,skip_depth,cell_depth;bool in_shared;HRESULT failure;
 } office_context;
 
 static unsigned le16(const unsigned char *p){return (unsigned)p[0]|((unsigned)p[1]<<8);}
@@ -31,7 +31,7 @@ static bool zip_budget(const unsigned char *p,size_t size) {
     for(;;){if(size-at>=22 && le32(p+at)==0x06054b50 && (size_t)le16(p+at+20)==size-at-22)break;
         if(at==minimum)return false;--at;}
     unsigned count=le16(p+at+10);uint32_t directory=le32(p+at+16),length=le32(p+at+12);
-    if(le16(p+at+4)||le16(p+at+6)||!count || count>2048 || le16(p+at+8)!=count || directory>at || length!=at-directory)return false;
+    if(le16(p+at+4)||le16(p+at+6)||!count || count>16384 || le16(p+at+8)!=count || directory>at || length!=at-directory)return false;
     size_t pos=directory;uint64_t expanded=0;
     for(unsigned i=0;i<count;++i){
         if(at-pos<46 || le32(p+pos)!=0x02014b50)return false;
@@ -49,7 +49,7 @@ static bool zip_budget(const unsigned char *p,size_t size) {
         size_t header=30u+n+le16(p+local+28);
         if(header>directory-local || memcmp(p+local+30,name,n) || input>directory-local-header)return false;
         if(!(flags&8) && (le32(p+local+14)!=le32(p+pos+16)||le32(p+local+18)!=input||le32(p+local+22)!=output))return false;
-        expanded+=output;if(expanded>64u*1024u*1024u)return false;
+        expanded+=output;if(expanded>256u*1024u*1024u)return false;
         pos+=46u+n+extra+comment;
     }
     return pos==at;
@@ -70,6 +70,18 @@ static bool wide_append(text_buffer *buffer,const wchar_t *value,UINT size) {
     char *text=n>0 ? malloc((size_t)n) : NULL;
     bool ok=text && WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,value,(int)size,text,n,NULL,NULL)==n && !memchr(text,0,(size_t)n);
     if(ok)ok=append(buffer,text,(size_t)n);free(text);return ok;
+}
+/* 按块读取长文本节点，避免 GetValue 为整段 UTF-16 值额外分配大块内存。 */
+static HRESULT xml_text(IXmlReader *reader,text_buffer *buffer) {
+    wchar_t value[4097];UINT carry=0;
+    for(;;) {
+        UINT count=0;HRESULT hr=IXmlReader_ReadValueChunk(reader,value+carry,4096,&count);
+        if(FAILED(hr))return hr;
+        if(!count)return carry ? E_FAIL : S_OK;
+        UINT length=count+carry;carry=value[length-1]>=0xd800 && value[length-1]<=0xdbff ? 1u : 0u;
+        if(length>carry && !wide_append(buffer,value,length-carry))return E_FAIL;
+        if(carry)value[0]=value[length-1];
+    }
 }
 static bool utf8(const wchar_t *value,UINT length,char *out,size_t capacity) {
     if(!length){out[0]=0;return true;}
@@ -175,8 +187,7 @@ static bool xml_part(IOpcPart *part,office_context *context,unsigned mode,bool k
             (keep_text && ((word||draw) && !wcscmp(local,L"t")));
         if(start && text_element)context->capture_depth=depth+1;
         if((type==XmlNodeType_Text||type==XmlNodeType_CDATA||type==XmlNodeType_Whitespace) && context->capture_depth){
-            const wchar_t *value=NULL;UINT n=0;ok=SUCCEEDED(IXmlReader_GetValue(reader,&value,&n)) &&
-                wide_append(mode>=2 ? &context->cell : &context->text,value,n);
+            hr=xml_text(reader,mode>=2 ? &context->cell : &context->text);ok=SUCCEEDED(hr);
         }
         if(keep_text && start && word && (!wcscmp(local,L"tab")||!wcscmp(local,L"br")||!wcscmp(local,L"cr")))
             ok=ok && append(&context->text,!wcscmp(local,L"tab") ? "\t" : "\n",1);
@@ -185,7 +196,7 @@ static bool xml_part(IOpcPart *part,office_context *context,unsigned mode,bool k
         if(end && depth+1==context->capture_depth)context->capture_depth=0;
         if(mode==2 && end && sheet && !wcscmp(local,L"si")){
             size_t size=context->cell.size;
-            if(!context->in_shared || context->shared_count>=32768 || context->cell.truncated || size>4u*1024u*1024u-context->shared_bytes){ok=false;break;}
+            if(!context->in_shared || context->shared_count>=262144 || context->cell.truncated || size>32u*1024u*1024u-context->shared_bytes){ok=false;break;}
             char **list=realloc(context->shared,(context->shared_count+1)*sizeof(char*));if(!list){ok=false;break;}context->shared=list;
             list[context->shared_count]=sb_strdup(context->cell.value ? context->cell.value : "");if(!list[context->shared_count]){ok=false;break;}
             ++context->shared_count;context->shared_bytes+=size;context->in_shared=false;
@@ -193,7 +204,9 @@ static bool xml_part(IOpcPart *part,office_context *context,unsigned mode,bool k
         if(mode==3 && end && sheet && !wcscmp(local,L"c")){ok=ok && cell_finish(context);context->cell_depth=0;}
     }
     if(reader)IXmlReader_Release(reader);if(stream)IStream_Release(stream);
-    return ok && hr==S_FALSE && root && !context->capture_depth && !context->cell_depth && !context->in_shared;
+    bool valid=ok && hr==S_FALSE && root && !context->capture_depth && !context->cell_depth && !context->in_shared;
+    if(!valid)context->failure=FAILED(hr) ? hr : E_FAIL;
+    return valid;
 }
 static bool type_is(const wchar_t *type,const wchar_t *suffix) {
     wchar_t first[192],second[192];swprintf(first,192,L"http://schemas.openxmlformats.org/officeDocument/2006/relationships/%ls",suffix);
@@ -229,9 +242,9 @@ static IOpcPart *find_relation(IOpcPartSet *parts,IOpcRelationshipSet *set,const
 }
 bool sb_office_document(const unsigned char *bytes,size_t size,const char *format,const char *operation,
                         unsigned unit,yyjson_mut_doc *doc,sb_document *document,sb_error *error) {
-    if(!zip_budget(bytes,size)){sb_fail(error,"Office ZIP validation, macro check or 2048-part/8 MiB part/64 MiB expansion budget failed; ZIP64 is unsupported.");return false;}
+    if(!zip_budget(bytes,size)){sb_fail(error,"Office ZIP validation, macro check or 16384-part/32 MiB part/256 MiB expansion budget failed; ZIP64 is unsupported.");return false;}
     IOpcFactory *factory=NULL;IOpcPackage *package=NULL;IOpcPartSet *parts=NULL;IOpcRelationshipSet *roots=NULL,*relationships=NULL;
-    IOpcPart *main=NULL,*body=NULL,*shared=NULL;IStream *stream=SHCreateMemStream(bytes,(UINT)size);office_context context={0};context.format=format;
+    IOpcPart *main=NULL,*body=NULL,*shared=NULL;IStream *stream=SHCreateMemStream(bytes,(UINT)size);office_context *context=calloc(1,sizeof(*context));if(!context){if(stream)IStream_Release(stream);sb_fail(error,"Cannot allocate Office context.");return false;}context->format=format;
     HRESULT hr=stream ? CoCreateInstance(&CLSID_OpcFactory,NULL,CLSCTX_INPROC_SERVER,&IID_IOpcFactory,(void**)&factory) : E_OUTOFMEMORY;
     if(SUCCEEDED(hr))hr=IOpcFactory_ReadPackageFromStream(factory,stream,OPC_VALIDATE_ON_LOAD,&package);
     if(SUCCEEDED(hr))hr=IOpcPackage_GetPartSet(package,&parts);
@@ -244,33 +257,34 @@ bool sb_office_document(const unsigned char *bytes,size_t size,const char *forma
         !strcmp(format,"xlsx") ? L"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml" : L"application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml";
     if(ok)ok=!wcscmp(content_type,expected);if(content_type)CoTaskMemFree(content_type);
     bool word=!strcmp(format,"docx"),info=!strcmp(operation,"document_info");
-    if(ok)ok=xml_part(main,&context,0,word && !info);
-    if(word){context.count=1;strcpy(context.units[0].name,"Document text");}
-    document->unit_count=context.count;document->unit_kind=word ? "document" : !strcmp(format,"xlsx") ? "worksheet" : "slide";
-    if(ok && !context.count)ok=false;
+    if(ok)ok=xml_part(main,context,0,word && !info);
+    if(word){context->count=1;strcpy(context->units[0].name,"Document text");}
+    document->unit_count=context->count;document->unit_kind=word ? "document" : !strcmp(format,"xlsx") ? "worksheet" : "slide";
+    if(ok && !context->count)ok=false;
     if(ok && info){document->units=yyjson_mut_arr(doc);
-        for(unsigned i=0;i<context.count && i<128;++i){yyjson_mut_val *item=yyjson_mut_obj(doc);
-            yyjson_mut_obj_add_uint(doc,item,"unit",i+1);yyjson_mut_obj_add_strcpy(doc,item,"name",context.units[i].name);yyjson_mut_arr_add_val(document->units,item);}}
+        for(unsigned i=0;i<context->count && i<128;++i){yyjson_mut_val *item=yyjson_mut_obj(doc);
+            yyjson_mut_obj_add_uint(doc,item,"unit",i+1);yyjson_mut_obj_add_strcpy(doc,item,"name",context->units[i].name);yyjson_mut_arr_add_val(document->units,item);}}
     else if(ok){
-        if(unit>context.count){ok=false;sb_fail(error,"Office document unit is outside the document.");}
-        else strcpy(document->unit_name,context.units[unit-1].name);
+        if(unit>context->count){ok=false;sb_fail(error,"Office document unit is outside the document.");}
+        else strcpy(document->unit_name,context->units[unit-1].name);
         if(ok && !word){ok=SUCCEEDED(IOpcPart_GetRelationshipSet(main,&relationships));
             if(ok && !strcmp(format,"xlsx")){
                 shared=find_relation(parts,relationships,L"sharedStrings",&valid);ok=valid;
-                if(ok && shared)ok=xml_part(shared,&context,2,false);
+                if(ok && shared)ok=xml_part(shared,context,2,false);
             }
             IOpcRelationship *relation=NULL;
-            if(ok)ok=SUCCEEDED(IOpcRelationshipSet_GetRelationship(relationships,context.units[unit-1].id,&relation));
+            if(ok)ok=SUCCEEDED(IOpcRelationshipSet_GetRelationship(relationships,context->units[unit-1].id,&relation));
             if(ok){body=related_part(parts,relation,!strcmp(format,"xlsx") ? L"worksheet" : L"slide");ok=body!=NULL;}
             if(relation)IOpcRelationship_Release(relation);
-            if(ok)ok=xml_part(body,&context,!strcmp(format,"xlsx") ? 3 : 1,true);
+            if(ok)ok=xml_part(body,context,!strcmp(format,"xlsx") ? 3 : 1,true);
         }
-        if(ok){ok=append(&context.text,"",0);if(ok){document->text=context.text.value;document->text_size=context.text.size;
-            document->extraction_truncated=context.text.truncated;context.text.value=NULL;}}
+        if(ok){ok=append(&context->text,"",0);if(ok){document->text=context->text.value;document->text_size=context->text.size;
+            document->extraction_truncated=context->text.truncated;context->text.value=NULL;}}
     }
-    free(context.text.value);free(context.cell.value);for(size_t i=0;i<context.shared_count;++i)free(context.shared[i]);free(context.shared);
+    HRESULT failure=FAILED(hr) ? hr : context->failure;
+    free(context->text.value);free(context->cell.value);for(size_t i=0;i<context->shared_count;++i)free(context->shared[i]);free(context->shared);free(context);
     if(shared)IOpcPart_Release(shared);if(body)IOpcPart_Release(body);if(relationships)IOpcRelationshipSet_Release(relationships);
     if(main)IOpcPart_Release(main);if(roots)IOpcRelationshipSet_Release(roots);if(parts)IOpcPartSet_Release(parts);
     if(package)IOpcPackage_Release(package);if(factory)IOpcFactory_Release(factory);if(stream)IStream_Release(stream);
-    if(!ok && !*error->text)sb_fail(error,"Office package, relationships, XML or extraction budget is invalid; no content returned.");return ok;
+    if(!ok && !*error->text)snprintf(error->text,sizeof(error->text),"Office package, relationships, XML or extraction budget is invalid (0x%08lx); no content returned.",(unsigned long)failure);return ok;
 }

@@ -7,10 +7,10 @@
 | 工具 | 参数与结果 |
 | --- | --- |
 | document_info | workspace_id、path；返回格式、源大小/SHA-256、unit_count、unit_kind 和前 128 个单元元数据，更多时 units_truncated:true |
-| document_read | 加 unit（默认 1）、offset（默认 0）、max_bytes（4–65536，默认 65536）；返回 UTF-8 text、text_size、next_offset、has_more、extraction_truncated |
-| document_preview | 加 unit（默认 1）、max_dimension（128–4096，默认 1600）；返回原生 MCP PNG 图片和实际宽高、字节数、摘要、preview_kind、original_layout、content_preview_truncated |
+| document_read | 加 unit（默认 1）、offset（默认 0）、max_bytes（4–1048576，默认 65536）；返回 UTF-8 text、text_size、next_offset、has_more、extraction_truncated |
+| document_preview | 加 unit（默认 1）、max_dimension（128–8192，默认 1600）；返回原生 MCP PNG 图片和实际宽高、字节数、摘要、preview_kind、original_layout、content_preview_truncated |
 
-单元从 1 开始。PDF 的 unit 是实际页，最多 4096 页；DOCX 只有一个正文单元，不能用 unit 获取原始 Word 页码；XLSX 按工作簿声明顺序选择工作表，PPTX 按演示文稿声明顺序选择幻灯片，各最多 256 个单元。返回的源摘要覆盖整个输入文件，不是仅覆盖所选页面。
+单元从 1 开始。PDF 的 unit 是实际页，最多 4096 页；DOCX 只有一个正文单元，不能用 unit 获取原始 Word 页码；XLSX 按工作簿声明顺序选择工作表，PPTX 按演示文稿声明顺序选择幻灯片，各最多 1024 个单元。返回的源摘要覆盖整个输入文件，不是仅覆盖所选页面。
 
 在正常新格式项目中，工具还支持 approval_id 和显式 identity:current_user / administrator。configured 文件范围使用 workspace_id 和相对路径；current_user 文件范围可省略 workspace_id 使用绝对本地盘符路径。三者须加入 policy.tools，不需要启用 desktop 或命令能力。旧单实例入口提供同样的格式处理，但保留原入口权限语义。
 
@@ -52,13 +52,13 @@ Office 预览将选中单元的提取文本绘制成 PNG，图片标题明确标
 
 | 项目 | 上限/行为 |
 | --- | --- |
-| 文档源 | 32 MiB；内存读取，源不落临时文件、不写回 |
-| 单元提取文本 | 1 MiB；每次返回最多 64 KiB，显式截断标记 |
-| PDF 文本遍历 | 最多 1,048,576 个字符对象 |
-| Office ZIP | 最多 2048 项，单项展开 8 MiB，总展开 64 MiB；不支持 ZIP64、多磁盘、加密或其他压缩方法 |
-| Office XML | 禁止 DTD / 外部实体解析，深度最多 64、单部件事件最多 1,000,000 |
-| XLSX 共享字符串 | 最多 32768 项、累计 4 MiB，单字符串受 1 MiB 文本限制 |
-| PNG 预览 | 最多 16,777,216 像素 / 2 MiB 编码；超过编码预算返回错误，可降低 max_dimension 重试 |
+| 文档源 | 128 MiB；内存读取，源不落临时文件、不写回 |
+| 单元提取文本 | 16 MiB；每次返回最多 1 MiB，默认 64 KiB，显式截断标记 |
+| PDF 文本遍历 | 最多 16,777,216 个字符对象 |
+| Office ZIP | 最多 16384 项，单项展开 32 MiB，总展开 256 MiB；不支持 ZIP64、多磁盘、加密或其他压缩方法 |
+| Office XML | 禁止 DTD / 外部实体解析，深度最多 64、单部件事件最多 4,000,000 |
+| XLSX 共享字符串 | 最多 262144 项、累计 32 MiB，单字符串受 16 MiB 文本限制 |
+| PNG 预览 | 最多 67,108,864 像素 / 16 MiB 编码；超过编码预算返回错误，可降低 max_dimension 重试 |
 
 Office 在内置 OPC 解码前核对 ZIP 中央/本地记录和展开预算，不向磁盘解包；根据包关系定位实际部件，拒绝选中正文的外部关系。采用精确无宏主文档类型并拒绝 vbaProject.bin，不执行宏、公式或文档外部引用。source_modified:false、macros_executed:false、external_resources_loaded:false 描述这些文档行为，系统字体和 DLL 等系统运行依赖仍可读取。
 

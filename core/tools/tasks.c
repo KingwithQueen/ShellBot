@@ -21,7 +21,7 @@ yyjson_mut_val *sb_tasks_call(sb_host *host,const char *actor,const char *name,y
         workspace_id=sb_string(yyjson_obj_get(args,"workspace_id"));
         const char *path=sb_string(yyjson_obj_get(args,"path")),*exe=sb_string(yyjson_obj_get(args,"executable")),*key=sb_string(yyjson_obj_get(args,"request_key"));
         yyjson_val *argv=yyjson_obj_get(args,"argv"),*timeout_value=yyjson_obj_get(args,"timeout_ms"); uint64_t timeout=host->config.limits.task_timeout_ms < 300000 ? host->config.limits.task_timeout_ms : 300000;
-        if(!workspace_id || !exe || !task_key_valid(key) || !yyjson_is_arr(argv) || yyjson_arr_size(argv)>64 || (yyjson_obj_get(args,"path") && !path) ||
+        if(!workspace_id || !exe || !task_key_valid(key) || !yyjson_is_arr(argv) || yyjson_arr_size(argv)>SB_TASK_ARG_LIMIT || (yyjson_obj_get(args,"path") && !path) ||
             (timeout_value && (!sb_integer(timeout_value,&timeout) || timeout<100 || timeout>host->config.limits.task_timeout_ms))) { sb_fail(&error,"Invalid task program, argv, request key, working directory or timeout."); goto done; }
         sb_workspace *workspace=sb_workspace_find(&host->config,workspace_id);
 #ifdef SB_POSIX
@@ -63,15 +63,15 @@ yyjson_mut_val *sb_tasks_call(sb_host *host,const char *actor,const char *name,y
         if(!id || strlen(id)!=32 || strspn(id,"0123456789abcdef")!=32) { sb_fail(&error,"Invalid task_id.");goto done; }
         yyjson_mut_obj_add_strcpy(request,parameters,"task_id",id); event_key=id;
         if(!strcmp(name,"task_output")) {
-            const char *stream=sb_string(yyjson_obj_get(args,"stream")); uint64_t offset=0,maximum=16384;
+            const char *stream=sb_string(yyjson_obj_get(args,"stream")); uint64_t offset=0,maximum=SB_TASK_OUTPUT_DEFAULT_PAGE;
             yyjson_val *offset_value=yyjson_obj_get(args,"offset"),*limit_value=yyjson_obj_get(args,"max_bytes");
             if((yyjson_obj_get(args,"stream") && (!stream || (strcmp(stream,"stdout") && strcmp(stream,"stderr")))) ||
-                (offset_value && !sb_integer(offset_value,&offset)) || (limit_value && (!sb_integer(limit_value,&maximum) || !maximum || maximum>16384))) { sb_fail(&error,"Invalid output stream or page.");goto done; }
+                (offset_value && !sb_integer(offset_value,&offset)) || (limit_value && (!sb_integer(limit_value,&maximum) || !maximum || maximum>SB_TASK_OUTPUT_PAGE_LIMIT))) { sb_fail(&error,"Invalid output stream or page.");goto done; }
             yyjson_mut_obj_add_str(request,parameters,"stream",stream?stream:"stdout");
             yyjson_mut_obj_add_uint(request,parameters,"offset",offset);yyjson_mut_obj_add_uint(request,parameters,"max_bytes",maximum);
         } else if(!strcmp(name,"task_input")) {
             const char *key=sb_string(yyjson_obj_get(args,"input_key")),*text=sb_string(yyjson_obj_get(args,"text")); yyjson_val *eof=yyjson_obj_get(args,"eof");
-            if(!task_key_valid(key) || !text || strlen(text)>4096 || (eof && !yyjson_is_bool(eof))) { sb_fail(&error,"Invalid stdin key, text or EOF.");goto done; }
+            if(!task_key_valid(key) || !text || strlen(text)>SB_TASK_INPUT_LIMIT || (eof && !yyjson_is_bool(eof))) { sb_fail(&error,"Invalid stdin key, text or EOF.");goto done; }
             yyjson_mut_obj_add_strcpy(request,parameters,"input_key",key); yyjson_mut_obj_add_strcpy(request,parameters,"text",text);
             yyjson_mut_obj_add_bool(request,parameters,"eof",yyjson_get_bool(eof));
             if(!sb_platform_sha256(text,strlen(text),request_hash,&error)) goto done;

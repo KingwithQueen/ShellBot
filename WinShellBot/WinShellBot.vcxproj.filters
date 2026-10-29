@@ -67,6 +67,7 @@
     <ClInclude Include="platform\app_icon.h"><Filter>头文件</Filter></ClInclude>
     <ClInclude Include="..\core\include\sb_version.h"><Filter>头文件</Filter></ClInclude>
     <ClInclude Include="..\core\include\sb.h"><Filter>头文件</Filter></ClInclude>
+    <ClInclude Include="..\core\include\sb_limits.h"><Filter>头文件</Filter></ClInclude>
     <ClInclude Include="..\core\include\sb_projects.h"><Filter>头文件</Filter></ClInclude>
     <ClInclude Include="platform\execution.h"><Filter>头文件</Filter></ClInclude>
     <ClInclude Include="app\owner_ui.h"><Filter>头文件</Filter></ClInclude>

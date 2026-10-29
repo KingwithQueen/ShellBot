@@ -12,11 +12,11 @@ typedef struct { const char *name; const char *description; const char *schema; 
 static const tool_definition definitions[] = {
     {"fs_stat","Inspect a file or directory and return its physical version for subsequent native file operations. Set directory:true for directories. No file content is read.","{\"type\":\"object\",\"properties\":{" FS_LOCATION "},\"required\":[\"workspace_id\",\"path\"],\"additionalProperties\":false}"},
     {"fs_mkdir","Create one new directory in an existing authorized parent. No overwrite or recursive parent creation. Keep request_key and approval_id on retries.","{\"type\":\"object\",\"properties\":{" FS_LOCATION FS_CHANGE "},\"required\":[\"workspace_id\",\"path\",\"request_key\"],\"additionalProperties\":false}"},
-    {"fs_copy","Copy a binary file up to 64 MiB to a new destination. Source may be read-only; destination must be writable. Supply expected_version from fs_stat. Destination workspace defaults to source workspace. No directory-tree copy or overwrite.","{\"type\":\"object\",\"properties\":{" FS_LOCATION FS_CHANGE FS_VERSION FS_DEST "},\"required\":[\"workspace_id\",\"path\",\"destination_path\",\"expected_version\",\"request_key\"],\"additionalProperties\":false}"},
+    {"fs_copy","Copy a binary file within max_transfer_bytes from host_capabilities to a new destination. Source may be read-only; destination must be writable. Supply expected_version from fs_stat. Destination workspace defaults to source workspace. No directory-tree copy or overwrite.","{\"type\":\"object\",\"properties\":{" FS_LOCATION FS_CHANGE FS_VERSION FS_DEST "},\"required\":[\"workspace_id\",\"path\",\"destination_path\",\"expected_version\",\"request_key\"],\"additionalProperties\":false}"},
     {"fs_move","Rename/move a file or directory on the same volume to a new destination. Both locations must permit writes. Supply expected_version from fs_stat; set directory:true for a directory. No overwrite; cross-volume files require explicit copy then delete.","{\"type\":\"object\",\"properties\":{" FS_LOCATION FS_CHANGE FS_VERSION FS_DEST "},\"required\":[\"workspace_id\",\"path\",\"destination_path\",\"expected_version\",\"request_key\"],\"additionalProperties\":false}"},
-    {"fs_delete","Delete one file up to 64 MiB after retaining a private binary backup, or remove an empty directory with directory:true. Supply expected_version from fs_stat. No recursive deletion. backup_id identifies the retained original bytes.","{\"type\":\"object\",\"properties\":{" FS_LOCATION FS_CHANGE FS_VERSION "},\"required\":[\"workspace_id\",\"path\",\"expected_version\",\"request_key\"],\"additionalProperties\":false}"},
-    {"artifact_download", "Transfer an authorized binary file up to 64 MiB in bounded Base64 chunks. Versioned projects only. open requires workspace_id/path and request_key; optional expected_sha256/ttl_seconds. Approval precedes all source bytes. read requires transfer_id and offset, optionally max_bytes up to 32768; continue at next_offset, retry only the last chunk. status/cancel require transfer_id. Bound to caller, project and backend; no anonymous URL or client attachment integration.", "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"open\",\"read\",\"status\",\"cancel\"]},\"workspace_id\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"request_key\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":64},\"transfer_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32},\"offset\":{\"type\":\"integer\",\"minimum\":0},\"expected_sha256\":{\"type\":\"string\",\"minLength\":64,\"maxLength\":64},\"ttl_seconds\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":900},\"max_bytes\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":32768}},\"required\":[\"action\"],\"additionalProperties\":false}"},
-    {"artifact_upload", "Upload a binary file up to 64 MiB to a NEW authorized destination. Versioned projects only, write permission mandatory. open requires workspace_id/path, request_key, exact size and expected_sha256 before approval/staging. write requires transfer_id, offset, canonical data_base64 up to 32768 decoded bytes. Append at next_offset; retry only identical last bytes. commit verifies complete size/SHA-256 then creates the file, never overwrites. status/cancel require transfer_id. Expiry/revoke/restart cannot resume staging.", "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"open\",\"write\",\"commit\",\"status\",\"cancel\"]},\"workspace_id\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"request_key\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":64},\"transfer_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32},\"offset\":{\"type\":\"integer\",\"minimum\":0},\"expected_sha256\":{\"type\":\"string\",\"minLength\":64,\"maxLength\":64},\"ttl_seconds\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":900},\"size\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":67108864},\"data_base64\":{\"type\":\"string\",\"maxLength\":43692}},\"required\":[\"action\"],\"additionalProperties\":false}"},
+    {"fs_delete","Delete one file within max_transfer_bytes from host_capabilities after retaining a private binary backup, or remove an empty directory with directory:true. Supply expected_version from fs_stat. No recursive deletion. backup_id identifies the retained original bytes.","{\"type\":\"object\",\"properties\":{" FS_LOCATION FS_CHANGE FS_VERSION "},\"required\":[\"workspace_id\",\"path\",\"expected_version\",\"request_key\"],\"additionalProperties\":false}"},
+    {"artifact_download", "Transfer an authorized binary file within max_transfer_bytes from host_capabilities in bounded Base64 chunks. Versioned projects only. open requires workspace_id/path and request_key; optional expected_sha256/ttl_seconds. Approval precedes all source bytes. read requires transfer_id and offset, optionally max_bytes up to max_transfer_chunk_bytes; continue at next_offset, retry only the last chunk. status/cancel require transfer_id. Bound to caller, project and backend; no anonymous URL or client attachment integration.", "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"open\",\"read\",\"status\",\"cancel\"]},\"workspace_id\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"request_key\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":64},\"transfer_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32},\"offset\":{\"type\":\"integer\",\"minimum\":0},\"expected_sha256\":{\"type\":\"string\",\"minLength\":64,\"maxLength\":64},\"ttl_seconds\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":900},\"max_bytes\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":32768}},\"required\":[\"action\"],\"additionalProperties\":false}"},
+    {"artifact_upload", "Upload a binary file within max_transfer_bytes from host_capabilities to a NEW authorized destination. Versioned projects only, write permission mandatory. open requires workspace_id/path, request_key, exact size and expected_sha256 before approval/staging. write requires transfer_id, offset, canonical data_base64 up to max_transfer_chunk_bytes decoded bytes. Append at next_offset; retry only identical last bytes. commit verifies complete size/SHA-256 then creates the file, never overwrites. status/cancel require transfer_id. Expiry/revoke/restart cannot resume staging.", "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"open\",\"write\",\"commit\",\"status\",\"cancel\"]},\"workspace_id\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"request_key\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":64},\"transfer_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32},\"offset\":{\"type\":\"integer\",\"minimum\":0},\"expected_sha256\":{\"type\":\"string\",\"minLength\":64,\"maxLength\":64},\"ttl_seconds\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":900},\"size\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":67108864},\"data_base64\":{\"type\":\"string\",\"maxLength\":43692}},\"required\":[\"action\"],\"additionalProperties\":false}"},
     {"host_info", "Report ShellBot version, native OS and uptime.", "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"},
     {"host_capabilities", "Report implemented tools, workspace permissions, limits and pending features.", "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"},
     {"fs_write", "Create UTF-8 text by default. Existing-file overwrite requires overwrite:true and expected_sha256, a private backup and local owner approval. Inspect/approve locally, then retry identical arguments with approval_id. read_only:false is required. Overwrite is a locked in-place edit with backup, not an atomic save.",
@@ -29,21 +29,56 @@ static const tool_definition definitions[] = {
         "{\"type\":\"object\",\"properties\":{\"workspace_id\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"offset\":{\"type\":\"integer\",\"minimum\":0},\"max_bytes\":{\"type\":\"integer\",\"minimum\":4,\"maximum\":65536},\"encoding\":{\"type\":\"string\",\"enum\":[\"auto\",\"utf-8\",\"utf-16le\",\"utf-16be\"]}},\"required\":[\"workspace_id\",\"path\"],\"additionalProperties\":false}"},
     {"fs_search", "Search case-sensitive literal file names or UTF-8/UTF-16 contents. Content mode returns one excerpt per matching line. Skips unreadable/binary files; bounds entries, depth, bytes, time and output. Truncation means more matches may exist.",
         "{\"type\":\"object\",\"properties\":{\"workspace_id\":{\"type\":\"string\"},\"path\":{\"type\":\"string\",\"default\":\".\"},\"query\":{\"type\":\"string\",\"minLength\":1},\"mode\":{\"type\":\"string\",\"enum\":[\"filename\",\"content\"],\"default\":\"filename\"},\"recursive\":{\"type\":\"boolean\",\"default\":false},\"max_results\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":100},\"max_file_bytes\":{\"type\":\"integer\",\"minimum\":4,\"maximum\":1048576,\"default\":262144},\"max_total_bytes\":{\"type\":\"integer\",\"minimum\":4,\"maximum\":16777216,\"default\":4194304}},\"required\":[\"workspace_id\",\"query\"],\"additionalProperties\":false}"},
-    {"image_view", "Fully decode a bounded PNG/JPEG and return native MCP image content. Optional max_dimension:128..4096 shrinks proportionally without enlarging. Sources up to 16 MiB and 16777216 pixels; output at most 2 MiB. Larger sources are normalized to a bounded PNG, possibly smaller than requested. Original bytes are preserved when no processing is needed; derivatives omit source metadata and use stored raster orientation.",
+    {"image_view", "Fully decode a bounded PNG/JPEG and return native MCP image content. Optional max_dimension from 128 to max_image_dimension shrinks proportionally without enlarging. Read source/output byte and pixel budgets from host_capabilities. Larger sources are normalized to a bounded PNG, possibly smaller than requested. Original bytes are preserved when no processing is needed; derivatives omit source metadata and use stored raster orientation.",
         "{\"type\":\"object\",\"properties\":{\"workspace_id\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"max_dimension\":{\"type\":\"integer\",\"minimum\":128,\"maximum\":4096}},\"required\":[\"workspace_id\",\"path\"],\"additionalProperties\":false}"}
 ,
-    {"task_start", "Start a background native executable in explicitly enabled user or administrator mode. Requires a caller request_key; retries return the original task and changed requests are rejected. Workspace locates cwd; arbitrary commands retain the selected account permissions and are not confined by file roots. Supply current host_instance_id from host_capabilities; stale requests after restart are rejected.", "{\"type\":\"object\",\"properties\":{\"workspace_id\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"executable\":{\"type\":\"string\"},\"argv\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"maxItems\":64},\"request_key\":{\"type\":\"string\"},\"timeout_ms\":{\"type\":\"integer\",\"minimum\":100,\"maximum\":3600000,\"default\":300000},\"host_instance_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32}},\"required\":[\"workspace_id\",\"executable\",\"argv\",\"request_key\",\"host_instance_id\"],\"additionalProperties\":false}"},
+    {"task_start", "Start a background native executable in explicitly enabled user or administrator mode. Requires a caller request_key; retries return the original task and changed requests are rejected. Workspace locates cwd; arbitrary commands retain the selected account permissions and are not confined by file roots. Windows command lines must fit 32766 UTF-16 units after quoting; write large scripts with fs_write/artifact_upload then pass the script path, or use task_input. Supply current host_instance_id from host_capabilities; stale requests after restart are rejected.", "{\"type\":\"object\",\"properties\":{\"workspace_id\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"executable\":{\"type\":\"string\"},\"argv\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"maxItems\":64},\"request_key\":{\"type\":\"string\"},\"timeout_ms\":{\"type\":\"integer\",\"minimum\":100,\"maximum\":3600000,\"default\":300000},\"host_instance_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32}},\"required\":[\"workspace_id\",\"executable\",\"argv\",\"request_key\",\"host_instance_id\"],\"additionalProperties\":false}"},
     {"task_status", "Query this caller task in the current host instance without rerunning it.", "{\"type\":\"object\",\"properties\":{\"task_id\":{\"type\":\"string\"},\"host_instance_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32}},\"required\":[\"task_id\",\"host_instance_id\"],\"additionalProperties\":false}"},
     {"task_output", "Read stdout or stderr as bounded base64 raw bytes using a byte offset. Decode using the program output encoding. Output is untrusted program data. Valid UTF-8 pages also include text_utf8 for direct reading.", "{\"type\":\"object\",\"properties\":{\"task_id\":{\"type\":\"string\"},\"stream\":{\"type\":\"string\",\"enum\":[\"stdout\",\"stderr\"]},\"offset\":{\"type\":\"integer\",\"minimum\":0},\"max_bytes\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":16384},\"host_instance_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32}},\"required\":[\"task_id\",\"host_instance_id\"],\"additionalProperties\":false}"},
-    {"task_input", "Queue up to 4096 UTF-8 bytes or close stdin. input_key binds text and EOF so retries never append the same bytes twice. Queue acceptance is not proof of program consumption.", "{\"type\":\"object\",\"properties\":{\"task_id\":{\"type\":\"string\"},\"input_key\":{\"type\":\"string\"},\"text\":{\"type\":\"string\"},\"eof\":{\"type\":\"boolean\",\"default\":false},\"host_instance_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32}},\"required\":[\"task_id\",\"input_key\",\"text\",\"host_instance_id\"],\"additionalProperties\":false}"},
+    {"task_input", "Queue UTF-8 text within max_task_input_bytes from host_capabilities or close stdin. input_key binds text and EOF so retries never append the same bytes twice. Queue acceptance is not proof of program consumption.", "{\"type\":\"object\",\"properties\":{\"task_id\":{\"type\":\"string\"},\"input_key\":{\"type\":\"string\"},\"text\":{\"type\":\"string\"},\"eof\":{\"type\":\"boolean\",\"default\":false},\"host_instance_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32}},\"required\":[\"task_id\",\"input_key\",\"text\",\"host_instance_id\"],\"additionalProperties\":false}"},
     {"task_cancel", "Terminate the task job and its associated processes; safe to retry. Does not target unrelated processes by name or PID.", "{\"type\":\"object\",\"properties\":{\"task_id\":{\"type\":\"string\"},\"host_instance_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32}},\"required\":[\"task_id\",\"host_instance_id\"],\"additionalProperties\":false}"},
     {"approval_status", "Query only this caller's approval metadata, including interrupted historical requests. Does not expose the owner credential or request body and cannot approve.", "{\"type\":\"object\",\"properties\":{\"approval_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32}},\"required\":[\"approval_id\"],\"additionalProperties\":false}"},
     {"approval_cancel", "Cancel only this caller's pending approval or remaining read permit; safe to retry. Does not approve or roll back effects.", "{\"type\":\"object\",\"properties\":{\"approval_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32}},\"required\":[\"approval_id\"],\"additionalProperties\":false}"},
     {"document_info", "Inspect an approved PDF/DOCX/XLSX/PPTX and list up to 128 document units. PDF units are pages, DOCX has one text document, XLSX units are worksheets and PPTX units are slides. Does not edit the source or execute macros. Legacy DOC/XLS/PPT must be converted first.", "{\"type\":\"object\",\"properties\":{\"workspace_id\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"}},\"required\":[\"workspace_id\",\"path\"],\"additionalProperties\":false}"},
-    {"document_read", "Read bounded extracted UTF-8 text from one approved document unit, numbered from 1. Continue at next_offset with identical arguments and approval_id. PDF text follows object order, with no OCR. XLSX returns cell references and stored values, never recalculates formulas. Office XML text is not original page layout. Source maximum 32 MiB, extracted unit maximum 1 MiB.", "{\"type\":\"object\",\"properties\":{\"workspace_id\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"unit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":4096,\"default\":1},\"offset\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":1048576},\"max_bytes\":{\"type\":\"integer\",\"minimum\":4,\"maximum\":65536}},\"required\":[\"workspace_id\",\"path\"],\"additionalProperties\":false}"},
+    {"document_read", "Read bounded extracted UTF-8 text from one approved document unit, numbered from 1. Continue at next_offset with identical arguments and approval_id. PDF text follows object order, with no OCR. XLSX returns cell references and stored values, never recalculates formulas. Office XML text is not original page layout. Read source and extracted unit budgets from host_capabilities.", "{\"type\":\"object\",\"properties\":{\"workspace_id\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"unit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":4096,\"default\":1},\"offset\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":1048576},\"max_bytes\":{\"type\":\"integer\",\"minimum\":4,\"maximum\":65536}},\"required\":[\"workspace_id\",\"path\"],\"additionalProperties\":false}"},
     {"document_preview", "Return a bounded native PNG image of one approved PDF page or an explicitly labelled Office structured text preview. Office previews do not reproduce Word pagination, spreadsheet formatting, slide graphics or original layout. Unit numbers start at 1. Source is unchanged; no macros, external resources or formula execution.", "{\"type\":\"object\",\"properties\":{\"workspace_id\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"unit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":4096,\"default\":1},\"max_dimension\":{\"type\":\"integer\",\"minimum\":128,\"maximum\":4096,\"default\":1600}},\"required\":[\"workspace_id\",\"path\"],\"additionalProperties\":false}"}
 };
 
+/* 工具发现和参数验证必须使用同一份容量，避免说明已放宽但实际仍被旧 schema 拒绝。 */
+static void schema_bound(yyjson_mut_doc *doc, yyjson_mut_val *properties, const char *field, const char *key, uint64_t maximum) {
+    yyjson_mut_val *property=yyjson_mut_obj_get(properties,field);
+    if (!property) return;
+    yyjson_mut_obj_remove_str(property,key); yyjson_mut_obj_add_uint(doc,property,key,maximum);
+}
+static yyjson_doc *tool_schema(const tool_definition *definition) {
+    yyjson_doc *input=yyjson_read(definition->schema,strlen(definition->schema),0);
+    yyjson_mut_doc *doc=input ? yyjson_doc_mut_copy(input,NULL) : NULL; yyjson_doc_free(input);
+    if (!doc) return NULL;
+    yyjson_mut_val *properties=yyjson_mut_obj_get(yyjson_mut_doc_get_root(doc),"properties");
+    const char *name=definition->name;
+    if (!strcmp(name,"fs_read") || !strcmp(name,"document_read")) schema_bound(doc,properties,"max_bytes","maximum",SB_READ_LIMIT);
+    if (!strcmp(name,"document_read")) schema_bound(doc,properties,"offset","maximum",SB_DOCUMENT_TEXT_LIMIT);
+    if (!strcmp(name,"image_view") || !strcmp(name,"document_preview")) schema_bound(doc,properties,"max_dimension","maximum",SB_IMAGE_DIMENSION);
+    if (!strcmp(name,"artifact_download") || !strcmp(name,"artifact_upload")) {
+        schema_bound(doc,properties,"max_bytes","maximum",SB_TRANSFER_CHUNK);
+        schema_bound(doc,properties,"data_base64","maxLength",4*((SB_TRANSFER_CHUNK+2)/3));
+        schema_bound(doc,properties,"size","maximum",SB_TRANSFER_LIMIT);
+        schema_bound(doc,properties,"ttl_seconds","maximum",SB_TRANSFER_MAX_TTL);
+    }
+    if (!strcmp(name,"task_start")) schema_bound(doc,properties,"argv","maxItems",SB_TASK_ARG_LIMIT);
+    if (!strcmp(name,"task_output")) schema_bound(doc,properties,"max_bytes","maximum",SB_TASK_OUTPUT_PAGE_LIMIT);
+    if (!strcmp(name,"task_input")) schema_bound(doc,properties,"text","maxLength",SB_TASK_INPUT_LIMIT);
+    if (!strcmp(name,"fs_list")) {
+        schema_bound(doc,properties,"offset","maximum",SB_LIST_OFFSET_LIMIT);
+        schema_bound(doc,properties,"max_entries","maximum",SB_LIST_LIMIT);
+    }
+    if (!strcmp(name,"fs_search")) {
+        schema_bound(doc,properties,"max_results","maximum",SB_SEARCH_RESULTS);
+        schema_bound(doc,properties,"max_file_bytes","maximum",SB_SEARCH_FILE_LIMIT);
+        schema_bound(doc,properties,"max_total_bytes","maximum",SB_SEARCH_TOTAL_LIMIT);
+    }
+    yyjson_doc *result=yyjson_mut_doc_imut_copy(doc,NULL); yyjson_mut_doc_free(doc); return result;
+}
 static size_t tool_count(void) { return sizeof(definitions) / sizeof(definitions[0]); }
 
 static bool platform_tool_available(const char *name) {
@@ -75,7 +110,7 @@ static yyjson_mut_val *tools_list(yyjson_mut_doc *doc, bool approvals) {
         yyjson_mut_val *tool = yyjson_mut_obj(doc);
         yyjson_mut_obj_add_str(doc, tool, "name", definitions[i].name);
         yyjson_mut_obj_add_str(doc, tool, "description", definitions[i].description);
-        yyjson_doc *schema = yyjson_read(definitions[i].schema, strlen(definitions[i].schema), 0);
+        yyjson_doc *schema = tool_schema(&definitions[i]);
         if (!schema) return NULL;
         yyjson_mut_obj_add_val(doc, tool, "inputSchema", yyjson_val_mut_copy(doc, yyjson_doc_get_root(schema)));
         yyjson_doc_free(schema);
@@ -132,14 +167,13 @@ yyjson_mut_val *sb_project_tools_list(sb_host *host, yyjson_mut_doc *doc) {
             if (!strncmp(name,"approval_",9)) continue;
             const char *policy_description="Project policy controls this operation. Administrator operations require identity:administrator and a manager-owned shared agent with owner project permission. Keep this identity on task status/output/input/cancel too. Pending replies contain approval_id; the local owner uses the matching ordinary or administrator approval channel. Keep arguments identical; file pages use next_offset and the same approval_id. With current_user file scope, omit workspace_id for an absolute local path. Read-only grants, expected hashes and private backups still apply.";
             char document_description[2048];
-            if (sb_document_tool(name) || sb_transfer_tool(name) || sb_file_manage_tool(name)) {
+            {
                 const char *description=yyjson_mut_get_str(yyjson_mut_obj_get(tool,"description"));
                 if (!description) return NULL;
                 snprintf(document_description,sizeof(document_description),"%s %s",description,policy_description);
             }
             yyjson_mut_obj_remove_str(tool,"description");
-            if (sb_document_tool(name) || sb_transfer_tool(name) || sb_file_manage_tool(name)) yyjson_mut_obj_add_strcpy(doc,tool,"description",document_description);
-            else yyjson_mut_obj_add_str(doc,tool,"description",policy_description);
+            yyjson_mut_obj_add_strcpy(doc,tool,"description",document_description);
         }
     }
     return result;
@@ -180,7 +214,7 @@ static bool expected_hash(yyjson_val *args, char hash[65]) {
 static bool arguments_valid(const tool_definition *definition, yyjson_val *args, const sb_host *host) {
     if (!args) return true;
     if (!yyjson_is_obj(args)) return false;
-    yyjson_doc *schema = yyjson_read(definition->schema, strlen(definition->schema), 0);
+    yyjson_doc *schema = tool_schema(definition);
     if (!schema) return false;
     yyjson_val *properties = yyjson_obj_get(yyjson_doc_get_root(schema), "properties");
     bool valid = true;
@@ -200,7 +234,7 @@ static bool arguments_valid(const tool_definition *definition, yyjson_val *args,
     yyjson_doc_free(schema);
     if (!strcmp(definition->name,"image_view")) {
         uint64_t maximum=0;
-        if (!number(args,"max_dimension",0,128,4096,&maximum)) valid=false;
+        if (!number(args,"max_dimension",0,128,SB_IMAGE_DIMENSION,&maximum)) valid=false;
     }
     return valid;
 }
@@ -277,19 +311,32 @@ static yyjson_mut_val *tool_call_inner(sb_host *host, const char *actor, const c
         yyjson_mut_obj_add_val(doc, data, "tools", tools);
         yyjson_mut_obj_add_val(doc, data, "workspaces", roots);
         yyjson_mut_obj_add_val(doc, data, "protocol_versions", versions);
-        yyjson_mut_obj_add_uint(doc, data, "max_text_bytes", SB_TEXT_LIMIT);
+        yyjson_mut_obj_add_uint(doc, data, "max_text_bytes", SB_READ_LIMIT);
         yyjson_mut_obj_add_uint(doc, data, "max_image_bytes", SB_IMAGE_LIMIT);
         yyjson_mut_obj_add_uint(doc, data, "max_image_source_bytes", SB_IMAGE_INPUT_LIMIT);
         yyjson_mut_obj_add_uint(doc, data, "max_image_source_pixels", SB_IMAGE_PIXEL_LIMIT);
         yyjson_mut_obj_add_uint(doc, data, "max_image_source_dimension", 32768);
-        yyjson_mut_obj_add_uint(doc, data, "max_image_dimension", 4096);
+        yyjson_mut_obj_add_uint(doc, data, "max_image_dimension", SB_IMAGE_DIMENSION);
         yyjson_mut_obj_add_bool(doc, data, "image_full_decode", media_available);
         yyjson_mut_obj_add_bool(doc, data, "image_resize", media_available);
         yyjson_mut_obj_add_bool(doc, data, "file_write", true);
         yyjson_mut_obj_add_bool(doc, data, "file_overwrite", true);
         yyjson_mut_obj_add_bool(doc, data, "file_patch", true);
         yyjson_mut_obj_add_bool(doc, data, "atomic_overwrite", false);
-        yyjson_mut_obj_add_uint(doc, data, "max_edit_bytes", SB_TEXT_LIMIT);
+        yyjson_mut_obj_add_uint(doc, data, "max_edit_bytes", SB_EDIT_LIMIT);
+        yyjson_mut_obj_add_uint(doc,data,"max_request_bytes",SB_REQUEST_LIMIT);
+        yyjson_mut_obj_add_uint(doc,data,"max_response_bytes",SB_RESPONSE_LIMIT);
+        yyjson_mut_obj_add_uint(doc,data,"default_text_page_bytes",SB_READ_DEFAULT);
+        yyjson_mut_obj_add_uint(doc,data,"max_read_permit_bytes",SB_READ_PERMIT_LIMIT);
+        yyjson_mut_obj_add_uint(doc,data,"max_task_input_bytes",SB_TASK_INPUT_LIMIT);
+        yyjson_mut_obj_add_uint(doc,data,"max_task_output_page_bytes",SB_TASK_OUTPUT_PAGE_LIMIT);
+        yyjson_mut_obj_add_uint(doc,data,"max_task_arguments",SB_TASK_ARG_LIMIT);
+#ifndef SB_POSIX
+        yyjson_mut_obj_add_uint(doc,data,"max_command_utf16_units",SB_WINDOWS_COMMAND_CAP-1u);
+#endif
+        yyjson_mut_obj_add_uint(doc,data,"max_transfer_ttl_seconds",SB_TRANSFER_MAX_TTL);
+        yyjson_mut_obj_add_uint(doc,data,"default_transfer_chunk_bytes",SB_TRANSFER_DEFAULT_CHUNK);
+        yyjson_mut_obj_add_uint(doc,data,"max_transfer_total_bytes",SB_TRANSFER_TOTAL);
         yyjson_mut_obj_add_uint(doc, data, "max_backups_per_instance", 64);
         yyjson_mut_obj_add_bool(doc, data, "execution", sb_execution_available(host->execution));
         yyjson_mut_obj_add_val(doc, data, "execution_status", sb_execution_status(host->execution, doc));
@@ -402,9 +449,9 @@ static yyjson_mut_val *tool_call_inner(sb_host *host, const char *actor, const c
         uint64_t maximum, per_file, total_bytes;
         if (!query || !*query || strlen(query) > 512 || (recursive && !yyjson_is_bool(recursive)) ||
             (!mode && yyjson_obj_get(args, "mode")) || (mode && strcmp(mode, "filename") && strcmp(mode, "content")) ||
-            !number(args, "max_results", 50, 1, 100, &maximum) ||
-            !number(args, "max_file_bytes", 262144, 4, 1048576, &per_file) ||
-            !number(args, "max_total_bytes", 4194304, 4, 16777216, &total_bytes)) return failure(doc, "Invalid search parameters.");
+            !number(args, "max_results", 50, 1, SB_SEARCH_RESULTS, &maximum) ||
+            !number(args, "max_file_bytes", 262144, 4, SB_SEARCH_FILE_LIMIT, &per_file) ||
+            !number(args, "max_total_bytes", 4194304, 4, SB_SEARCH_TOTAL_LIMIT, &total_bytes)) return failure(doc, "Invalid search parameters.");
         bool content = mode && !strcmp(mode, "content");
         if (content && (strchr(query, '\r') || strchr(query, '\n'))) return failure(doc, "Content queries must fit on one line.");
         char *decoded = NULL; size_t decoded_length, consumed; const char *detected;
@@ -421,7 +468,7 @@ static yyjson_mut_val *tool_call_inner(sb_host *host, const char *actor, const c
     yyjson_mut_val *result = NULL;
     if (directory) {
         uint64_t offset, limit;
-        if (!number(args, "offset", 0, 0, 10000, &offset) || !number(args, "max_entries", 100, 1, 200, &limit)) {
+        if (!number(args, "offset", 0, 0, SB_LIST_OFFSET_LIMIT, &offset) || !number(args, "max_entries", 100, 1, SB_LIST_LIMIT, &limit)) {
             result = failure(doc, "Invalid directory range."); goto done;
         }
         sb_entry *entries = NULL;
@@ -440,7 +487,7 @@ static yyjson_mut_val *tool_call_inner(sb_host *host, const char *actor, const c
         uint64_t offset, limit;
         const char *encoding = sb_string(yyjson_obj_get(args, "encoding"));
         if ((!encoding && yyjson_obj_get(args, "encoding")) || !number(args, "offset", 0, 0, INT64_MAX, &offset) ||
-            !number(args, "max_bytes", SB_TEXT_LIMIT, 4, SB_TEXT_LIMIT, &limit)) {
+            !number(args, "max_bytes", SB_READ_DEFAULT, 4, SB_READ_LIMIT, &limit)) {
             result = failure(doc, "Invalid text range or encoding."); goto done;
         }
         if (!encoding) encoding = "auto";
@@ -483,13 +530,13 @@ static yyjson_mut_val *tool_call_inner(sb_host *host, const char *actor, const c
         }
     } else {
         uint64_t size = sb_platform_size(file);
-        if (!size || size > SB_IMAGE_INPUT_LIMIT) { result = failure(doc, "Image exceeds 16 MiB or is empty."); goto done; }
+        if (!size || size > SB_IMAGE_INPUT_LIMIT) { result = failure(doc, "Image is empty or exceeds max_image_source_bytes from host_capabilities."); goto done; }
         unsigned char *bytes = malloc((size_t)size);
         if (!bytes) { result = failure(doc, "Out of memory."); goto done; }
         size_t got = 0;
         bool ok = sb_platform_read(file, 0, bytes, (size_t)size, &got, &error);
         uint64_t maximum=0; sb_image processed={0}; char source_hash[65],output_hash[65];
-        ok=ok && got==size && number(args,"max_dimension",0,128,4096,&maximum) &&
+        ok=ok && got==size && number(args,"max_dimension",0,128,SB_IMAGE_DIMENSION,&maximum) &&
             sb_image_prepare(bytes,got,(unsigned)maximum,&processed,&error);
         const unsigned char *output=processed.encoded ? processed.encoded : bytes;
         if (ok) ok=sb_platform_sha256(bytes,got,source_hash,&error) && sb_platform_sha256(output,processed.size,output_hash,&error);
@@ -542,7 +589,7 @@ static char *operation_parameters(const char *name, yyjson_val *args) {
 
 static bool project_arguments_valid(sb_host *host, const tool_definition *definition, yyjson_val *args) {
     if (!arguments_valid(definition,args,host)) return false;
-    yyjson_doc *schema = yyjson_read(definition->schema,strlen(definition->schema),0);
+    yyjson_doc *schema = tool_schema(definition);
     if (!schema) return false;
     yyjson_val *root = yyjson_doc_get_root(schema), *required = yyjson_obj_get(root,"required"), *properties = yyjson_obj_get(root,"properties");
     bool valid = true; size_t idx,max; yyjson_val *key,*value;
@@ -731,7 +778,7 @@ static yyjson_mut_val *project_tool_call(sb_host *host, const char *actor, const
         }
         if(!sb_string(yyjson_obj_get(args,"path")))return failure(doc,"Transfer open requires a path.");
         const char *key=sb_string(yyjson_obj_get(args,"request_key"));char hash[65];uint64_t ttl,size;
-        if(!key || !*key || strlen(key)>64 || !number(args,"ttl_seconds",300,1,900,&ttl) ||
+        if(!key || !*key || strlen(key)>64 || !number(args,"ttl_seconds",SB_TRANSFER_TTL,1,SB_TRANSFER_MAX_TTL,&ttl) ||
             (upload && (!sb_integer(yyjson_obj_get(args,"size"),&size) || size>SB_TRANSFER_LIMIT || !expected_hash(args,hash))) ||
             (!upload && yyjson_obj_get(args,"expected_sha256") && !expected_hash(args,hash)))return failure(doc,"Transfer open requires a request_key, bounded expiry and valid size/checksum metadata.");
     }
@@ -812,13 +859,13 @@ static yyjson_mut_val *project_tool_call(sb_host *host, const char *actor, const
         if(!ok || !sb_platform_sha256(pair,strlen(pair),version,&error)) { result=failure(doc,error.text);goto done; }
     }
     uint64_t offset=0,budget=1;
-    if(!strcmp(name,"fs_read") || !strcmp(name,"document_read")) { if(!number(args,"offset",0,0,INT64_MAX,&offset)||!number(args,"max_bytes",SB_TEXT_LIMIT,4,SB_TEXT_LIMIT,&budget)){result=failure(doc,"Invalid file page.");goto done;} }
-    else if(!strcmp(name,"fs_list")) { if(!number(args,"offset",0,0,10000,&offset)||!number(args,"max_entries",100,1,200,&budget)){result=failure(doc,"Invalid directory page.");goto done;} }
-    else if(!strcmp(name,"fs_search")) { if(!number(args,"max_total_bytes",16777216,4,16777216,&budget)){result=failure(doc,"Invalid search budget.");goto done;} }
+    if(!strcmp(name,"fs_read") || !strcmp(name,"document_read")) { if(!number(args,"offset",0,0,INT64_MAX,&offset)||!number(args,"max_bytes",SB_READ_DEFAULT,4,SB_READ_LIMIT,&budget)){result=failure(doc,"Invalid file page.");goto done;} }
+    else if(!strcmp(name,"fs_list")) { if(!number(args,"offset",0,0,SB_LIST_OFFSET_LIMIT,&offset)||!number(args,"max_entries",100,1,SB_LIST_LIMIT,&budget)){result=failure(doc,"Invalid directory page.");goto done;} }
+    else if(!strcmp(name,"fs_search")) { if(!number(args,"max_total_bytes",4194304,4,SB_SEARCH_TOTAL_LIMIT,&budget)){result=failure(doc,"Invalid search budget.");goto done;} }
     else if(!strcmp(name,"image_view"))budget=SB_IMAGE_INPUT_LIMIT;
     else if(sb_document_tool(name))budget=SB_DOCUMENT_INPUT_LIMIT;
     else if(sb_transfer_tool(name))budget=SB_TRANSFER_LIMIT;
-    else if(!strcmp(name,"fs_write") || !strcmp(name,"fs_patch"))budget=SB_TEXT_LIMIT;
+    else if(!strcmp(name,"fs_write") || !strcmp(name,"fs_patch"))budget=SB_EDIT_LIMIT;
     if(!file_tool && decision.decision==SB_DECISION_ALLOW && !yyjson_obj_get(args,"approval_id")) {
         host->approved_target_version=target_version;host->approved_program_version=*program_version?program_version:NULL;
         result=tool_call_inner(host,actor,name,args,doc,NULL,NULL,true);

@@ -6,20 +6,11 @@
 #include <stdint.h>
 #include "yyjson.h"
 #include "sb_version.h"
+#include "sb_limits.h"
 
-#define SB_TRANSFER_LIMIT (64u * 1024u * 1024u)
-#define SB_TRANSFER_CHUNK 32768u
 #define SB_MAX_ROOTS 16
 #define SB_MAX_WORKSPACES (SB_MAX_ROOTS * 2)
 #define SB_PATH_CAP 32768
-#define SB_REQUEST_LIMIT (1024u * 1024u)
-#define SB_TEXT_LIMIT 65536u
-#define SB_IMAGE_LIMIT (2u * 1024u * 1024u)
-#define SB_IMAGE_INPUT_LIMIT (16u * 1024u * 1024u)
-#define SB_IMAGE_PIXEL_LIMIT 16777216u
-#define SB_DOCUMENT_INPUT_LIMIT (32u * 1024u * 1024u)
-#define SB_DOCUMENT_TEXT_LIMIT (1024u * 1024u)
-#define SB_RESPONSE_LIMIT (4u * 1024u * 1024u)
 #define SB_AUDIT_LIMIT (8u * 1024u * 1024u)
 
 typedef struct { char text[256]; } sb_error;

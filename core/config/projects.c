@@ -345,7 +345,7 @@ static bool project_parse(sb_project *project, yyjson_val *value, sb_error *erro
         "workspaces", "extra_directories", "policy", "approval_ttl_seconds", "audit_max_bytes", "legacy_config", "resources"};
     static const char *const legacy_keys[] = {"id", "policy_revision", "enabled", "data_dir", "legacy_config"};
     uint64_t number;
-    project->limits = (sb_resource_limits){8, 32, 262144, 3600000, 64, 512};
+    project->limits = (sb_resource_limits){8, 32, SB_TASK_OUTPUT_DEFAULT, 3600000, 64, SB_WORKER_MEMORY_DEFAULT};
     if (!KEYS(value, allowed) || !copy_id(project->id, yyjson_obj_get(value, "id")) ||
         !bool_field(value, "enabled", true, &project->enabled) ||
         !number_field(value, "policy_revision", 1, 1, UINT64_MAX, &project->policy_revision)) return false;
@@ -380,7 +380,7 @@ static bool project_parse(sb_project *project, yyjson_val *value, sb_error *erro
         unsigned *fields[] = {&project->limits.active_tasks, &project->limits.task_records, &project->limits.output_bytes,
             &project->limits.task_timeout_ms, &project->limits.approval_records, &project->limits.worker_memory_mb};
         static const unsigned minimum[] = {1, 1, 1024, 100, 1, 16};
-        static const unsigned maximum[] = {8, 32, 262144, 3600000, 64, 4096};
+        static const unsigned maximum[] = {8, 32, SB_TASK_OUTPUT_LIMIT, 3600000, 64, 4096};
         if (!KEYS(resources, keys)) return false;
         for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i) {
             if (!number_field(resources, keys[i], *fields[i], minimum[i], maximum[i], &number)) return false;

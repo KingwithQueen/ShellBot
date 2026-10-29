@@ -18,6 +18,15 @@
    before reserving its worker; workers never receive bearer credentials. */
 #define WORKER_IO_MS 8000
 #define WORKER_REQUEST_LIMIT (SB_REQUEST_LIMIT + 65536u)
+
+/* 仅数据工具使用较长等待窗口；普通状态请求仍及时发现失联的工作进程。 */
+static unsigned operation_io_ms(const char *name) {
+    return name && (!strncmp(name,"fs_",3) || !strncmp(name,"artifact_",9) ||
+        !strncmp(name,"document_",9) || !strcmp(name,"image_view") || !strcmp(name,"desktop_capture")) ? 120000u : WORKER_IO_MS;
+}
+static unsigned request_io_ms(yyjson_val *request) {
+    return operation_io_ms(sb_string(yyjson_obj_get(yyjson_obj_get(request,"params"),"name")));
+}
 typedef struct {
     CRITICAL_SECTION lock;
     const sb_project *project;
@@ -154,7 +163,7 @@ static char *administrator_exchange_locked(manager *m, worker *w, const char *co
     yyjson_mut_obj_add_uint(doc,root,"policy_revision",w->project->policy_revision);
     yyjson_mut_obj_add_uint(doc,root,"authorization_version",w->authorization_version);
     yyjson_mut_obj_add_str(doc,root,"host_instance_id",w->instance); yyjson_mut_obj_add_str(doc,root,"actor",actor);
-    yyjson_mut_obj_add_uint(doc,root,"sequence",++m->administrator_sequence); yyjson_mut_obj_add_uint(doc,root,"deadline_ms",sb_platform_millis()+WORKER_IO_MS);
+    yyjson_mut_obj_add_uint(doc,root,"sequence",++m->administrator_sequence); yyjson_mut_obj_add_uint(doc,root,"deadline_ms",sb_platform_millis()+operation_io_ms(sb_string(yyjson_obj_get(operation,"name"))));
     yyjson_mut_obj_add_str(doc,root,"operation_sha256",hash); yyjson_mut_obj_add_val(doc,root,"operation",yyjson_val_mut_copy(doc,operation));
     /* Owner-only diagnostic uses fixed invalid bindings, never arbitrary packets. */
     if (fault) {
@@ -659,7 +668,7 @@ static char *gateway_call(void *context, void *binding, const char *request, siz
     }
     wire = yyjson_mut_write(doc, 0, NULL);
     if (!wire || strlen(wire) > WORKER_REQUEST_LIMIT) { *http_status = 413; response = error_json("Worker request frame exceeds its limit."); goto done; }
-    uint64_t deadline = sb_platform_millis() + WORKER_IO_MS;
+    uint64_t deadline = sb_platform_millis() + request_io_ms(yyjson_doc_get_root(input));
     char *frame = worker_exchange(m,w,wire,yyjson_doc_get_root(input),"project-mcp",deadline,SB_RESPONSE_LIMIT);
     yyjson_doc *reply = frame ? yyjson_read(frame, strlen(frame), 0) : NULL;
     yyjson_val *root = yyjson_doc_get_root(reply), *body = yyjson_obj_get(root, "body"); uint64_t status_code = 0;
@@ -898,7 +907,7 @@ static char *manager_request_unlocked(void *context, const char *request, size_t
                     yyjson_mut_obj_add_str(doc, envelope, "kind", !strcmp(command, "project-owner") ? "owner" : "mcp");
                     yyjson_mut_obj_add_val(doc, envelope, "request", yyjson_val_mut_copy(doc, payload));
                     char *wire = yyjson_mut_val_write(envelope, 0, NULL);
-                    uint64_t deadline = sb_platform_millis() + WORKER_IO_MS;
+                    uint64_t deadline = sb_platform_millis() + request_io_ms(payload);
                     char *response = wire ? worker_exchange(m,w,wire,payload,"manager-owner",deadline,SB_RESPONSE_LIMIT - 1024) : NULL;
                     free(wire);
                     yyjson_doc *reply = response ? yyjson_read(response, strlen(response), 0) : NULL;

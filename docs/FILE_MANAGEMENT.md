@@ -6,7 +6,7 @@
 | --- | --- |
 | fs_stat | workspace_id、path，可选 directory:true；返回 type、size、version，不读取正文 |
 | fs_mkdir | workspace_id、path、request_key；在已有父目录中创建一层目录，目标必须不存在 |
-| fs_copy | workspace_id、path、destination_path、expected_version、request_key；复制最多 64 MiB 的单个二进制文件，不覆盖目标 |
+| fs_copy | workspace_id、path、destination_path、expected_version、request_key；复制最多 4 GiB 的单个二进制文件，不覆盖目标 |
 | fs_move | 同 fs_copy，可选 directory:true；同一卷内重命名或移动文件/目录，不覆盖目标 |
 | fs_delete | workspace_id、path、expected_version、request_key，可选 directory:true；文件删除前保存私有备份，目录必须为空 |
 
@@ -24,6 +24,6 @@ always 中 fs_stat 也先审批；workspace_auto 对工作目录自动、额外�
 
 request_key 为 1–64 个字母、数字、下划线、点或连字符。重试保持原参数、键及 approval_id；相同完成请求返回原回执，不再次操作。更改参数须新键并重新审阅；重启不恢复旧编号或许可，也不自动重放。回执描述原结果，不代表目标当前状态。
 
-删除文件最多 64 MiB，备份为所属后端私有 Data/deleted-<backup_id>.bin，仅当前账户和 SYSTEM 可访问。备份和 backup_saved 审计先刷新成功后才删除；失败保留源。backup_id 也进入持久记录。备份保存字节，不包含全部原 ACL，不是 Windows 回收站。所有者核对后明确恢复，程序不自动恢复或清理历史；与文本修改共用每实例 64 个备份槽。
+删除文件最多 4 GiB，备份为所属后端私有 Data/deleted-<backup_id>.bin，仅当前账户和 SYSTEM 可访问。备份和 backup_saved 审计先刷新成功后才删除；失败保留源。backup_id 也进入持久记录。备份保存字节，不包含全部原 ACL，不是 Windows 回收站。所有者核对后明确恢复，程序不自动恢复或清理历史；与文本修改共用每实例 64 个备份槽。
 
 组件测试覆盖真实字节、Unicode、只读源复制、禁止覆盖、同目录文件/目录重命名、删除备份、审批、版本和重试。跨目录移动保留原生目标目录句柄；先前 AppContainer 环境返回 STATUS_INVALID_HANDLE 的报告保留，收尾已通过普通 owner/worker 及真实管理员代理的跨目录移动验证。最终程序和报告以 M13 收据为准。跨卷移动、目录树复制和递归删除未纳入接口，须显式拆分操作。原生重命名的同目录简单名称及目录句柄语义参考 [Microsoft FILE_RENAME_INFORMATION](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information)。

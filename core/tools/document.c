@@ -19,9 +19,9 @@ yyjson_mut_val *sb_document_call(sb_file *file,const char *path,const char *name
         sb_fail(error,"Supported documents: PDF, DOCX, XLSX and PPTX. Convert legacy DOC/XLS/PPT or macro-enabled files to a supported format first."); return NULL;
     }
     uint64_t size=sb_platform_size(file),unit,offset,limit,dimension;
-    if (!size || size>SB_DOCUMENT_INPUT_LIMIT) { sb_fail(error,"Document is empty or exceeds the 32 MiB source budget.");return NULL; }
+    if (!size || size>SB_DOCUMENT_INPUT_LIMIT) { sb_fail(error,"Document is empty or exceeds max_document_source_bytes from host_capabilities.");return NULL; }
     if (!integer(args,"unit",1,1,4096,&unit) || !integer(args,"offset",0,0,SB_DOCUMENT_TEXT_LIMIT,&offset) ||
-        !integer(args,"max_bytes",SB_TEXT_LIMIT,4,SB_TEXT_LIMIT,&limit) || !integer(args,"max_dimension",1600,128,4096,&dimension)) {
+        !integer(args,"max_bytes",SB_READ_DEFAULT,4,SB_READ_LIMIT,&limit) || !integer(args,"max_dimension",1600,128,SB_IMAGE_DIMENSION,&dimension)) {
         sb_fail(error,"Invalid document unit, text offset, output budget or preview dimensions.");return NULL;
     }
     unsigned char *bytes=malloc((size_t)size); size_t got=0; sb_document document={0};

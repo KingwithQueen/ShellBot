@@ -46,15 +46,15 @@ dev.15 为普通、新格式项目提供当前用户会话的截图、窗口列�
 | --- | --- |
 | `desktop_lease` | `action`；acquire/renew 可选 `duration_seconds`，不能超过项目上限；renew/release 需要本人 `lease_id` |
 | `desktop_state` / `window_list` | `lease_id`、`request_key`；当前会话、显示器物理范围/DPI、剪贴板序号、最多 128 个可见窗口与不透明 `window_id` |
-| `desktop_capture` | 可选 `monitor_id`（稳定排序、从 0 开始）、`max_dimension`（200–1600）；裁剪必须同时给绝对 `x/y/width/height`，且完整位于选中显示器；返回 PNG 原生 MCP image，编码不超过 1 MiB，不包含光标 |
+| `desktop_capture` | 可选 `monitor_id`（稳定排序、从 0 开始）、`max_dimension`（200–8192，默认 1600）；裁剪必须同时给绝对 `x/y/width/height`，且完整位于选中显示器；返回 PNG 原生 MCP image，编码不超过 16 MiB，不包含光标 |
 | `window_focus` | `screen_id`、`window_id`；核验进程身份、窗口位置和权限，遵守 Windows 前台切换限制；失败如实返回 |
 | `desktop_click` | `screen_id`、`x/y`；可选 `button: left/right/middle`、`clicks: 1/2` |
 | `desktop_drag` | `screen_id`、`x/y/to_x/to_y`；可选 `button`、50–1000 ms 的 `duration_ms`；分步检查暂停、前台和期限，最终释放按键 |
 | `desktop_scroll` | `screen_id`、`x/y`、非零 `delta`（-1200–1200）；可选 `horizontal` |
 | `desktop_type` | `screen_id`、UTF-8 `text`，最多 512 个 UTF-16 单元和 4096 字节；直接 Unicode 输入，不使用剪贴板粘贴 |
 | `desktop_key` | `screen_id`、1–4 项 `keys`；大写字母/数字、F1–F12、CTRL/ALT/SHIFT、ENTER/TAB/ESC/BACKSPACE/DELETE/HOME/END/PAGEUP/PAGEDOWN/UP/DOWN/LEFT/RIGHT/SPACE；修饰键在前、普通键在末，按下和释放成对提交 |
-| `clipboard_read` | 独立读取权限；`lease_id`、`request_key`、观察中的 `expected_sequence`；仅 CF_UNICODETEXT，最多 32 KiB 原始内存 |
-| `clipboard_write` | 独立写入权限；上述序号及 UTF-8 `text`（最多 4096 字节）；序号改变则拒绝；成功写入会替换原剪贴板全部格式，返回新序号 |
+| `clipboard_read` | 独立读取权限；`lease_id`、`request_key`、观察中的 `expected_sequence`；仅 CF_UNICODETEXT，最多 1 MiB 原始 UTF-16 内存 |
+| `clipboard_write` | 独立写入权限；上述序号及 UTF-8 `text`（最多 524287 字节）；序号改变则拒绝；成功写入会替换原剪贴板全部格式，返回新序号 |
 
 点击、滚动及拖动端点必须位于观测的前台窗口，截图观察还要求坐标在截取区域内。已按住修饰键或鼠标键时拒绝新输入。键盘工具不支持 Win 键、Ctrl+Alt+Delete、自身紧急停止组合或保持按键。窗口焦点权限仅覆盖同账户、同会话且不高于普通主机完整性的目标。
 

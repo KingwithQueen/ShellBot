@@ -14,7 +14,7 @@ typedef struct {
 } search_state;
 
 static bool stop(search_state *s) {
-    if (s->allocation_failed || s->scanned >= 1000 || s->matched >= s->maximum ||
+    if (s->allocation_failed || s->scanned >= SB_SEARCH_ENTRIES || s->matched >= s->maximum ||
         sb_platform_millis() >= s->deadline || (s->content && s->bytes_read >= s->total_bytes)) {
         s->truncated = true; return true;
     }
@@ -25,7 +25,7 @@ static bool add_match(search_state *s, const sb_entry *entry, const char *path,
                        uint64_t line, size_t column, const char *excerpt, size_t excerpt_length,
                        bool excerpt_truncated, bool file_truncated, const char *encoding) {
     size_t budget = strlen(path) + strlen(entry->name) + excerpt_length + 256;
-    if (s->matched >= s->maximum || s->output_bytes + budget > 131072) {
+    if (s->matched >= s->maximum || s->output_bytes + budget > SB_SEARCH_OUTPUT_LIMIT) {
         s->truncated = true; return false;
     }
     yyjson_mut_val *item = yyjson_mut_obj(s->doc);
@@ -101,7 +101,7 @@ static void search_directory(search_state *s, const char *path, unsigned depth) 
     sb_file *directory = sb_platform_open(s->workspace->root, path, true, &error);
     if (!directory) { ++s->skipped_directories; return; }
     sb_entry *entries = NULL; size_t count = 0; bool more = false;
-    bool ok = sb_platform_list(directory, 0, 1000 - s->scanned, &entries, &count, &more, &error);
+    bool ok = sb_platform_list(directory, 0, SB_SEARCH_ENTRIES - s->scanned, &entries, &count, &more, &error);
     sb_platform_close(directory);
     if (!ok) { ++s->skipped_directories; return; }
     s->truncated |= more;
@@ -126,7 +126,7 @@ static void search_directory(search_state *s, const char *path, unsigned depth) 
             add_match(s, &entries[i], relative, 0, 0, NULL, 0, false, false, NULL);
         if (s->recursive && entries[i].directory) {
             if (entries[i].reparse) ++s->skipped_reparse_directories;
-            else if (depth < 8) search_directory(s, relative, depth + 1);
+            else if (depth < SB_SEARCH_DEPTH) search_directory(s, relative, depth + 1);
             else s->truncated = true;
         }
         free(relative);

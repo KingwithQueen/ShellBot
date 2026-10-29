@@ -6,7 +6,7 @@
 
 #define TRANSFER_RECORDS 32
 #define TRANSFER_ACTIVE 8
-#define TRANSFER_TOTAL (256u * 1024u * 1024u)
+#define TRANSFER_TOTAL SB_TRANSFER_TOTAL
 typedef enum { ACTIVE, COMPLETE, CANCELLED, EXPIRED_TRANSFER, FAILED_TRANSFER } transfer_state;
 typedef struct {
     char id[33],actor[64],key[65],arguments[65],hash[65],version[65],ticket[33];
@@ -37,6 +37,7 @@ static yyjson_mut_val *metadata(yyjson_mut_doc *doc,const transfer *r) {
     yyjson_mut_obj_add_str(doc,out,"status",states[r->state]);yyjson_mut_obj_add_strcpy(doc,out,"filename",r->filename);
     yyjson_mut_obj_add_uint(doc,out,"size",r->size);yyjson_mut_obj_add_strcpy(doc,out,"sha256",r->hash);
     yyjson_mut_obj_add_uint(doc,out,"next_offset",r->next);yyjson_mut_obj_add_uint(doc,out,"max_chunk_bytes",SB_TRANSFER_CHUNK);
+    yyjson_mut_obj_add_uint(doc,out,"default_chunk_bytes",SB_TRANSFER_DEFAULT_CHUNK);
     yyjson_mut_obj_add_bool(doc,out,"source_modified",false);yyjson_mut_obj_add_bool(doc,out,"overwrite",false);
     yyjson_mut_obj_add_bool(doc,out,"committed",r->upload && r->state==COMPLETE);
     yyjson_mut_obj_add_bool(doc,out,"restart_resumable",false);
@@ -75,7 +76,7 @@ static bool digest_open(yyjson_val *args,char out[65],sb_error *error) {
 }
 yyjson_mut_val *sb_transfer_call(sb_host *host,const char *actor,const char *name,yyjson_val *args,
     yyjson_mut_doc *doc,sb_workspace *workspace,const char *path,const char *ticket,bool *failed) {
-    sb_error error={0};yyjson_mut_val *out=NULL;*failed=true;
+    sb_error error={0};yyjson_mut_val *out=NULL;unsigned char *bytes=NULL;*failed=true;
     sb_transfers *value=host->transfers;const char *action=sb_string(yyjson_obj_get(args,"action"));bool upload=!strcmp(name,"artifact_upload");
     if(!value || !host->project || host->project->legacy_compatibility || !action || !actor || strlen(actor)>=64){sb_fail(&error,"Transfers require a running versioned project.");goto finish;}
     sb_platform_mutex_lock(value->mutex);
@@ -83,12 +84,12 @@ yyjson_mut_val *sb_transfer_call(sb_host *host,const char *actor,const char *nam
     transfer *r=NULL;
     if(!strcmp(action,"open")) {
         const char *key=sb_string(yyjson_obj_get(args,"request_key"));char digest[65];uint64_t ttl,size=0;
-        if(!workspace || !path || !key || !*key || strlen(key)>64 || !number(args,"ttl_seconds",300,900,&ttl) || !ttl || !digest_open(args,digest,&error)) { sb_fail(&error,"Open requires a target, request_key and ttl_seconds within 1..900.");goto unlock; }
+        if(!workspace || !path || !key || !*key || strlen(key)>64 || !number(args,"ttl_seconds",SB_TRANSFER_TTL,SB_TRANSFER_MAX_TTL,&ttl) || !ttl || !digest_open(args,digest,&error)) { sb_fail(&error,"Open requires a target, request_key and ttl_seconds within max_transfer_ttl_seconds from host_capabilities.");goto unlock; }
         for(size_t i=0;i<TRANSFER_RECORDS;++i)if(*value->records[i].id && !strcmp(value->records[i].actor,actor) && !strcmp(value->records[i].key,key)) {
             r=&value->records[i];if(r->upload!=upload || strcmp(r->arguments,digest) || strcmp(r->ticket,ticket?ticket:"")){sb_fail(&error,"request_key belongs to another transfer or permit.");goto unlock;}
             out=metadata(doc,r);*failed=false;goto unlock;
         }
-        if(upload && (!sb_integer(yyjson_obj_get(args,"size"),&size) || size>SB_TRANSFER_LIMIT)) {sb_fail(&error,"Upload size is required and limited to 64 MiB.");goto unlock;}
+        if(upload && (!sb_integer(yyjson_obj_get(args,"size"),&size) || size>SB_TRANSFER_LIMIT)) {sb_fail(&error,"Upload size is required and must fit max_transfer_bytes from host_capabilities.");goto unlock;}
         unsigned active=0;uint64_t total=0;
         for(size_t i=0;i<TRANSFER_RECORDS;++i){transfer *current=&value->records[i];if(!*current->id && !r)r=current;
             if(current->state==ACTIVE && *current->id){++active;total+=current->size;}}
@@ -128,10 +129,12 @@ yyjson_mut_val *sb_transfer_call(sb_host *host,const char *actor,const char *nam
     if(upload && !strcmp(action,"commit") && r->state==COMPLETE){out=metadata(doc,r);*failed=false;goto unlock;}
     if(r->state!=ACTIVE && !(r->state==COMPLETE && !upload && !strcmp(action,"read"))){sb_fail(&error,"Transfer is cancelled, expired, failed or completed.");goto unlock;}
     if(sb_platform_millis()>=r->deadline || (*r->ticket && !sb_policy_transfer_valid(host->policy,r->ticket,actor))){release(r);r->state=EXPIRED_TRANSFER;sb_fail(&error,"Transfer permit expired or was revoked.");goto unlock;}
-    uint64_t offset;unsigned char bytes[SB_TRANSFER_CHUNK];size_t count=0;
+    uint64_t offset;size_t count=0;
+    /* 分块缓冲只在传输数据时分配，避免扩大分块后耗尽线程栈。 */
+    bytes=malloc(SB_TRANSFER_CHUNK);if(!bytes){sb_fail(&error,"Cannot allocate transfer chunk.");goto unlock;}
     if(!upload && !strcmp(action,"read")) {
         uint64_t max;char current[65];
-        if(!number(args,"offset",0,r->size,&offset) || !number(args,"max_bytes",SB_TRANSFER_CHUNK,SB_TRANSFER_CHUNK,&max) || !max){sb_fail(&error,"Invalid download offset or chunk size.");goto unlock;}
+        if(!number(args,"offset",0,r->size,&offset) || !number(args,"max_bytes",SB_TRANSFER_DEFAULT_CHUNK,SB_TRANSFER_CHUNK,&max) || !max){sb_fail(&error,"Invalid download offset or chunk size.");goto unlock;}
         if(offset==r->last_offset){if(max!=r->last_budget){sb_fail(&error,"Retry chunk size changed.");goto unlock;}count=r->last_size;memcpy(bytes,r->last,count);}
         else {
             if(r->state!=ACTIVE || offset!=r->next){sb_fail(&error,"Download must continue at next_offset; only the last chunk may be retried.");goto unlock;}
@@ -162,7 +165,7 @@ yyjson_mut_val *sb_transfer_call(sb_host *host,const char *actor,const char *nam
         release(r);r->state=COMPLETE;out=metadata(doc,r);*failed=false;
     } else sb_fail(&error,"Action is unsupported for this transfer direction.");
 unlock:
-    sb_platform_mutex_unlock(value->mutex);
+    free(bytes);sb_platform_mutex_unlock(value->mutex);
 finish:
     if(!out){out=yyjson_mut_obj(doc);yyjson_mut_obj_add_strcpy(doc,out,"error",*error.text?error.text:"Transfer failed; no content returned.");}
     if(host->project){yyjson_mut_obj_add_str(doc,out,"project_id",host->project->id);yyjson_mut_obj_add_uint(doc,out,"policy_revision",host->project->policy_revision);}

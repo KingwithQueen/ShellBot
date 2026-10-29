@@ -12,13 +12,13 @@
 #define TASK_RECORDS 32
 #define TASK_ACTIVE 8
 #define OUTPUT_CAP 262144u
-#define INPUT_RECORDS 64
+#define INPUT_RECORDS 1024
 typedef struct { char key[65], hash[65]; char *data; DWORD length; bool eof, sent, delivered; } task_input;
 typedef struct task {
     SRWLOCK lock;
     char id[33], key[65], hash[65], actor[64];
     HANDLE job, process, input, output[2], readers[2], writer, input_event;
-    unsigned char *bytes[2]; size_t lengths[2], output_cap;
+    unsigned char *bytes[2]; size_t lengths[2], capacities[2], output_cap;
     bool output_done[2], input_closed, input_failed, finished;
     DWORD pid, exit_code; uint64_t started, timeout;
     const char *reason;
@@ -96,11 +96,19 @@ static bool absolute_exe(const wchar_t *path) {
 }
 /* Windows CRT argument rules; the chosen executable may interpret its own arguments. */
 static bool quote(wchar_t *line, size_t *used, const wchar_t *arg) {
-    size_t size = wcslen(arg), bound = size * 2 + 4;
-    if (bound >= 32768 - *used) return false;
+    /* 精确计算转义后的长度，普通长参数不会再被最坏情况预估提前拒绝。 */
+    size_t bound = (*used ? 1u : 0u) + 2u, slashes = 0;
+    for (const wchar_t *p = arg; ; ++p) {
+        if (*p == L'\\') { ++slashes; continue; }
+        bound += (*p == L'"' || !*p) ? slashes * 2 : slashes;
+        slashes = 0;
+        if (!*p) break;
+        bound += *p == L'"' ? 2u : 1u;
+    }
+    if (*used >= SB_WINDOWS_COMMAND_CAP || bound >= SB_WINDOWS_COMMAND_CAP - *used) return false;
     if (*used) line[(*used)++] = L' ';
     line[(*used)++] = L'"';
-    size_t slashes = 0;
+    slashes = 0;
     for (const wchar_t *p = arg; ; ++p) {
         if (*p == L'\\') { ++slashes; continue; }
         size_t copies = (*p == L'"' || !*p) ? slashes * 2 : slashes;
@@ -118,6 +126,13 @@ static DWORD WINAPI read_output(void *parameter) {
     while (ReadFile(item->output[stream], chunk, sizeof(chunk), &got, NULL) && got) {
         AcquireSRWLockExclusive(&item->lock);
         size_t remaining = item->output_cap - item->lengths[stream], copy = got < remaining ? got : remaining;
+        if (item->lengths[stream]+copy>item->capacities[stream]) {
+            size_t capacity=item->capacities[stream];
+            while(capacity<item->lengths[stream]+copy) { capacity*=2; if(capacity>item->output_cap)capacity=item->output_cap; }
+            unsigned char *grown=realloc(item->bytes[stream],capacity);
+            if(grown) { item->bytes[stream]=grown;item->capacities[stream]=capacity; }
+            else { copy=0;if(!item->reason){item->reason="failed";task_event(item,"task_output_allocation_failed","running",false);TerminateJobObject(item->job,126);} }
+        }
         memcpy(item->bytes[stream] + item->lengths[stream], chunk, copy); item->lengths[stream] += copy;
         if (copy < got && !item->reason) { item->reason = "output_limit"; task_event(item,"task_output_limit","running",false); TerminateJobObject(item->job, 124); }
         ReleaseSRWLockExclusive(&item->lock);
@@ -201,7 +216,7 @@ static void task_free(task *item) {
     free(item->bytes[0]); free(item->bytes[1]); free(item->command); free(item);
 }
 sb_win_tasks *sb_win_tasks_new(sb_execution_profile profile) {
-    const sb_resource_limits limits = {8,32,262144,3600000,64,512};
+    const sb_resource_limits limits = {8,32,SB_TASK_OUTPUT_DEFAULT,3600000,64,SB_WORKER_MEMORY_DEFAULT};
     return sb_win_tasks_new_limited(profile, &limits);
 }
 sb_win_tasks *sb_win_tasks_new_limited(sb_execution_profile profile, const sb_resource_limits *limits) {
@@ -279,7 +294,7 @@ static char *start(sb_win_tasks *tasks, yyjson_val *args) {
     const char *token_env = sb_string(yyjson_obj_get(args, "token_env"));
     yyjson_val *argv = yyjson_obj_get(args, "argv"); uint64_t timeout = 0;
     if (!key_valid(key) || !actor || !*actor || strlen(actor) >= 64 || !hash || strlen(hash) != 64 || strspn(hash,"0123456789abcdef") != 64 ||
-        !token_env || !sb_integer(yyjson_obj_get(args, "timeout_ms"), &timeout) || timeout < 100 || timeout > tasks->limits.task_timeout_ms || !yyjson_is_arr(argv) || yyjson_arr_size(argv) > 64) return fail("Invalid normalized task request.");
+        !token_env || !sb_integer(yyjson_obj_get(args, "timeout_ms"), &timeout) || timeout < 100 || timeout > tasks->limits.task_timeout_ms || !yyjson_is_arr(argv) || yyjson_arr_size(argv) > SB_TASK_ARG_LIMIT) return fail("Invalid normalized task request.");
     size_t slot = TASK_RECORDS, active = 0;
     for (size_t i = 0; i < TASK_RECORDS; ++i) {
         task *old = tasks->items[i]; if (!old) { if (slot == TASK_RECORDS && i < tasks->limits.task_records) slot = i; continue; }
@@ -297,11 +312,11 @@ static char *start(sb_win_tasks *tasks, yyjson_val *args) {
     if (slot >= tasks->limits.task_records || active >= tasks->limits.active_tasks) return fail("Task record or active process budget reached; records are never silently evicted.");
     const char *runtime=sb_string(yyjson_obj_get(args,"runtime_directory"));sb_error runtime_error={0};char *fallback=runtime?NULL:sb_platform_default_data_dir(&runtime_error);
     const char *exclude[]={token_env};wchar_t *env=runtime || fallback ? sb_platform_child_environment(runtime?runtime:fallback,exclude,1,&runtime_error):NULL;free(fallback);
-    wchar_t *exe = to_wide(executable), *directory = to_wide(cwd), *line = calloc(32768,sizeof(wchar_t)); size_t used = 0;
+    wchar_t *exe = to_wide(executable), *directory = to_wide(cwd), *line = calloc(SB_WINDOWS_COMMAND_CAP,sizeof(wchar_t)); size_t used = 0;
     bool valid = absolute_exe(exe) && directory && line && env && (!tasks->sandbox || sb_win_sandbox_program(tasks->sandbox,exe)) && quote(line,&used,exe);
     size_t idx,max; yyjson_val *argument;
     yyjson_arr_foreach(argv,idx,max,argument) { wchar_t *wide = to_wide(sb_string(argument)); valid = valid && wide && quote(line,&used,wide); free(wide); }
-    if (!valid) { free(exe); free(directory); free(line); free(env); return fail("Executable must be an absolute local .exe path; arguments must be bounded Unicode strings."); }
+    if (!valid) { free(exe); free(directory); free(line); free(env); return fail("Executable must be an absolute local .exe path; the quoted command line must fit 32766 UTF-16 units. Use fs_write/artifact_upload plus a script path, or task_input for large source text."); }
     task *item = calloc(1,sizeof(*item));
     if (!item) { free(exe); free(directory); free(line); free(env); return fail("Cannot allocate task."); }
     InitializeSRWLock(&item->lock); strcpy(item->key,key); strcpy(item->hash,hash); strcpy(item->actor,actor); item->timeout=timeout; item->owner=tasks;
@@ -309,7 +324,9 @@ static char *start(sb_win_tasks *tasks, yyjson_val *args) {
     unsigned char random[16]; sb_error error={0}; bool ok = sb_platform_random(random,sizeof(random),&error);
     for(size_t i=0;ok && i<16;++i) snprintf(item->id+i*2,3,"%02x",random[i]);
     item->output_cap=tasks->limits.output_bytes;
-    item->bytes[0]=malloc(item->output_cap); item->bytes[1]=malloc(item->output_cap);
+    /* 只为实际输出增长缓冲，较高配额不再等于每个空闲任务都预分配最大容量。 */
+    item->capacities[0]=item->capacities[1]=item->output_cap<SB_TEXT_LIMIT ? item->output_cap : SB_TEXT_LIMIT;
+    item->bytes[0]=malloc(item->capacities[0]); item->bytes[1]=malloc(item->capacities[1]);
     SECURITY_ATTRIBUTES security={sizeof(security),NULL,TRUE}; HANDLE child_input=NULL,child_output[2]={NULL,NULL};
     ok = ok && item->bytes[0] && item->bytes[1] && CreatePipe(&child_input,&item->input,&security,4096) && SetHandleInformation(item->input,HANDLE_FLAG_INHERIT,0);
     for(unsigned i=0;ok && i<2;++i) ok=CreatePipe(&item->output[i],&child_output[i],&security,4096) && SetHandleInformation(item->output[i],HANDLE_FLAG_INHERIT,0);
@@ -372,7 +389,7 @@ char *sb_win_tasks_call(sb_win_tasks *tasks,const char *name,yyjson_val *args) {
         result=snapshot(tasks,item,doc);
     } else if(!strcmp(name,"task_output")) {
         const char *stream=sb_string(yyjson_obj_get(args,"stream")); unsigned selected=stream && !strcmp(stream,"stderr")?1:0; uint64_t offset=0,maximum=0;
-        if(!stream || (strcmp(stream,"stdout") && strcmp(stream,"stderr")) || !sb_integer(yyjson_obj_get(args,"offset"),&offset) || !sb_integer(yyjson_obj_get(args,"max_bytes"),&maximum) || maximum<1 || maximum>16384 || offset>item->lengths[selected]) error="Invalid output stream, byte offset or limit.";
+        if(!stream || (strcmp(stream,"stdout") && strcmp(stream,"stderr")) || !sb_integer(yyjson_obj_get(args,"offset"),&offset) || !sb_integer(yyjson_obj_get(args,"max_bytes"),&maximum) || maximum<1 || maximum>SB_TASK_OUTPUT_PAGE_LIMIT || offset>item->lengths[selected]) error="Invalid output stream, byte offset or limit.";
         else {
             size_t length=item->lengths[selected]-(size_t)offset; if(length>maximum) length=(size_t)maximum;
             char *encoded=sb_base64(item->bytes[selected]+(size_t)offset,length);
@@ -384,13 +401,14 @@ char *sb_win_tasks_call(sb_win_tasks *tasks,const char *name,yyjson_val *args) {
         }
     } else if(!strcmp(name,"task_input")) {
         const char *key=sb_string(yyjson_obj_get(args,"input_key")),*text=sb_string(yyjson_obj_get(args,"text")); yyjson_val *eof_value=yyjson_obj_get(args,"eof");
-        bool eof=yyjson_get_bool(eof_value); size_t length=text?strlen(text):0; char hash[65]; sb_error hash_error={0}; task_input *existing=NULL;
+        bool eof=yyjson_get_bool(eof_value); size_t length=text?strlen(text):0; char hash[65]; sb_error hash_error={0}; task_input *existing=NULL; size_t queued=0;
         if (tasks->store && (!sb_store_healthy(tasks->store) || !sb_audit_healthy(tasks->audit))) error="Persistent state or audit unavailable; stdin was not queued.";
-        else if(!key_valid(key) || !text || length>4096 || !yyjson_is_bool(eof_value) || (!length && !eof) || !sb_platform_sha256(text,length,hash,&hash_error)) error="Invalid input key, UTF-8 text or EOF flag.";
+        else if(!key_valid(key) || !text || length>SB_TASK_INPUT_LIMIT || !yyjson_is_bool(eof_value) || (!length && !eof) || !sb_platform_sha256(text,length,hash,&hash_error)) error="Invalid input key, UTF-8 text or EOF flag.";
         else {
-            for(size_t i=0;i<item->input_count;++i) if(!strcmp(item->inputs[i].key,key)) existing=&item->inputs[i];
+            for(size_t i=0;i<item->input_count;++i) { if(item->inputs[i].data) queued+=item->inputs[i].length; if(!strcmp(item->inputs[i].key,key)) existing=&item->inputs[i]; }
             if(existing && (strcmp(existing->hash,hash) || existing->eof!=eof)) error="input_key already binds different input.";
             else if(!existing && (item->finished || item->reason || item->input_closed || (item->input_count && item->inputs[item->input_count-1].eof))) error="Task stdin is closed or closing.";
+            else if(!existing && length>SB_TASK_INPUT_QUEUE_LIMIT-queued) error="Stdin queue is full; wait for delivery and retry the same input_key.";
             else if(!existing && item->input_count>=INPUT_RECORDS) error="Task input receipt budget reached.";
             else if(!existing) {
                 char *copy=sb_strdup(text); if(!copy) error="Cannot queue stdin data.";

@@ -122,12 +122,12 @@ static int handle_bound(struct mg_connection *connection, http_state *state, voi
     if (mg_get_header(connection, "Transfer-Encoding") || info->content_length < 0)
         return reject(connection, 411, "{\"error\":\"Content-Length required; chunked requests are not supported yet.\"}", NULL);
     if (info->content_length > SB_REQUEST_LIMIT)
-        return reject(connection, 413, "{\"error\":\"Request exceeds 1 MiB.\"}", NULL);
+        return reject(connection, 413, "{\"error\":\"Request exceeds 64 MiB; split large payloads into artifact chunks.\"}", NULL);
     size_t length = (size_t)info->content_length;
     char *request = malloc(length + 1);
     if (!request) return reject(connection, 500, "{\"error\":\"Out of memory.\"}", NULL);
     size_t read = 0;
-    uint64_t deadline = sb_platform_millis() + 10000;
+    uint64_t deadline = sb_platform_millis() + 120000;
     while (read < length && sb_platform_millis() < deadline) {
         int got = mg_read(connection, request + read, length - read);
         if (got <= 0) break;
@@ -223,7 +223,7 @@ static int quiet_log(const struct mg_connection *connection, const char *message
 static bool listen_http(http_state *state, sb_error *error) {
     char listen[64];
     snprintf(listen, sizeof(listen), "127.0.0.1:%u", state->config->port);
-    const char *options[] = {"listening_ports", listen, "num_threads", "4", "request_timeout_ms", "5000",
+    const char *options[] = {"listening_ports", listen, "num_threads", "4", "request_timeout_ms", "120000",
         "connection_queue", "32", "decode_url", state->routes.open ? "no" : "yes",
         "enable_keep_alive", "yes", "keep_alive_timeout_ms", "2000", "linger_timeout_ms", "5000",
         "tcp_nodelay", "1", "enable_directory_listing", "no", NULL};

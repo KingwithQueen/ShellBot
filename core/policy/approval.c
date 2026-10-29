@@ -28,6 +28,23 @@ static const char *state_name(state status) {
 }
 static void clear(record *r) { free(r->target); free(r->identity); free(r->text); free(r->original); free(r->cached); memset(r, 0, sizeof(*r)); }
 static yyjson_mut_val *describe(yyjson_mut_doc *doc, record *r, bool full);
+#ifndef SB_POSIX
+/* 大文件审批仍在内存中保留完整内容；持久历史只存预览和摘要，避免复制整份源码/图像耗尽日志。 */
+static void history_preview(yyjson_mut_doc *doc, yyjson_mut_val *body, const char *field) {
+    const char *text=yyjson_mut_get_str(yyjson_mut_obj_get(body,field));
+    if (!text || strlen(text)<=SB_TEXT_LIMIT) return;
+    size_t size=strlen(text),count=SB_TEXT_LIMIT;
+    while (count && ((unsigned char)text[count]&0xc0)==0x80) --count;
+    char *preview=malloc(count+1);
+    if (!preview) { yyjson_mut_obj_remove_str(body,field); return; }
+    memcpy(preview,text,count); preview[count]=0;
+    yyjson_mut_obj_remove_str(body,field); yyjson_mut_obj_add_strcpy(doc,body,field,preview); free(preview);
+    char key[64]; snprintf(key,sizeof(key),"%s_truncated",field);
+    yyjson_mut_obj_add(body,yyjson_mut_strcpy(doc,key),yyjson_mut_bool(doc,true));
+    snprintf(key,sizeof(key),"%s_original_bytes",field);
+    yyjson_mut_obj_add(body,yyjson_mut_strcpy(doc,key),yyjson_mut_uint(doc,size));
+}
+#endif
 static bool audit_record(sb_policy *policy, record *r, const char *event, const char *actor) {
     const char *status=state_name(r->status);
     if (!strcmp(event,"approval_approved")) status="approved";
@@ -35,6 +52,9 @@ static bool audit_record(sb_policy *policy, record *r, const char *event, const 
     yyjson_mut_doc *doc=policy->store ? yyjson_mut_doc_new(NULL) : NULL;
     bool desktop=sb_desktop_tool(r->tool);
     yyjson_mut_val *body=doc ? describe(doc,r,!desktop) : NULL;
+#ifndef SB_POSIX
+    if (body) { history_preview(doc,body,"text"); history_preview(doc,body,"original_text"); }
+#endif
     if (body && r->cached) {
         yyjson_doc *receipt=yyjson_read(r->cached,strlen(r->cached),0);
         if (receipt) {
@@ -46,6 +66,15 @@ static bool audit_record(sb_policy *policy, record *r, const char *event, const 
                 yyjson_mut_val *details=yyjson_mut_obj_get(saved,"structuredContent");
                 if (details) { yyjson_mut_obj_remove_str(details,"text"); yyjson_mut_obj_remove_str(details,"windows"); }
             }
+#ifndef SB_POSIX
+            /* 完整响应仅供当前实例的幂等重试，历史不复制 Base64 图像或产物块。 */
+            yyjson_mut_obj_remove_str(saved,"content");
+            yyjson_mut_val *details=yyjson_mut_obj_get(saved,"structuredContent");
+            if (details) {
+                yyjson_mut_obj_remove_str(details,"data_base64");
+                history_preview(doc,details,"text"); history_preview(doc,details,"text_utf8");
+            }
+#endif
             yyjson_mut_obj_add_val(doc,body,"receipt",saved);
         }
         yyjson_doc_free(receipt);
@@ -118,6 +147,11 @@ static yyjson_mut_val *describe(yyjson_mut_doc *doc, record *r, bool full) {
             yyjson_mut_obj_add_strcpy(doc, data, "original_text", r->original);
             yyjson_mut_obj_add_strcpy(doc, data, "file_identity", r->file_identity);
         }
+#ifndef SB_POSIX
+        history_preview(doc,data,"text"); history_preview(doc,data,"original_text");
+        if (yyjson_mut_obj_get(data,"text_truncated") || yyjson_mut_obj_get(data,"original_text_truncated"))
+            yyjson_mut_obj_add_str(doc,data,"preview_notice","正文较长，仅显示前 64 KiB；请结合完整长度、摘要和请求来源核对，预览不是完整文件备份。");
+#endif
     }
     if (*r->error) yyjson_mut_obj_add_strcpy(doc, data, "error", r->error);
     if (r->audit_warning) yyjson_mut_obj_add_str(doc, data, "audit_warning", "Audit recording is incomplete; the reported operation status remains authoritative.");
@@ -242,7 +276,7 @@ bool sb_policy_operation_begin(sb_host *host, const char *actor, const char *too
         snprintf(r->workspace,sizeof(r->workspace),"%s",workspace?workspace:!strncmp(tool,"task_",5)?"task":"current-user");yyjson_doc_free(arguments);
         r->revision = host->project->policy_revision; r->logical = true;
         r->pageable = !strcmp(tool,"fs_read") || !strcmp(tool,"fs_list") || !strcmp(tool,"document_read");
-        r->budget = (!strcmp(tool,"fs_read") || !strcmp(tool,"document_read")) ? 1048576 : !strcmp(tool,"fs_list") ? 1000 : budget;
+        r->budget = (!strcmp(tool,"fs_read") || !strcmp(tool,"document_read")) ? SB_READ_PERMIT_LIMIT : !strcmp(tool,"fs_list") ? SB_LIST_PERMIT_LIMIT : budget;
         r->next_offset = offset; r->deadline = sb_platform_millis() + (uint64_t)policy->ttl * 1000;
         r->status = approval_required ? PENDING : APPROVED;
         if (!audit_record(policy,r,approval_required ? "approval_requested" : "operation_authorized",actor)) {
@@ -290,7 +324,7 @@ bool sb_policy_operation_finish(sb_policy *policy, const char *ticket, yyjson_mu
         else if (!failed) r->used += r->charge;
         r->status = failed ? FAILED : r->pageable && more && r->used < r->budget ? APPROVED : COMPLETED;
         size_t size = 0; char *cached = result ? yyjson_mut_val_write(result,0,&size) : NULL;
-        free(r->cached); r->cached = size <= (!strcmp(r->tool,"desktop_capture") ? SB_RESPONSE_LIMIT : 524288u) ? cached : NULL;
+        free(r->cached); r->cached = size <= (!strcmp(r->tool,"desktop_capture") ? SB_RESPONSE_LIMIT : SB_POLICY_CACHE_LIMIT) ? cached : NULL;
         if (!r->cached) free(cached);
         recorded=audit_record(policy,r,failed ? "operation_failed" : "operation_completed",r->actor);
     }
@@ -302,8 +336,8 @@ yyjson_mut_val *sb_policy_write_authorized(sb_host *host, const char *actor, sb_
     const char *path, const char *text, yyjson_mut_doc *doc, bool *failed) {
     *failed = true; sb_error error = {0}; char hash[65];
     size_t size = strlen(text); char *decoded = NULL; size_t length, consumed; const char *encoding;
-    if (workspace->read_only || size > SB_TEXT_LIMIT || !sb_decode((const unsigned char *)text,size,true,"utf-8",true,&decoded,&length,&consumed,&encoding,&error)) {
-        free(decoded); return error_data(doc, workspace->read_only ? "Workspace is read-only." : *error.text ? error.text : "Text exceeds 64 KiB.");
+    if (workspace->read_only || size > SB_EDIT_LIMIT || !sb_decode((const unsigned char *)text,size,true,"utf-8",true,&decoded,&length,&consumed,&encoding,&error)) {
+        free(decoded); return error_data(doc, workspace->read_only ? "Workspace is read-only." : *error.text ? error.text : "Text exceeds the edit byte limit reported by host_capabilities.");
     }
     free(decoded);
     sb_create *plan = sb_platform_prepare_create(workspace->root,path,&error);
@@ -323,7 +357,7 @@ yyjson_mut_val *sb_policy_write(sb_host *host, const char *actor, sb_workspace *
     *failed = true;
     if (workspace->read_only) return error_data(doc, "Workspace is read-only.");
     size_t length = strlen(text);
-    if (length > SB_TEXT_LIMIT) return error_data(doc, "Text exceeds 64 KiB.");
+    if (length > SB_EDIT_LIMIT) return error_data(doc, "Text exceeds the edit byte limit reported by host_capabilities.");
     /* Validate text before creating an approval record. Preserve exact bytes, including BOM. */
     char *decoded = NULL; size_t decoded_size, consumed; const char *encoding;
     sb_error error = {0};
@@ -416,10 +450,10 @@ done:
 
 static bool edit_text_valid(const char *text, size_t length, sb_error *error) {
     char *decoded = NULL; size_t size, consumed; const char *encoding;
-    bool ok = length <= SB_TEXT_LIMIT && sb_decode((const unsigned char *)text, length, true,
+    bool ok = length <= SB_EDIT_LIMIT && sb_decode((const unsigned char *)text, length, true,
         "utf-8", true, &decoded, &size, &consumed, &encoding, error);
     free(decoded);
-    if (length > SB_TEXT_LIMIT) sb_fail(error, "Editing supports UTF-8 text within 64 KiB.");
+    if (length > SB_EDIT_LIMIT) sb_fail(error, "Editing requires UTF-8 text within max_edit_bytes from host_capabilities.");
     return ok;
 }
 static char *edited_text(const char *original, size_t length, const sb_edit_request *request, sb_error *error) {
@@ -435,8 +469,8 @@ static char *edited_text(const char *original, size_t length, const sb_edit_requ
     while ((match = strstr(position, request->search)) != NULL) { ++matches; position = match + find_size; }
     if (matches != request->expected_matches) { sb_fail(error, "Search occurrence count does not match expected_matches."); return NULL; }
     size_t output_size = length - find_size * matches;
-    if (matches && replace_size > (SB_TEXT_LIMIT - output_size) / matches) {
-        sb_fail(error, "Patched text exceeds 64 KiB."); return NULL;
+    if (matches && replace_size > (SB_EDIT_LIMIT - output_size) / matches) {
+        sb_fail(error, "Patched text exceeds max_edit_bytes from host_capabilities."); return NULL;
     }
     output_size += replace_size * matches;
     char *output = malloc(output_size + 1);

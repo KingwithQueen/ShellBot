@@ -45,7 +45,7 @@ void sb_config_defaults(sb_config *config) {
     strcpy(config->token_env, "SHELLBOT_TOKEN");
     config->execution_profile = SB_EXEC_CONTROLLED;
     config->execution_approval = SB_APPROVAL_ALWAYS;
-    config->limits = (sb_resource_limits){8, 32, 262144, 3600000, 64, 512};
+    config->limits = (sb_resource_limits){8, 32, SB_TASK_OUTPUT_DEFAULT, 3600000, 64, SB_WORKER_MEMORY_DEFAULT};
 }
 
 const char *sb_execution_profile_name(sb_execution_profile profile) {

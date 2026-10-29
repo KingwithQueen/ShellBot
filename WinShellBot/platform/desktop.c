@@ -21,8 +21,8 @@
 #define WINDOWS_LIMIT 128
 #define MONITORS_LIMIT 16
 #define OBSERVATION_MS 30000
-#define PNG_LIMIT (1024u*1024u)
-#define CLIPBOARD_BYTES 32768u
+#define PNG_LIMIT SB_IMAGE_LIMIT
+#define CLIPBOARD_BYTES (1024u*1024u)
 typedef struct { RECT rect; wchar_t name[32]; bool primary; unsigned dpi; } monitor;
 typedef struct { char id[33]; HWND hwnd; DWORD pid,tid; FILETIME created; RECT rect; } window_ref;
 typedef struct {
@@ -232,7 +232,7 @@ static bool arguments(sb_desktop *desktop,const char *name,yyjson_val *args) {
     if (tool>=19 && tool<=24 && !hex(sb_string(yyjson_obj_get(args,"screen_id")))) return false;
     if (tool==19 && !hex(sb_string(yyjson_obj_get(args,"window_id")))) return false;
     if (!integer(args,"duration_seconds",(int)desktop->policy.lease_seconds,1,(int)desktop->policy.lease_seconds,&n) ||
-        !integer(args,"monitor_id",0,0,15,&n) || !integer(args,"max_dimension",1600,200,1600,&n) ||
+        !integer(args,"monitor_id",0,0,15,&n) || !integer(args,"max_dimension",1600,200,SB_IMAGE_DIMENSION,&n) ||
         !integer(args,"clicks",1,1,2,&n) || !integer(args,"duration_ms",200,50,1000,&n)) return false;
     const char *coordinates[]={"x","y","to_x","to_y"};
     for (unsigned i=0;i<4;++i) if (!integer(args,coordinates[i],0,-32768,32767,&n)) return false;
@@ -246,7 +246,7 @@ static bool arguments(sb_desktop *desktop,const char *name,yyjson_val *args) {
     yyjson_val *horizontal=yyjson_obj_get(args,"horizontal"); if (horizontal && !yyjson_is_bool(horizontal)) return false;
     if (tool==22 && (!yyjson_obj_get(args,"delta") || !integer(args,"delta",0,-1200,1200,&n) || !n)) return false;
     if (tool==23 || tool==26) {
-        const char *text=sb_string(yyjson_obj_get(args,"text")); if (!text || strlen(text)>4096 || (tool==23 && !*text)) return false;
+        const char *text=sb_string(yyjson_obj_get(args,"text")); if (!text || strlen(text)>(tool==23 ? 4096u : CLIPBOARD_BYTES/2u-1u) || (tool==23 && !*text)) return false;
         wchar_t *value=wide(text); bool ok=value && (tool!=23 || wcslen(value)<=512); free(value); if (!ok) return false;
     }
     if (tool==24) {
@@ -578,7 +578,7 @@ static char *execute(sb_desktop *desktop,desktop_job *job,yyjson_val *args) {
         if (!observe(desktop,doc,data,&view)) error="desktop_observation_unavailable";
         else if (!strcmp(job->name,"desktop_capture")) {
             topology monitors; char hash[65]; int index=0,maximum=1600,x=0,y=0,width=0,height=0;
-            integer(args,"monitor_id",0,0,15,&index); integer(args,"max_dimension",1600,200,1600,&maximum);
+            integer(args,"monitor_id",0,0,15,&index); integer(args,"max_dimension",1600,200,SB_IMAGE_DIMENSION,&maximum);
             if (!layout(&monitors,hash) || (unsigned)index>=monitors.count) error="unknown_monitor_id";
             else {
                 RECT crop=monitors.items[index].rect;
@@ -629,7 +629,7 @@ static char *capabilities(sb_desktop *desktop) {
     yyjson_mut_obj_add_bool(doc,data,"paused",WaitForSingleObject(desktop->pause,0)==WAIT_OBJECT_0);
     yyjson_mut_obj_add_uint(doc,data,"max_lease_seconds",desktop->policy.lease_seconds);
     yyjson_mut_obj_add_uint(doc,data,"observation_ttl_ms",OBSERVATION_MS); yyjson_mut_obj_add_uint(doc,data,"max_observations",OBSERVATIONS);
-    yyjson_mut_obj_add_uint(doc,data,"max_png_bytes",PNG_LIMIT); yyjson_mut_obj_add_uint(doc,data,"max_image_dimension",1600);
+    yyjson_mut_obj_add_uint(doc,data,"max_png_bytes",PNG_LIMIT); yyjson_mut_obj_add_uint(doc,data,"max_image_dimension",SB_IMAGE_DIMENSION);
     yyjson_mut_obj_add_uint(doc,data,"max_type_utf16_units",512); yyjson_mut_obj_add_uint(doc,data,"max_clipboard_bytes",CLIPBOARD_BYTES);
     char key[24]; snprintf(key,sizeof(key),"Ctrl+Alt+F%u",desktop->policy.emergency_function_key); yyjson_mut_obj_add_strcpy(doc,data,"emergency_hotkey",key);
     yyjson_mut_obj_add_uint(doc,data,"emergency_stop_count",desktop->emergency_stops);

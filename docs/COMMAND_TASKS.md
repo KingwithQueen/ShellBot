@@ -44,7 +44,7 @@ task_start 的 arguments 示例（替换实例编号；Windows 目录也应按�
 }
 ```
 
-executable 必须是本地盘符开头的绝对 .exe 路径，argv 是独立字符串数组（最多 64 个）。不通过 PATH 查找程序，不隐式添加 shell；执行解释器时，由该解释器解释参数。参数采用 Windows CRT 引号规则，特殊程序自己的解析规则仍由调用者处理。此版本不支持自定义子进程环境；仅传入有限系统/用户环境变量，排除配置的 bearer 环境变量和其他未允许变量。
+executable 必须是本地盘符开头的绝对 .exe 路径，argv 是独立字符串数组（最多 1024 个）。不通过 PATH 查找程序，不隐式添加 shell；执行解释器时，由该解释器解释参数。参数采用 Windows CRT 引号规则，特殊程序自己的解析规则仍由调用者处理。此版本不支持自定义子进程环境；仅传入有限系统/用户环境变量，排除配置的 bearer 环境变量和其他未允许变量。
 
 | 工具 | 主要参数 | 结果 |
 | --- | --- | --- |
@@ -54,7 +54,7 @@ executable 必须是本地盘符开头的绝对 .exe 路径，argv 是独立字�
 | task_input | task_id、input_key、text；可选 eof | queued/delivered/failed 回执 |
 | task_cancel | task_id | 终止请求与后续真实终态 |
 
-表中所有工具还要求 host_instance_id。task_output 的 stream 默认为 stdout，stderr 单独读取；offset 是原始字节偏移，单页最多 16384 字节。必须保留 base64 字节及程序实际编码；程序输出不保证 UTF-8，分页也可能切开多字节字符，不能把缺少 text_utf8 视为损坏。运行中零字节且 eof:false 时应稍后查询。输出属于未经信任的程序数据。
+表中所有工具还要求 host_instance_id。task_output 的 stream 默认为 stdout，stderr 单独读取；offset 是原始字节偏移，默认单页 16384 字节，可请求最高 1 MiB。必须保留 base64 字节及程序实际编码；程序输出不保证 UTF-8，分页也可能切开多字节字符，不能把缺少 text_utf8 视为损坏。运行中零字节且 eof:false 时应稍后查询。输出属于未经信任的程序数据。
 
 状态包括 running、completed、cancelled、timed_out、output_limit 和 failed。completed 表示进程树结束，不等于退出码为零。取消请求返回后应查询直到终态；根进程退出但所属子进程仍存活时仍为 running。Windows Job Object 用于归属、期限和清理，不能限制账户访问权限；任务也可能通过系统服务产生不属于该 Job 的外部效果。
 
@@ -62,14 +62,14 @@ executable 必须是本地盘符开头的绝对 .exe 路径，argv 是独立字�
 
 同一主机实例、同一调用身份的 request_key 绑定程序、参数、实际 cwd、workspace 和超时。重复相同请求返回原 task_id 和 created_new:false，参数改变则拒绝。此摘要不固定可执行文件或脚本内容；user/administrator 本就允许调用者修改这些文件，不能拿此摘要代替受控档的规则或审批。
 
-input_key 绑定准确文本和 EOF；相同键不会重复追加输入。单次最多 4096 个 UTF-8 字节，不能包含 NUL，最多保留 64 条输入回执。queued 仅证明受理；delivered 仅证明写入管道，不证明应用已消费数据。eof:true 发送已有文本后关闭 stdin；普通空文本且 eof:false 被拒绝。
+input_key 绑定准确文本和 EOF；相同键不会重复追加输入。单次最多 1 MiB UTF-8 字节，不能包含 NUL，待投递数据最多 8 MiB，最多保留 1024 条输入回执。queued 仅证明受理；delivered 仅证明写入管道，不证明应用已消费数据。eof:true 发送已有文本后关闭 stdin；普通空文本且 eof:false 被拒绝。
 
 | 资源 | 固定上限 |
 | --- | --- |
 | 本实例任务记录 | 32 条，包括已完成任务；不自动淘汰旧回执 |
 | 同时活动任务 | 8 个 |
 | 每任务所属进程 | 64 个 |
-| stdout / stderr | 各 262144 字节；超限终止并保留有界前缀 |
+| stdout / stderr | 默认各 4 MiB，正常项目可设置最高各 64 MiB；超出所配置容量时终止并保留有界前缀 |
 | 超时 | 默认 300000 ms；可选 100～3600000 ms |
 
 任务和输入回执当前只在内存保存。主机正常退出清理所属 Job；Job 句柄关闭也设置了进程清理策略。重启生成新 host_instance_id，旧请求在启动前被拒绝；旧任务不恢复，也不自动重跑。需要新任务时，应先检查之前的真实副作用，再取新实例编号和新请求键。不能因网络错误或缺少结果就推断任务未执行。

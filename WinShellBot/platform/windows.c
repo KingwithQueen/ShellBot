@@ -779,7 +779,7 @@ static bool create_bytes(sb_create *plan, const char *text, size_t length, sb_fi
     _Static_assert(sizeof(create) == sizeof(create_address), "Native function pointer size");
     _Static_assert(sizeof(set) == sizeof(set_address), "Native function pointer size");
     memcpy(&create, &create_address, sizeof(create)); memcpy(&set, &set_address, sizeof(set));
-    if (!create || !set || length > (source ? SB_TRANSFER_LIMIT : SB_TEXT_LIMIT)) { sb_fail(error, "Native anchored creation is unavailable."); return false; }
+    if (!create || !set || length > (source ? SB_TRANSFER_LIMIT : SB_EDIT_LIMIT)) { sb_fail(error, "Native anchored creation is unavailable."); return false; }
     unsigned char random[16];
     if (!sb_platform_random(random, sizeof(random), error)) return false;
     wchar_t temporary[64];
@@ -860,10 +860,10 @@ sb_modify *sb_platform_prepare_modify_guarded(sb_root *root, const char *relativ
     bool valid = actual && expected && !wcscmp(actual, expected) && GetFileType(handle) == FILE_TYPE_DISK &&
         GetFileInformationByHandle(handle, &basic) && GetFileInformationByHandleEx(handle, FileIdInfo, &info, sizeof(info)) &&
         !(basic.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_READONLY)) &&
-        basic.nNumberOfLinks == 1 && !basic.nFileSizeHigh && basic.nFileSizeLow <= SB_TEXT_LIMIT;
+        basic.nNumberOfLinks == 1 && !basic.nFileSizeHigh && basic.nFileSizeLow <= SB_EDIT_LIMIT;
     free(actual); free(expected);
     sb_modify *plan = valid ? calloc(1, sizeof(*plan)) : NULL;
-    if (!plan) { CloseHandle(handle); sb_platform_create_close(location); sb_fail(error, "Modification requires a regular single-link file of at most 64 KiB."); return NULL; }
+    if (!plan) { CloseHandle(handle); sb_platform_create_close(location); sb_fail(error, "Modification requires a regular single-link file within max_edit_bytes."); return NULL; }
     plan->location = location; plan->handle = handle; plan->length = basic.nFileSizeLow;
     if(version){char actual_version[65];if(!sb_platform_modify_version(plan,actual_version,error) || strcmp(actual_version,version)) {
         sb_platform_modify_close(plan);sb_fail(error,"Physical target changed before exclusive edit; original bytes were not read.");return NULL;
@@ -918,7 +918,7 @@ bool sb_platform_modify_backup(sb_modify *plan, sb_lease *lease, char backup_id[
     return true;
 }
 bool sb_platform_modify_text(sb_modify *plan, const char *text, size_t length, sb_error *error) {
-    if (!plan->backed_up || length > SB_TEXT_LIMIT) { sb_fail(error, "Modification requires a flushed backup and text within 64 KiB."); return false; }
+    if (!plan->backed_up || length > SB_EDIT_LIMIT) { sb_fail(error, "Modification requires a flushed backup and text within max_edit_bytes."); return false; }
     if (replace_locked_bytes(plan->handle, text, length)) return true;
     bool restored = replace_locked_bytes(plan->handle, plan->original, plan->length);
     sb_fail(error, restored ? "Write failed; original bytes were restored and the private backup was retained." :
@@ -976,7 +976,7 @@ sb_fs_plan *sb_platform_fs_prepare(const char *operation, sb_root *source, const
         free(expected); if (!valid) goto failed;
         plan->info.size=plan->file.size=((uint64_t)basic.nFileSizeHigh<<32)|basic.nFileSizeLow;
         if ((plan->operation==2 || plan->operation==4) && !directory && plan->file.size>SB_TRANSFER_LIMIT) {
-            sb_fail(error,"Copy/deletion backup is limited to 64 MiB per file."); goto failed;
+            sb_fail(error,"Copy/deletion backup exceeds max_transfer_bytes from host_capabilities."); goto failed;
         }
         if (!sb_platform_file_version(&plan->file,plan->info.version,error)) goto failed;
         if (plan->operation==2 || plan->operation==3) plan->destination=sb_platform_prepare_create(destination,destination_path,error);

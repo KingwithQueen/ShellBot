@@ -91,7 +91,7 @@ bool sb_platform_image_decode(const unsigned char *bytes,size_t size,unsigned ma
     if (SUCCEEDED(hr)) hr=IWICFormatConverter_CopyPixels(converter,NULL,stride,capacity,pixels);
     if (SUCCEEDED(hr)) {
         image->width=width; image->height=height; image->size=size; image->mime=image->source_mime;
-        unsigned maximum=max_dimension ? max_dimension : size>SB_IMAGE_LIMIT ? 1600 : 0;
+        unsigned maximum=max_dimension ? max_dimension : size>SB_IMAGE_LIMIT ? SB_IMAGE_AUTO_DIMENSION : 0;
         dimensions(width,height,maximum,&image->width,&image->height);
         if (size>SB_IMAGE_LIMIT || image->width!=width || image->height!=height) {
             hr=IWICImagingFactory_CreateBitmapFromMemory(factory,width,height,&GUID_WICPixelFormat32bppPBGRA,stride,capacity,pixels,&bitmap);

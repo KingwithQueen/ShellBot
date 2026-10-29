@@ -71,7 +71,7 @@ static bool extracted(FPDF_PAGE page,sb_document *document,sb_error *error) {
     document->text=malloc(SB_DOCUMENT_TEXT_LIMIT+1);
     if(!document->text)ok=false;
     /* Bound parser iteration independently of output (unmapped glyphs count). */
-    if(count>1048576){count=1048576;document->extraction_truncated=true;}
+    if(count>(int)SB_DOCUMENT_TEXT_LIMIT){count=(int)SB_DOCUMENT_TEXT_LIMIT;document->extraction_truncated=true;}
     for(int i=0;ok && i<count;++i){unsigned c=api.unicode(text,i);unsigned char value[4];size_t n;
         if(!c)continue;
         if(c>0x10ffff || (c>=0xd800 && c<=0xdfff))c=0xfffd;

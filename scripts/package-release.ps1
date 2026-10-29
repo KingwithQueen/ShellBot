@@ -104,7 +104,7 @@ Require (!(Test-Path -LiteralPath $stage) -and !(Test-Path -LiteralPath $archive
 $files=[ordered]@{}
 foreach($file in $runtime){$files[$file]=Join-Path $root ('out\x64\Release\'+$file)}
 $files['LICENSE.txt']=Join-Path $root 'LICENSE.txt'
-foreach($file in @('USER_GUIDE.md','RELEASE_NOTES_1.0.0.md',$releaseNotes,'FILE_MANAGEMENT.md','FILE_EDIT.md','EXECUTION_PERMISSIONS.md','COMMAND_TASKS.md','REMOTE_APPROVALS.md','DESKTOP_CONTROL.md','IMAGE_VIEW.md','DOCUMENT_READING.md','ARTIFACT_TRANSFER.md','AUDIT.md','PROJECT_APPROVALS.md','SHARED_ADMINISTRATOR.md','STARTUP.md')){$files['docs/'+$file]=Join-Path $root ('docs\'+$file)}
+foreach($file in @('USER_GUIDE.md','CAPACITY_LIMITS.md','RELEASE_NOTES_1.0.0.md',$releaseNotes,'FILE_MANAGEMENT.md','FILE_EDIT.md','EXECUTION_PERMISSIONS.md','COMMAND_TASKS.md','REMOTE_APPROVALS.md','DESKTOP_CONTROL.md','IMAGE_VIEW.md','DOCUMENT_READING.md','ARTIFACT_TRANSFER.md','AUDIT.md','PROJECT_APPROVALS.md','SHARED_ADMINISTRATOR.md','STARTUP.md')){$files['docs/'+$file]=Join-Path $root ('docs\'+$file)}
 $files['licenses/yyjson-MIT.txt']=Join-Path $root 'third_party\yyjson\LICENSE'
 $files['licenses/CivetWeb-MIT.txt']=Join-Path $root 'third_party\civetweb\LICENSE.md'
 $files['licenses/PDFium-binaries-MIT.txt']=Join-Path $root 'third_party\pdfium\LICENSE'

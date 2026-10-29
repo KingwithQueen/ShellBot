@@ -7,7 +7,8 @@
 int sb_stdio_run(sb_host *host) {
     _setmode(_fileno(stdin), _O_BINARY);
     _setmode(_fileno(stdout), _O_BINARY);
-    char *line = malloc(SB_REQUEST_LIMIT + 1u);
+    size_t capacity=SB_TEXT_LIMIT;
+    char *line = malloc(capacity + 1u);
     if (!line) return 1;
     sb_protocol protocol = {0};
     int result = 0;
@@ -16,7 +17,15 @@ int sb_stdio_run(sb_host *host) {
         bool overflow = false;
         int c;
         while ((c = fgetc(stdin)) != EOF && c != '\n') {
-            if (size < SB_REQUEST_LIMIT) line[size++] = (char)c;
+            if (size < SB_REQUEST_LIMIT) {
+                if (size==capacity) {
+                    size_t next=capacity*2; if(next>SB_REQUEST_LIMIT)next=SB_REQUEST_LIMIT;
+                    char *grown=realloc(line,next+1u);
+                    if(!grown){free(line);return 1;}
+                    line=grown;capacity=next;
+                }
+                line[size++] = (char)c;
+            }
             else overflow = true;
         }
         if (c == EOF && !size && !overflow) break;

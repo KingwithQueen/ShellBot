@@ -238,6 +238,7 @@
     <ClInclude Include="platform\app_icon.h" />
     <ClInclude Include="..\core\include\sb_version.h" />
     <ClInclude Include="..\core\include\sb.h" />
+    <ClInclude Include="..\core\include\sb_limits.h" />
     <ClInclude Include="..\core\include\sb_projects.h" />
     <ClInclude Include="platform\execution.h" />
     <ClInclude Include="platform\manager.h" />

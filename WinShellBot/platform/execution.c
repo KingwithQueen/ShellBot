@@ -11,9 +11,8 @@
 #include "startup.h"
 
 
-/* A 16 KiB UTF-8 page can expand to six JSON bytes per control byte,
-   in addition to the lossless base64 representation and task metadata. */
-#define SB_AGENT_TASK_REPLY_LIMIT 262144u
+/* 输出页可能包含六倍 JSON 转义及 Base64，代理与 HTTP 使用同一响应容量。 */
+#define SB_AGENT_TASK_REPLY_LIMIT SB_RESPONSE_LIMIT
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -422,10 +421,10 @@ char *sb_execution_task(sb_execution *execution,const char *name,yyjson_val *arg
         if (root) { yyjson_mut_obj_add_str(doc,root,"name",name);yyjson_mut_obj_add_val(doc,root,"arguments",yyjson_val_mut_copy(doc,arguments));yyjson_mut_doc_set_root(doc,root); }
         size_t size=0; char *request=root?yyjson_mut_write(doc,0,&size):NULL;
         DWORD command=SB_AGENT_TASK,received=0; char *buffer=malloc(SB_AGENT_TASK_REPLY_LIMIT+1u);
-        bool ok=request && size && size<=65536 && buffer && transfer(execution->pipe,&command,sizeof(command),true) &&
+        bool ok=request && size && size<=SB_REQUEST_LIMIT && buffer && transfer(execution->pipe,&command,sizeof(command),true) &&
             transfer(execution->pipe,request,(DWORD)size,true) && transfer_some(execution->pipe,buffer,SB_AGENT_TASK_REPLY_LIMIT,false,&received) && received;
         if (ok) { buffer[received]=0;reply=buffer;buffer=NULL; }
-        else if (!request || !size || size>65536 || !buffer) sb_fail(error,"Cannot encode a task request within the administrator channel budget.");
+        else if (!request || !size || size>SB_REQUEST_LIMIT || !buffer) sb_fail(error,"Cannot encode a task request within the administrator channel budget.");
         else {
             execution->agent_healthy=false;
             CloseHandle(execution->pipe);execution->pipe=NULL;
@@ -478,7 +477,7 @@ yyjson_mut_val *sb_execution_status(sb_execution *execution, yyjson_mut_doc *doc
         *execution->sandbox_error ? execution->sandbox_error : execution->profile==SB_EXEC_CONTROLLED ? "Complete controlled isolation and task approval are not implemented." : "Administrator agent unavailable.");
     yyjson_mut_obj_add_uint(doc,result,"max_task_records",execution->project?execution->project->limits.task_records:32);
     yyjson_mut_obj_add_uint(doc,result,"max_active_tasks",execution->project?execution->project->limits.active_tasks:8);
-    yyjson_mut_obj_add_uint(doc,result,"max_output_bytes_per_stream",execution->project?execution->project->limits.output_bytes:262144);
+    yyjson_mut_obj_add_uint(doc,result,"max_output_bytes_per_stream",execution->project?execution->project->limits.output_bytes:SB_TASK_OUTPUT_DEFAULT);
     yyjson_mut_obj_add_val(doc, result, "host_identity", identity_json(doc, &execution->host));
     yyjson_mut_obj_add_bool(doc, result, "administrator_agent_started", execution->agent_started);
     yyjson_mut_obj_add_bool(doc, result, "administrator_agent_alive", execution->agent_healthy);
@@ -582,7 +581,7 @@ int sb_win_execution_agent(int argc, wchar_t **argv) {
         if (!ReadFile(pipe, &command, sizeof(command), &bytes, NULL)) break;
         if (bytes != sizeof(command)) { result=2;break; }
         if ((command==SB_AGENT_TASK && !shared) || (command==SB_AGENT_SHARED && shared)) {
-            DWORD maximum = shared ? SB_REQUEST_LIMIT + 65536u : 65536u;
+            DWORD maximum = SB_REQUEST_LIMIT + 65536u;
             char *request=malloc((size_t)maximum + 1);DWORD length=0;
             bool read=request && ReadFile(pipe,request,maximum,&length,NULL) && length;
             yyjson_doc *doc=read?yyjson_read(request,length,0):NULL;free(request);

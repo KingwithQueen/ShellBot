@@ -86,8 +86,8 @@ static bool jpeg(const unsigned char *p,size_t size,sb_image *image) {
 }
 bool sb_image_prepare(const unsigned char *bytes,size_t size,unsigned max_dimension,sb_image *image,sb_error *error) {
     memset(image,0,sizeof(*image));
-    if (!size || size>SB_IMAGE_INPUT_LIMIT || (max_dimension && (max_dimension<128 || max_dimension>4096))) {
-        snprintf(error->text,sizeof(error->text),"Image source must be 1 byte to 16 MiB; max_dimension must be 128 to 4096."); return false;
+    if (!size || size>SB_IMAGE_INPUT_LIMIT || (max_dimension && (max_dimension<128 || max_dimension>SB_IMAGE_DIMENSION))) {
+        snprintf(error->text,sizeof(error->text),"Image source must be 1 byte to %u MiB; max_dimension must be 128 to %u.",SB_IMAGE_INPUT_LIMIT/(1024u*1024u),SB_IMAGE_DIMENSION); return false;
     }
     bool is_png=size>=8 && !memcmp(bytes,"\x89PNG\r\n\x1a\n",8);
     if (!(is_png ? png(bytes,size,image) : jpeg(bytes,size,image))) {
@@ -95,7 +95,7 @@ bool sb_image_prepare(const unsigned char *bytes,size_t size,unsigned max_dimens
     }
     if (!image->source_width || !image->source_height || image->source_width>32768 || image->source_height>32768 ||
         (uint64_t)image->source_width*image->source_height>SB_IMAGE_PIXEL_LIMIT) {
-        snprintf(error->text,sizeof(error->text),"Image dimensions exceed 32768 per side or 16777216 source pixels; resizing cannot bypass the source limit."); return false;
+        snprintf(error->text,sizeof(error->text),"Image dimensions exceed 32768 per side or %u source pixels; resizing cannot bypass the source limit.",SB_IMAGE_PIXEL_LIMIT); return false;
     }
     image->source_mime=is_png ? "image/png" : "image/jpeg";
     if (is_png && !sb_png_validate_raster(bytes,size)) {

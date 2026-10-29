@@ -56,6 +56,10 @@ void sb_desktop_tools_list(sb_host *host, yyjson_mut_doc *doc, yyjson_mut_val *t
         }
         if (i==17) {
             add_properties(doc,properties,"{\"monitor_id\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":15},\"max_dimension\":{\"type\":\"integer\",\"minimum\":200,\"maximum\":1600},\"x\":{\"type\":\"integer\"},\"y\":{\"type\":\"integer\"},\"width\":{\"type\":\"integer\",\"minimum\":1},\"height\":{\"type\":\"integer\",\"minimum\":1}}");
+#ifndef SB_POSIX
+            yyjson_mut_val *dimension=yyjson_mut_obj_get(properties,"max_dimension");
+            yyjson_mut_obj_remove_str(dimension,"maximum"); yyjson_mut_obj_add_uint(doc,dimension,"maximum",SB_IMAGE_DIMENSION);
+#endif
         }
         if (i==19) {
             add_properties(doc,properties,"{\"window_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32}}"); yyjson_mut_arr_add_str(doc,required,"window_id");
@@ -75,6 +79,12 @@ void sb_desktop_tools_list(sb_host *host, yyjson_mut_doc *doc, yyjson_mut_val *t
         }
         if (i==23 || i==26) {
             add_properties(doc,properties,"{\"text\":{\"type\":\"string\",\"maxLength\":4096}}"); yyjson_mut_arr_add_str(doc,required,"text");
+#ifndef SB_POSIX
+            if(i==26) {
+                yyjson_mut_val *text=yyjson_mut_obj_get(properties,"text");
+                yyjson_mut_obj_remove_str(text,"maxLength"); yyjson_mut_obj_add_uint(doc,text,"maxLength",524287u);
+            }
+#endif
         }
         if (i==24) {
             add_properties(doc,properties,"{\"keys\":{\"type\":\"array\",\"minItems\":1,\"maxItems\":4,\"items\":{\"type\":\"string\"}}}"); yyjson_mut_arr_add_str(doc,required,"keys");
