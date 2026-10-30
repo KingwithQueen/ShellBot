@@ -1,4 +1,30 @@
-# Windows 桌面工具（1.0.6）
+# Windows 桌面工具（1.0.7）
+
+## 显式按键与组合键
+
+Windows 的 `desktop_key` 现支持 `key` 和可选的 `modifiers`。它发送真实虚拟键的按下／释放事件，方便分别验证 Enter、Shift+Enter 和 Ctrl+V。例如以下是三个独立调用的按键参数，调用时都需要补上本人 `lease_id`、刚取得的 `screen_id` 和新的 `request_key`：
+
+```json
+{"key":"ENTER"}
+{"key":"ENTER","modifiers":["SHIFT"]}
+{"key":"V","modifiers":["CTRL"]}
+```
+
+完整调用示例（将占位标识替换为实际值）：
+
+```json
+{"name":"desktop_key","arguments":{"lease_id":"当前租约标识","screen_id":"最新观察标识","request_key":"shift-enter-1","key":"ENTER","modifiers":["SHIFT"]}}
+```
+
+按键名不区分大小写；支持 ENTER/RETURN、TAB、ESC/ESCAPE、BACKSPACE、DELETE、HOME、END、PAGEUP、PAGEDOWN、UP/DOWN/LEFT/RIGHT、SPACE、A–Z、0–9、F1–F12。组合修饰键为 CTRL/CONTROL、ALT、SHIFT，最多三个且不能重复。按修饰键数组的顺序按下，再按主键，最后按相反顺序释放全部键。旧 `keys:["SHIFT","ENTER"]`、`keys:["CTRL","V"]` 继续支持；两种参数格式不能混用，不能单独发送或跨调用保持修饰键按下。安全桌面组合键及配置的紧急停止组合仍拒绝注入。
+
+`desktop_type` 输入 Unicode 文本，文本中的换行不能替代 Enter 虚拟键。`clipboard_write` 只写入剪贴板：如需粘贴，先核对剪贴板序号并写入，再取得新观察，用 `desktop_key` 提交 Ctrl+V。实际提交、换行或粘贴效果由目标应用决定，ShellBot 不会把键盘事件接收当作业务成功。
+
+回执增加规范化的 `key`、`modifiers`、完整 `keys` 数组和 `events_requested / events_inserted`。Enter 请求两个事件，Shift+Enter、Ctrl+V 各四个。`key_submission_status` 为 `complete`、`partial` 或 `not_inserted`；部分提交会尝试释放本次已提交且尚未释放的键，`cleanup_events_requested / cleanup_events_inserted` 报告释放结果。`win32_error`、`win32_error_available` 保留原始提交错误；有些 Windows 输入拒绝不提供扩展错误，此时错误码 0 不能当成成功。
+
+输入通过单批 [Windows SendInput](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput) 按顺序提交；清理根据返回的已提交事件数量进行配对，不代表应用已经处理了所有事件。
+
+`application_success_confirmed` 保持 false。每次新动作后重新观察并核对应用结果；失败或超时先检查回执，不自动重复按键或粘贴。相同请求键和参数的重试仍重放原回执，避免重复输入。权限、审批、短时租约、人工暂停和窗口过期检查继续有效。`host_capabilities.desktop_status` 通过 `explicit_key_chords`、`max_key_modifiers`、`key_hold_supported` 公布能力。Mac/Linux 暂沿用原 `keys` 格式。
 
 ## 观察过期与截图诊断
 

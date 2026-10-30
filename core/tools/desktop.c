@@ -83,11 +83,21 @@ void sb_desktop_tools_list(sb_host *host, yyjson_mut_doc *doc, yyjson_mut_val *t
             if(i==26) {
                 yyjson_mut_val *text=yyjson_mut_obj_get(properties,"text");
                 yyjson_mut_obj_remove_str(text,"maxLength"); yyjson_mut_obj_add_uint(doc,text,"maxLength",524287u);
+                yyjson_mut_obj_add_str(doc,text,"description","Writes clipboard text only. To paste afterward use desktop_key with key V and modifiers [CTRL], then verify the target application.");
             }
+            if(i==23)yyjson_mut_obj_add_str(doc,yyjson_mut_obj_get(properties,"text"),"description","Unicode text input. Use desktop_key with key ENTER (optionally modifiers [SHIFT]) for an actual Enter key or newline shortcut.");
 #endif
         }
         if (i==24) {
-            add_properties(doc,properties,"{\"keys\":{\"type\":\"array\",\"minItems\":1,\"maxItems\":4,\"items\":{\"type\":\"string\"}}}"); yyjson_mut_arr_add_str(doc,required,"keys");
+            add_properties(doc,properties,"{\"keys\":{\"type\":\"array\",\"minItems\":1,\"maxItems\":4,\"items\":{\"type\":\"string\"}}}");
+#ifdef SB_POSIX
+            yyjson_mut_arr_add_str(doc,required,"keys");
+#else
+            add_properties(doc,properties,"{\"key\":{\"type\":\"string\",\"description\":\"Named main key, case-insensitive: ENTER/RETURN, TAB, ESC/ESCAPE, BACKSPACE, DELETE, HOME, END, PAGEUP, PAGEDOWN, arrows, SPACE, A-Z, 0-9, F1-F12.\"},\"modifiers\":{\"type\":\"array\",\"maxItems\":3,\"uniqueItems\":true,\"items\":{\"type\":\"string\"},\"description\":\"Optional CTRL/CONTROL, ALT, SHIFT names (case-insensitive), pressed in this order and released in reverse. Only with key; do not mix with legacy keys.\"}}");
+            add_properties(doc,schema,"{\"oneOf\":[{\"required\":[\"key\"],\"not\":{\"required\":[\"keys\"]}},{\"required\":[\"keys\"],\"not\":{\"anyOf\":[{\"required\":[\"key\"]},{\"required\":[\"modifiers\"]}]}}]}");
+            yyjson_mut_obj_remove_str(tool,"description");
+            yyjson_mut_obj_add_str(doc,tool,"description","Press and release an explicit key or chord: key:\"ENTER\"; key:\"ENTER\", modifiers:[\"SHIFT\"]; key:\"V\", modifiers:[\"CTRL\"] for paste. Legacy keys:[\"CTRL\",\"V\"] remains supported. Names are case-insensitive. Requires desktop control permission, caller lease, fresh screen_id and new request_key; approve unchanged arguments when pending. Modifiers release in reverse order. Receipt reports normalized keys and submitted/cleanup event counts; verify application results afterward. Never use desktop_type newline as a substitute for Enter. No UAC, secure desktop, emergency chord or persistent key holding.");
+#endif
         }
         if (i==25 || i==26) {
             add_properties(doc,properties,"{\"expected_sequence\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":4294967295}}"); yyjson_mut_arr_add_str(doc,required,"expected_sequence");
@@ -116,6 +126,10 @@ static yyjson_mut_val *error_result(yyjson_mut_doc *doc, const char *text) {
 yyjson_mut_val *sb_desktop_tools_call(sb_host *host, const char *actor, const char *name, yyjson_val *args, yyjson_mut_doc *doc) {
 #ifndef SB_POSIX
     /* 数据容量可在准备桌面动作之前说明，既不取屏幕内容也不提交输入。 */
+    if(!strcmp(name,"desktop_key")){
+        const char *fields[]={"keys","modifiers"};const size_t maximum[]={4,3};
+        for(unsigned i=0;i<2;++i){yyjson_val *value=yyjson_obj_get(args,fields[i]);if(yyjson_is_arr(value) && yyjson_arr_size(value)>maximum[i])return wrap(doc,sb_limit_error(doc,fields[i],yyjson_arr_size(value),maximum[i],"items"),true);}
+    }
     const char *text=sb_string(yyjson_obj_get(args,"text"));
     if(text){size_t bytes=strlen(text),maximum=!strcmp(name,"clipboard_write")?524287u:4096u;
         if(bytes>maximum)return wrap(doc,sb_limit_error(doc,"text",bytes,maximum,"UTF-8 bytes"),true);

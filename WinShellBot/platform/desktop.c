@@ -196,14 +196,46 @@ static bool integer(yyjson_val *args,const char *name,int fallback,int low,int h
 }
 static WORD key_code(const char *name) {
     if (!name) return 0;
+    if (strlen(name)==1 && name[0]>='a' && name[0]<='z') return (WORD)(name[0]-'a'+'A');
     if (strlen(name)==1 && ((name[0]>='A' && name[0]<='Z') || (name[0]>='0' && name[0]<='9'))) return (WORD)name[0];
     static const struct { const char *name; WORD key; } keys[]={
         {"CTRL",VK_CONTROL},{"ALT",VK_MENU},{"SHIFT",VK_SHIFT},{"ENTER",VK_RETURN},{"TAB",VK_TAB},{"ESC",VK_ESCAPE},
         {"BACKSPACE",VK_BACK},{"DELETE",VK_DELETE},{"HOME",VK_HOME},{"END",VK_END},{"PAGEUP",VK_PRIOR},{"PAGEDOWN",VK_NEXT},
         {"UP",VK_UP},{"DOWN",VK_DOWN},{"LEFT",VK_LEFT},{"RIGHT",VK_RIGHT},{"SPACE",VK_SPACE}};
-    for (size_t i=0;i<sizeof(keys)/sizeof(keys[0]);++i) if (!strcmp(keys[i].name,name)) return keys[i].key;
-    for (unsigned i=1;i<=12;++i) { char text[4]; snprintf(text,sizeof(text),"F%u",i); if (!strcmp(name,text)) return (WORD)(VK_F1+i-1); }
+    for (size_t i=0;i<sizeof(keys)/sizeof(keys[0]);++i) if (!_stricmp(keys[i].name,name)) return keys[i].key;
+    if(!_stricmp(name,"CONTROL"))return VK_CONTROL;if(!_stricmp(name,"RETURN"))return VK_RETURN;if(!_stricmp(name,"ESCAPE"))return VK_ESCAPE;
+    for (unsigned i=1;i<=12;++i) { char text[4]; snprintf(text,sizeof(text),"F%u",i); if (!_stricmp(name,text)) return (WORD)(VK_F1+i-1); }
     return 0;
+}
+typedef struct { WORD codes[4]; unsigned count; } key_chord;
+static bool modifier(WORD key) { return key==VK_CONTROL || key==VK_MENU || key==VK_SHIFT; }
+static const char *chord_parse(yyjson_val *args,unsigned emergency,key_chord *chord) {
+    memset(chord,0,sizeof(*chord));yyjson_val *keys=yyjson_obj_get(args,"keys"),*main=yyjson_obj_get(args,"key"),*mods=yyjson_obj_get(args,"modifiers");
+    if(keys) {
+        if(main || mods)return "Use key with optional modifiers, or legacy keys; do not mix the two formats.";
+        if(!yyjson_is_arr(keys) || !yyjson_arr_size(keys) || yyjson_arr_size(keys)>4)return "keys must contain one main key and at most three modifiers.";
+        chord->count=(unsigned)yyjson_arr_size(keys);
+        for(unsigned i=0;i<chord->count;++i)chord->codes[i]=key_code(sb_string(yyjson_arr_get(keys,i)));
+    } else {
+        WORD code=key_code(sb_string(main));if(!code || modifier(code))return "key must name a supported non-modifier key, such as ENTER or V.";
+        if(mods && (!yyjson_is_arr(mods) || yyjson_arr_size(mods)>3))return "modifiers must be an array of at most three CTRL, ALT or SHIFT names.";
+        for(size_t i=0;i<yyjson_arr_size(mods);++i){WORD mod=key_code(sb_string(yyjson_arr_get(mods,i)));if(!modifier(mod))return "modifiers accepts only CTRL/CONTROL, ALT and SHIFT.";chord->codes[chord->count++]=mod;}
+        chord->codes[chord->count++]=code;
+    }
+    bool control=false,alt=false;
+    for(unsigned i=0;i<chord->count;++i){WORD code=chord->codes[i];
+        if(!code || (i+1<chord->count && !modifier(code)) || (i+1==chord->count && modifier(code)))return "Use modifiers followed by one supported main key.";
+        for(unsigned j=0;j<i;++j)if(code==chord->codes[j])return "Duplicate key or modifier names are not allowed.";
+        if(code==VK_CONTROL)control=true;if(code==VK_MENU)alt=true;
+    }
+    WORD final=chord->codes[chord->count-1];
+    if(control && alt && (final==VK_DELETE || final==(WORD)(VK_F1+emergency-1)))return "The secure-attention and configured emergency-stop combinations cannot be injected.";
+    return NULL;
+}
+static void key_name(WORD key,char name[16]) {
+    static const struct {WORD key;const char *name;} names[]={{VK_CONTROL,"CTRL"},{VK_MENU,"ALT"},{VK_SHIFT,"SHIFT"},{VK_RETURN,"ENTER"},{VK_TAB,"TAB"},{VK_ESCAPE,"ESC"},{VK_BACK,"BACKSPACE"},{VK_DELETE,"DELETE"},{VK_HOME,"HOME"},{VK_END,"END"},{VK_PRIOR,"PAGEUP"},{VK_NEXT,"PAGEDOWN"},{VK_UP,"UP"},{VK_DOWN,"DOWN"},{VK_LEFT,"LEFT"},{VK_RIGHT,"RIGHT"},{VK_SPACE,"SPACE"}};
+    for(size_t i=0;i<sizeof(names)/sizeof(*names);++i)if(names[i].key==key){strcpy(name,names[i].name);return;}
+    if(key>=VK_F1 && key<=VK_F12)snprintf(name,16,"F%u",(unsigned)(key-VK_F1+1));else {name[0]=(char)key;name[1]=0;}
 }
 static bool arguments(sb_desktop *desktop,const char *name,yyjson_val *args) {
     int tool=sb_project_tool_index(name),n; if (tool<SB_DESKTOP_TOOL_FIRST || tool>=SB_DESKTOP_TOOL_END || !yyjson_is_obj(args)) return false;
@@ -218,7 +250,7 @@ static bool arguments(sb_desktop *desktop,const char *name,yyjson_val *args) {
     if (tool==21) { allowed[count++]="to_x"; allowed[count++]="to_y"; allowed[count++]="duration_ms"; }
     if (tool==22) { allowed[count++]="delta"; allowed[count++]="horizontal"; }
     if (tool==23 || tool==26) allowed[count++]="text";
-    if (tool==24) allowed[count++]="keys";
+    if (tool==24) {allowed[count++]="keys";allowed[count++]="key";allowed[count++]="modifiers";}
     if (tool==25 || tool==26) allowed[count++]="expected_sequence";
     if (!sb_config_keys(args,allowed,count)) return false;
     const char *action=sb_string(yyjson_obj_get(args,"action")),*lease=sb_string(yyjson_obj_get(args,"lease_id")),*key=sb_string(yyjson_obj_get(args,"request_key"));
@@ -250,17 +282,7 @@ static bool arguments(sb_desktop *desktop,const char *name,yyjson_val *args) {
         wchar_t *value=wide(text); bool ok=value && (tool!=23 || wcslen(value)<=512); free(value); if (!ok) return false;
     }
     if (tool==24) {
-        yyjson_val *keys=yyjson_obj_get(args,"keys"); size_t size=yyjson_arr_size(keys);
-        if (!yyjson_is_arr(keys) || !size || size>4) return false;
-        bool control=false,alt=false; WORD final=0;
-        for (size_t i=0;i<size;++i) {
-            WORD code=key_code(sb_string(yyjson_arr_get(keys,i))); if (!code) return false;
-            for (size_t j=0;j<i;++j) if (code==key_code(sb_string(yyjson_arr_get(keys,j)))) return false;
-            if (i+1<size && code!=VK_CONTROL && code!=VK_MENU && code!=VK_SHIFT) return false;
-            if (code==VK_CONTROL) control=true; if (code==VK_MENU) alt=true; final=code;
-        }
-        if (final==VK_CONTROL || final==VK_MENU || final==VK_SHIFT ||
-            (control && alt && (final==VK_DELETE || final==(WORD)(VK_F1+desktop->policy.emergency_function_key-1)))) return false;
+        key_chord chord;if(chord_parse(args,desktop->policy.emergency_function_key,&chord))return false;
     }
     if (tool==25 || tool==26) { uint64_t sequence; if (!sb_integer(yyjson_obj_get(args,"expected_sequence"),&sequence) || sequence>UINT32_MAX) return false; }
     if (tool==15 && strcmp(action,"acquire") && yyjson_obj_get(args,"duration_seconds") && strcmp(action,"renew")) return false;
@@ -470,6 +492,23 @@ static INPUT key_event(sb_desktop *desktop,WORD key,DWORD flags,bool unicode) {
         if (key==VK_DELETE || key==VK_HOME || key==VK_END || key==VK_PRIOR || key==VK_NEXT || (key>=VK_LEFT && key<=VK_DOWN)) input.ki.dwFlags|=KEYEVENTF_EXTENDEDKEY; }
     return input;
 }
+static const char *submit_chord(sb_desktop *desktop,const key_chord *chord,yyjson_mut_doc *doc,yyjson_mut_val *data,unsigned *inserted) {
+    INPUT events[8],cleanup[4];unsigned count=chord->count;char label[16];
+    yyjson_mut_val *keys=yyjson_mut_arr(doc),*mods=yyjson_mut_arr(doc);
+    for(unsigned i=0;i<count;++i){WORD key=chord->codes[i];key_name(key,label);yyjson_mut_arr_add_strcpy(doc,keys,label);
+        if(i+1<count)yyjson_mut_arr_add_strcpy(doc,mods,label);else yyjson_mut_obj_add_strcpy(doc,data,"key",label);
+        events[i]=key_event(desktop,key,0,false);events[count*2-i-1]=key_event(desktop,key,KEYEVENTF_KEYUP,false);
+    }
+    yyjson_mut_obj_add_val(doc,data,"keys",keys);yyjson_mut_obj_add_val(doc,data,"modifiers",mods);yyjson_mut_obj_add_uint(doc,data,"events_requested",count*2);
+    SetLastError(ERROR_SUCCESS);*inserted=SendInput(count*2,events,sizeof(INPUT));DWORD native=*inserted==count*2?ERROR_SUCCESS:GetLastError();
+    yyjson_mut_obj_add_uint(doc,data,"win32_error",native);yyjson_mut_obj_add_bool(doc,data,"win32_error_available",native!=ERROR_SUCCESS);
+    yyjson_mut_obj_add_str(doc,data,"key_submission_status",*inserted==count*2?"complete":*inserted?"partial":"not_inserted");
+    /* 只释放已经提交且尚未收到 key-up 的前缀，避免为未按下的键补发释放。 */
+    unsigned held=*inserted<count?*inserted:count*2-*inserted,released=0;
+    if(held){for(unsigned i=0;i<held;++i)cleanup[i]=key_event(desktop,chord->codes[held-i-1],KEYEVENTF_KEYUP,false);released=SendInput(held,cleanup,sizeof(INPUT));}
+    yyjson_mut_obj_add_uint(doc,data,"cleanup_events_requested",held);yyjson_mut_obj_add_uint(doc,data,"cleanup_events_inserted",released);
+    return *inserted==count*2?NULL:"partial_input_submission: inspect the receipt and application state; do not automatically repeat the key or paste.";
+}
 static const char *coordinate_guard(observation *view,int x,int y) {
     POINT point={x,y}; HWND at=WindowFromPoint(point);
     if (!PtInRect(&view->foreground_rect,point) || !at || GetAncestor(at,GA_ROOT)!=view->foreground ||
@@ -531,11 +570,9 @@ static const char *input_action(sb_desktop *desktop,const char *name,yyjson_val 
         }
         free(text);
     } else if (!strcmp(name,"desktop_key")) {
-        yyjson_val *keys=yyjson_obj_get(args,"keys"); unsigned count=(unsigned)yyjson_arr_size(keys); INPUT events[8];
-        for (unsigned i=0;i<count;++i) { WORD key=key_code(sb_string(yyjson_arr_get(keys,i))); if (GetAsyncKeyState(key)&0x8000) return "requested_key_already_held";
-            events[i]=key_event(desktop,key,0,false); events[count*2-i-1]=key_event(desktop,key,KEYEVENTF_KEYUP,false); }
-        inserted=SendInput(count*2,events,sizeof(INPUT));
-        if (inserted!=count*2) { SendInput(count,events+count,sizeof(INPUT)); error="partial_input_submission"; }
+        key_chord chord;error=chord_parse(args,desktop->policy.emergency_function_key,&chord);if(error)return error;
+        for(unsigned i=0;i<chord.count;++i)if(GetAsyncKeyState(chord.codes[i])&0x8000)return "requested_key_already_held";
+        error=submit_chord(desktop,&chord,doc,data,&inserted);
     } else {
         int x=0,y=0; integer(args,"x",0,-32768,32767,&x); integer(args,"y",0,-32768,32767,&y);
         error=coordinate_guard(view,x,y); if (error) return error;
@@ -710,6 +747,8 @@ static char *capabilities(sb_desktop *desktop) {
     yyjson_mut_obj_add_uint(doc,data,"observation_ttl_ms",OBSERVATION_MS); yyjson_mut_obj_add_uint(doc,data,"max_observations",OBSERVATIONS);
     yyjson_mut_obj_add_uint(doc,data,"max_png_bytes",PNG_LIMIT); yyjson_mut_obj_add_uint(doc,data,"max_image_dimension",SB_IMAGE_DIMENSION);
     yyjson_mut_obj_add_uint(doc,data,"max_type_utf16_units",512); yyjson_mut_obj_add_uint(doc,data,"max_clipboard_bytes",CLIPBOARD_BYTES);
+    yyjson_mut_obj_add_bool(doc,data,"explicit_key_chords",true);yyjson_mut_obj_add_uint(doc,data,"max_key_modifiers",3);
+    yyjson_mut_obj_add_bool(doc,data,"key_hold_supported",false);
     char key[24]; snprintf(key,sizeof(key),"Ctrl+Alt+F%u",desktop->policy.emergency_function_key); yyjson_mut_obj_add_strcpy(doc,data,"emergency_hotkey",key);
     yyjson_mut_obj_add_uint(doc,data,"emergency_stop_count",desktop->emergency_stops);
     yyjson_mut_obj_add_uint(doc,data,"physical_input_count",desktop->physical_inputs);
@@ -724,7 +763,9 @@ static void process_job(sb_desktop *desktop,desktop_job *job) {
     else if (!strcmp(job->name,"__capabilities")) job->reply=capabilities(desktop);
     else {
         yyjson_doc *input=yyjson_read(job->arguments,strlen(job->arguments),0); yyjson_val *args=yyjson_doc_get_root(input);
-        if (!arguments(desktop,job->name,args)) job->reply=failed("invalid_desktop_arguments");
+        key_chord chord;const char *key_error=!strcmp(job->name,"desktop_key") && yyjson_is_obj(args)?chord_parse(args,desktop->policy.emergency_function_key,&chord):NULL;
+        if(key_error)job->reply=failed(key_error);
+        else if (!arguments(desktop,job->name,args)) job->reply=failed("invalid_desktop_arguments");
         else if (job->prepare) {
             /* Binding uses the immutable worker/session and caller lease nonce.
                Live observation/clipboard guards run again immediately before execution.
