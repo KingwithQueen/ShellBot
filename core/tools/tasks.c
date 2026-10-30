@@ -58,6 +58,13 @@ yyjson_mut_val *sb_tasks_call(sb_host *host,const char *actor,const char *name,y
         yyjson_mut_obj_add_strcpy(request,parameters,"token_env",host->config.token_env);
         yyjson_mut_obj_add_strcpy(request,parameters,"runtime_directory",host->config.data_dir);
         event_key=key;
+    } else if(!strcmp(name,"task_list")) {
+        uint64_t offset=0,maximum=100;yyjson_val *archived=yyjson_obj_get(args,"include_archived");
+        if((yyjson_obj_get(args,"offset") && !sb_integer(yyjson_obj_get(args,"offset"),&offset)) ||
+            (yyjson_obj_get(args,"max_entries") && (!sb_integer(yyjson_obj_get(args,"max_entries"),&maximum) || !maximum || maximum>1000)) ||
+            (archived && !yyjson_is_bool(archived))) { sb_fail(&error,"Invalid task list page.");goto done; }
+        yyjson_mut_obj_add_uint(request,parameters,"offset",offset);yyjson_mut_obj_add_uint(request,parameters,"max_entries",maximum);
+        yyjson_mut_obj_add_bool(request,parameters,"include_archived",yyjson_get_bool(archived));
     } else {
         const char *id=sb_string(yyjson_obj_get(args,"task_id"));
         if(!id || strlen(id)!=32 || strspn(id,"0123456789abcdef")!=32) { sb_fail(&error,"Invalid task_id.");goto done; }
@@ -86,10 +93,10 @@ yyjson_mut_val *sb_tasks_call(sb_host *host,const char *actor,const char *name,y
     free(canonical); canonical=yyjson_mut_write(request,0,NULL);
     yyjson_doc *parsed=canonical?yyjson_read(canonical,strlen(canonical),0):NULL;
     if(!parsed) { sb_fail(&error,"Cannot serialize normalized task arguments.");goto done; }
-    bool changing=!strcmp(name,"task_start") || !strcmp(name,"task_input") || !strcmp(name,"task_cancel");
+    bool changing=!strcmp(name,"task_start") || !strcmp(name,"task_input") || !strcmp(name,"task_cancel") || !strcmp(name,"task_archive");
     if(changing) {
         bool recorded=sb_audit_task(host->audit,"task_operation_requested",actor,event_key,NULL,host->config.execution_profile,*request_hash?request_hash:NULL,name,0);
-        if(!recorded && strcmp(name,"task_cancel")) { yyjson_doc_free(parsed);sb_fail(&error,"Audit unavailable; task start and stdin writes are blocked.");goto done; }
+        if(!recorded && strcmp(name,"task_cancel")) { yyjson_doc_free(parsed);sb_fail(&error,"Audit unavailable; task start, stdin writes and archive are blocked.");goto done; }
     }
     reply=sb_execution_task(host->execution,name,yyjson_doc_get_root(parsed),&error); yyjson_doc_free(parsed);
 done:
@@ -99,6 +106,10 @@ done:
     if(!response) return task_error(doc,failed,"Task backend returned an invalid response; retry using the original request key.");
     yyjson_val *root=yyjson_doc_get_root(response); *failed=yyjson_get_bool(yyjson_obj_get(root,"_error"));
     yyjson_mut_val *result=yyjson_val_mut_copy(doc,root);
+    if(!*failed && !strcmp(name,"task_archive") && yyjson_get_bool(yyjson_obj_get(root,"archived")))
+        yyjson_mut_obj_add_uint(doc,result,"operation_receipts_released",sb_policy_task_archive(host->policy,actor,sb_string(yyjson_obj_get(root,"task_id"))));
+    yyjson_mut_obj_add_val(doc,result,"operation_budget",sb_policy_capacity(host->policy,doc));
+    yyjson_mut_obj_add_val(doc,result,"persistent_state",sb_store_capacity(host->store,doc));
     yyjson_mut_obj_add_strcpy(doc,result,"host_instance_id",sb_execution_instance(host->execution));
     if(*program_hash)yyjson_mut_obj_add_strcpy(doc,result,"executable_sha256",program_hash);
     if(!*failed && !strcmp(name,"task_start") && yyjson_get_bool(yyjson_obj_get(root,"created_new"))) {

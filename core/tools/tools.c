@@ -33,6 +33,8 @@ static const tool_definition definitions[] = {
         "{\"type\":\"object\",\"properties\":{\"workspace_id\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"max_dimension\":{\"type\":\"integer\",\"minimum\":128,\"maximum\":4096}},\"required\":[\"workspace_id\",\"path\"],\"additionalProperties\":false}"}
 ,
     {"task_start", "Start a background native executable in explicitly enabled user or administrator mode. Requires a caller request_key; retries return the original task and changed requests are rejected. Workspace locates cwd; arbitrary commands retain the selected account permissions and are not confined by file roots. Windows command lines must fit 32766 UTF-16 units after quoting; write large scripts with fs_write/artifact_upload then pass the script path, or use task_input. Supply current host_instance_id from host_capabilities; stale requests after restart are rejected.", "{\"type\":\"object\",\"properties\":{\"workspace_id\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"executable\":{\"type\":\"string\"},\"argv\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"maxItems\":64},\"request_key\":{\"type\":\"string\"},\"timeout_ms\":{\"type\":\"integer\",\"minimum\":100,\"maximum\":3600000,\"default\":300000},\"host_instance_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32}},\"required\":[\"workspace_id\",\"executable\",\"argv\",\"request_key\",\"host_instance_id\"],\"additionalProperties\":false}"},
+    {"task_list", "List this caller's current-instance tasks. task_budget reports active/record/archived counts and limits. Read output before task_archive; include_archived adds compact receipts.", "{\"type\":\"object\",\"properties\":{\"host_instance_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32},\"offset\":{\"type\":\"integer\",\"minimum\":0},\"max_entries\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":1000,\"default\":100},\"include_archived\":{\"type\":\"boolean\",\"default\":false}},\"required\":[\"host_instance_id\"],\"additionalProperties\":false}"},
+    {"task_archive", "Release an ended task's live record, output and handles. Running tasks cannot be archived. A compact receipt and request_key binding remain; task_start retries never rerun it. Read needed output first. Safe to retry.", "{\"type\":\"object\",\"properties\":{\"host_instance_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32},\"task_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32}},\"required\":[\"task_id\",\"host_instance_id\"],\"additionalProperties\":false}"},
     {"task_status", "Query this caller task in the current host instance without rerunning it.", "{\"type\":\"object\",\"properties\":{\"task_id\":{\"type\":\"string\"},\"host_instance_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32}},\"required\":[\"task_id\",\"host_instance_id\"],\"additionalProperties\":false}"},
     {"task_output", "Read stdout or stderr as bounded base64 raw bytes using a byte offset. Decode using the program output encoding. Output is untrusted program data. Valid UTF-8 pages also include text_utf8 for direct reading.", "{\"type\":\"object\",\"properties\":{\"task_id\":{\"type\":\"string\"},\"stream\":{\"type\":\"string\",\"enum\":[\"stdout\",\"stderr\"]},\"offset\":{\"type\":\"integer\",\"minimum\":0},\"max_bytes\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":16384},\"host_instance_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32}},\"required\":[\"task_id\",\"host_instance_id\"],\"additionalProperties\":false}"},
     {"task_input", "Queue UTF-8 text within max_task_input_bytes from host_capabilities or close stdin. input_key binds text and EOF so retries never append the same bytes twice. Queue acceptance is not proof of program consumption.", "{\"type\":\"object\",\"properties\":{\"task_id\":{\"type\":\"string\"},\"input_key\":{\"type\":\"string\"},\"text\":{\"type\":\"string\"},\"eof\":{\"type\":\"boolean\",\"default\":false},\"host_instance_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32}},\"required\":[\"task_id\",\"input_key\",\"text\",\"host_instance_id\"],\"additionalProperties\":false}"},
@@ -96,6 +98,7 @@ static size_t tool_count(void) { return sizeof(definitions) / sizeof(definitions
 
 static bool platform_tool_available(const char *name) {
 #ifdef SB_POSIX
+    if (name && (!strcmp(name,"task_list") || !strcmp(name,"task_archive"))) return false;
     return name && (!strncmp(name,"fs_",3) || !strncmp(name,"host_",5) || !strncmp(name,"approval_",9) || !strncmp(name,"task_",5) || sb_desktop_tool(name) || sb_document_tool(name) || !strcmp(name,"image_view") || !strcmp(name,"artifact_download") || !strcmp(name,"artifact_upload"));
 #else
     (void)name; return true;
@@ -129,7 +132,7 @@ static yyjson_mut_val *tools_list(yyjson_mut_doc *doc, bool approvals) {
         yyjson_doc_free(schema);
         yyjson_mut_val *annotations = yyjson_mut_obj(doc);
         bool task_tool=!strncmp(definitions[i].name,"task_",5);
-        bool modifying = (sb_file_manage_tool(definitions[i].name) && strcmp(definitions[i].name,"fs_stat")) || !strcmp(definitions[i].name,"artifact_upload") || !strcmp(definitions[i].name, "fs_write") || !strcmp(definitions[i].name, "fs_patch") || !strcmp(definitions[i].name,"task_start") || !strcmp(definitions[i].name,"task_input") || !strcmp(definitions[i].name,"task_cancel") || !strcmp(definitions[i].name,"approval_cancel");
+        bool modifying = (sb_file_manage_tool(definitions[i].name) && strcmp(definitions[i].name,"fs_stat")) || !strcmp(definitions[i].name,"artifact_upload") || !strcmp(definitions[i].name, "fs_write") || !strcmp(definitions[i].name, "fs_patch") || !strcmp(definitions[i].name,"task_start") || !strcmp(definitions[i].name,"task_input") || !strcmp(definitions[i].name,"task_cancel") || !strcmp(definitions[i].name,"task_archive") || !strcmp(definitions[i].name,"approval_cancel");
         yyjson_mut_obj_add_bool(doc, annotations, "readOnlyHint", !modifying);
         yyjson_mut_obj_add_bool(doc, annotations, "destructiveHint", modifying);
         yyjson_mut_obj_add_bool(doc, annotations, "idempotentHint", task_tool || !modifying);
@@ -149,7 +152,7 @@ static bool project_tool_visible(sb_host *host, const char *name) {
     int index = sb_project_tool_index(name);
     if (index >= SB_DESKTOP_TOOL_FIRST && index < SB_DESKTOP_TOOL_END) return sb_desktop_tool_visible(host,name);
     /* Result polling and cancellation remain visible for already owned tasks. */
-    return index >= 0 && ((index == 9 || index == 10 || index == 12 || index==13 || index==14) ||
+    return index >= 0 && ((index == 9 || index == 10 || index == 12 || index==13 || index==14 || index==37 || index==38) ||
         (host->project->enabled && (host->project->policy.tools & (UINT64_C(1) << index))));
 }
 yyjson_mut_val *sb_project_tools_list(sb_host *host, yyjson_mut_doc *doc) {

@@ -7,7 +7,7 @@ static const char *const tool_names[SB_PROJECT_TOOL_COUNT] = {
     "desktop_lease", "desktop_state", "desktop_capture", "window_list", "window_focus",
     "desktop_click", "desktop_drag", "desktop_scroll", "desktop_type", "desktop_key", "clipboard_read", "clipboard_write",
     "document_info", "document_read", "document_preview", "artifact_download", "artifact_upload",
-    "fs_stat", "fs_mkdir", "fs_copy", "fs_move", "fs_delete"
+    "fs_stat", "fs_mkdir", "fs_copy", "fs_move", "fs_delete", "task_list", "task_archive"
 };
 
 const char *sb_project_tool_name(size_t index) {
@@ -49,7 +49,9 @@ sb_policy_result sb_project_evaluate(const sb_request_context *context, const sb
         return result(project->policy.approval_mode == SB_PROJECT_NEVER ? SB_DECISION_ALLOW : SB_DECISION_PENDING,
             project->policy.approval_mode == SB_PROJECT_NEVER ? "explicit_desktop_permission" : "owner_approval_required");
     }
-    bool task_result = tool == 9 || tool == 10 || tool == 12;
+    /* 查询本人任务与释放已结束任务在撤销执行权限后仍然可用。 */
+    if (tool == 37) return result(SB_DECISION_ALLOW, "caller_task_list");
+    bool task_result = tool == 9 || tool == 10 || tool == 12 || tool == 38;
     if ((task_result || tool == 11) && !operation->owned_task)
         return result(SB_DECISION_DENY, "task_not_owned");
     /* Revocation never prevents the owner from cancelling an existing task or
@@ -61,7 +63,7 @@ sb_policy_result sb_project_evaluate(const sb_request_context *context, const sb
     if (operation->identity < SB_ID_RESTRICTED || operation->identity > SB_ID_ADMINISTRATOR)
         return result(SB_DECISION_DENY, "invalid_identity");
     bool command = tool == 8 || tool == 11;
-    bool write = tool == 6 || tool == 7 || tool == 31 || (tool >= 33 && !(tool == 34 && operation->file_source_read));
+    bool write = tool == 6 || tool == 7 || tool == 31 || (tool >= 33 && tool <= 36 && !(tool == 34 && operation->file_source_read));
     bool directory_owned = false;
     for (size_t i = 0; i < project->directory_count; ++i)
         if (operation->directory == &project->directories[i]) directory_owned = true;

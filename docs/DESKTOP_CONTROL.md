@@ -1,4 +1,18 @@
-# Windows 桌面工具（1.0.1）
+# Windows 桌面工具（1.0.6）
+
+## 观察过期与截图诊断
+
+`stale_observation` 回执增加 `code`、`changes` 和恢复建议。`changes` 每项标明 `field`、`expected` 和 `actual`，窗口变化附观察中的 `window_id`、`pid`；前台切换同时报告窗口句柄和进程编号，位置变化报告前后边界。其他原因包括 `monitor_layout`、`input_epoch`、`observation_age_ms`、动作已使观察失效或 `screen_id` 已被最近八份观察淘汰。窗口聚焦还报告 `requested_window_id`；目标窗口本身失效时返回 `stale_window_id` 及其位置、进程、线程、可见性或最小化状态变化。窗口句柄仅用于诊断，操作继续使用不透明 window_id。
+
+刷新后仍可能因窗口正在移动、前台切换或人工输入而立即过期；根据变化先稳定目标，再重新观察并使用新的请求键。1.0.6 修复暂停/恢复定时器使刚刷新观察再次失效的竞态，旧观察的输入代次检查继续有效。
+
+`desktop_capture` 的结果增加 `capture_diagnostic`。错误分为 `capture_failed`、`png_encoding_failed`、`png_budget_exceeded`、`image_serialization_failed`，分别表示 GDI 抓屏、PNG 编码、PNG 体积和结果序列化失败。只有体积超限需要优先尝试减小区域或尺寸，不再将各种失败合并为同一消息。
+
+- `stage` 指明 GetDC、StretchBlt 或具体 WIC 阶段；`win32_error` 及 `win32_error_available` 保留原生错误，`hresult` 为编码阶段 HRESULT 的无符号数值，未进入编码时为 null。某些 GDI 失败不提供扩展错误，此时不把 0 解释为成功。
+- `encoded_bytes` 是已知的实际 PNG 字节数，`png_limit_bytes` 为上限（16 MiB）。编码未完成时为 null，`encoded_bytes_known:false`；不会把未知长度报告为 0。
+- `desktop_session_available` 表示当前交互桌面是否符合条件；`pixels_captured` 表示本次实际抓屏是否成功。`desktop_capturable` 在实际抓屏成功时为 true，抓屏失败或会话不可用时为 false，桌面符合条件但尚未尝试时为 null。PNG 编码失败不等于桌面不可捕获。
+
+以上诊断不保证受保护窗口内容可见，也不解除锁屏、断开会话或安全桌面的限制。
 
 dev.15 为普通、新格式项目提供当前用户会话的截图、窗口列表和鼠标键盘工具，以及独立的纯文本剪贴板权限。旧单实例入口和管理员代理不提供这些工具。产品使用 Windows 原生接口，无需 Python、Node.js 或额外桌面运行库。
 

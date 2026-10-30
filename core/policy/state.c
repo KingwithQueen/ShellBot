@@ -3,8 +3,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef SB_POSIX
 #define STATE_BYTES (32u * 1024u * 1024u)
 #define STATE_RECORDS 256
+#else
+#define STATE_BYTES (256u * 1024u * 1024u)
+#define STATE_RECORDS 8192
+#endif
 #define STATE_LINE (2u * 1024u * 1024u)
 typedef struct { char id[33], instance[33], actor[64], kind[16]; char *json; } saved_record;
 struct sb_store {
@@ -40,7 +45,7 @@ static bool cache(sb_store *store, const char *kind, const char *id, const char 
 }
 static bool load(void *context, const char *name, const char *bytes, size_t length, sb_error *error) {
     sb_store *store=context; uint64_t sequence=0;
-    if (length>STATE_BYTES-store->bytes) { sb_fail(error,"Persistent state exceeds its 32 MiB retention budget."); return false; }
+    if (length>STATE_BYTES-store->bytes) { sb_fail_limit(error,"persistent_state.bytes",store->bytes+length,STATE_BYTES,"bytes"); return false; }
     store->bytes+=length;
     size_t offset=0;
     while (offset<length) {
@@ -149,6 +154,13 @@ failed:
 bool sb_store_healthy(sb_store *store) {
     if (!store) return true;
     sb_platform_mutex_lock(store->mutex); bool ok=store->healthy; sb_platform_mutex_unlock(store->mutex); return ok;
+}
+yyjson_mut_val *sb_store_capacity(sb_store *store,yyjson_mut_doc *doc) {
+    yyjson_mut_val *root=yyjson_mut_obj(doc);yyjson_mut_obj_add_bool(doc,root,"enabled",store!=NULL);if(!store)return root;
+    sb_platform_mutex_lock(store->mutex);
+    yyjson_mut_obj_add_bool(doc,root,"healthy",store->healthy);yyjson_mut_obj_add_uint(doc,root,"bytes",store->bytes);yyjson_mut_obj_add_uint(doc,root,"bytes_limit",STATE_BYTES);
+    yyjson_mut_obj_add_uint(doc,root,"record_count",store->count);yyjson_mut_obj_add_uint(doc,root,"record_limit",STATE_RECORDS);
+    sb_platform_mutex_unlock(store->mutex);return root;
 }
 bool sb_store_task_repeated(sb_store *store, const char *actor, const char *key) {
     if (!store || !actor || !key) return false;

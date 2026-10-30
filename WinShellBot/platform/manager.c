@@ -444,7 +444,7 @@ static char *administrator_call(manager *m, worker *w, const char *command, cons
     sb_platform_mutex_lock(m->administrator_lock); sb_error error={0}; char *reply=NULL;
     administrator_refresh_locked(m);
     const char *name=sb_string(yyjson_obj_get(operation,"name"));
-    bool result_tool=name && (!strcmp(name,"task_status") || !strcmp(name,"task_output") || !strcmp(name,"task_cancel") || !strcmp(name,"approval_status") || !strcmp(name,"approval_cancel"));
+    bool result_tool=name && (!strcmp(name,"task_status") || !strcmp(name,"task_output") || !strcmp(name,"task_cancel") || !strcmp(name,"task_list") || !strcmp(name,"task_archive") || !strcmp(name,"approval_status") || !strcmp(name,"approval_cancel"));
     if (!strcmp(command,"call") && !w->administrator_allowed && !result_tool) reply=error_json("administrator_not_allowed");
     else if (administrator_register_locked(m,w,&error)) reply=administrator_operation_locked(m,w,command,actor,operation);
     else reply=error_json(*error.text ? error.text : "Administrator registration unavailable.");

@@ -27,6 +27,33 @@ static const char *state_name(state status) {
     return names[status];
 }
 static void clear(record *r) { free(r->target); free(r->identity); free(r->text); free(r->original); free(r->cached); memset(r, 0, sizeof(*r)); }
+static yyjson_mut_val *capacity(sb_policy *policy,yyjson_mut_doc *doc) {
+    yyjson_mut_val *value=yyjson_mut_obj(doc);yyjson_mut_obj_add_bool(doc,value,"enabled",policy!=NULL);if(!policy)return value;
+    unsigned count=0,running=0,task_receipts=0;
+    for(size_t i=0;i<policy->record_limit;++i){record *r=&policy->records[i];if(!*r->id)continue;++count;
+        if(r->status==RUNNING)++running;
+        if(r->logical && (!strcmp(r->tool,"task_start") || !strcmp(r->tool,"task_input")) && (r->status==COMPLETED || r->status==FAILED))++task_receipts;
+    }
+    yyjson_mut_obj_add_uint(doc,value,"record_count",count);yyjson_mut_obj_add_uint(doc,value,"record_limit",policy->record_limit);
+    yyjson_mut_obj_add_uint(doc,value,"running_count",running);yyjson_mut_obj_add_uint(doc,value,"cached_task_receipt_count",task_receipts);return value;
+}
+yyjson_mut_val *sb_policy_capacity(sb_policy *policy,yyjson_mut_doc *doc) {
+    if(!policy)return capacity(NULL,doc);sb_platform_mutex_lock(policy->mutex);yyjson_mut_val *value=capacity(policy,doc);sb_platform_mutex_unlock(policy->mutex);return value;
+}
+unsigned sb_policy_task_archive(sb_policy *policy,const char *actor,const char *task_id) {
+    if(!policy || !actor || !task_id)return 0;unsigned released=0;sb_platform_mutex_lock(policy->mutex);
+    for(size_t i=0;i<policy->record_limit;++i){record *r=&policy->records[i];
+        if(!r->logical || strcmp(r->actor,actor) || (r->status!=COMPLETED && r->status!=FAILED))continue;
+        bool start=!strcmp(r->tool,"task_start"),input=!strcmp(r->tool,"task_input");if(!start && !input)continue;
+        yyjson_doc *saved=r->cached?yyjson_read(r->cached,strlen(r->cached),0):NULL;
+        const char *bound=sb_string(yyjson_obj_get(yyjson_obj_get(yyjson_doc_get_root(saved),"structuredContent"),"task_id"));
+        bool match=bound && !strcmp(bound,task_id);yyjson_doc_free(saved);
+        if(!match && input){yyjson_doc *args=r->text?yyjson_read(r->text,strlen(r->text),0):NULL;bound=sb_string(yyjson_obj_get(yyjson_doc_get_root(args),"task_id"));match=bound && !strcmp(bound,task_id);yyjson_doc_free(args);}
+        /* 后端先持久保存精简回执与请求键，再清理本人已结束的操作回执。审批中的请求与其他任务保持不变。 */
+        if(match){clear(r);++released;}
+    }
+    sb_platform_mutex_unlock(policy->mutex);return released;
+}
 static yyjson_mut_val *describe(yyjson_mut_doc *doc, record *r, bool full);
 #ifndef SB_POSIX
 /* 大文件审批仍在内存中保留完整内容；持久历史只存预览和摘要，避免复制整份源码/图像耗尽日志。 */
@@ -262,7 +289,10 @@ bool sb_policy_operation_begin(sb_host *host, const char *actor, const char *too
     } else {
         if (!sb_audit_healthy(policy->audit)) { *reply = error_data(doc, "Audit unavailable; operation was not started."); goto blocked; }
         for (size_t i = 0; i < policy->record_limit; ++i) if (!*policy->records[i].id) { r = &policy->records[i]; break; }
-        if (!r) { *reply = error_data(doc, "Approval record budget exhausted; restart the worker after reviewing receipts."); goto blocked; }
+        if (!r) {
+            *reply=error_data(doc,"Operation record budget reached; archive ended tasks to release their task receipts. Other approvals and operation receipts remain reserved for review.");
+            yyjson_mut_obj_add_str(doc,*reply,"code","operation_record_budget_exceeded");yyjson_mut_obj_add_val(doc,*reply,"operation_budget",capacity(policy,doc));goto blocked;
+        }
         unsigned char nonce[16];
         r->target = sb_strdup(target); r->identity = sb_strdup(version); r->text = sb_strdup(parameters);
         if (!r->target || !r->identity || !r->text || !sb_platform_random(nonce, sizeof(nonce), &error)) {

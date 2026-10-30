@@ -1,5 +1,27 @@
 # 命令与后台任务
 
+## Windows 1.0.6：任务列表与归档
+
+所有任务接口继续要求当前 `host_instance_id`。`task_list` 列出当前调用方在该后端实例中的任务，支持 `offset`、`max_entries`（默认 100，最高 1000）及 `include_archived`（默认 false）。列表不是一致性快照；其他客户端同时归档时应重新从第一页核对。
+
+每次任务后端回执都有 `task_budget`，包含 `active_count / active_limit`、`record_count / record_limit`、`ended_count` 和 `archived_count / archived_limit`。预算范围是当前项目和执行身份的后端实例、所有调用方合计；列表内容只包含本人任务，不泄露其他调用方的任务标识或输出。默认活动上限 8、未归档记录上限 32，新格式项目仍可降低这两个配额。记录包括运行中和已结束但尚未归档的任务。
+
+审批适配层重放启动回执时带 `receipt_replayed:true`，其中状态和计数是原回执快照；用 `task_list` 或 `task_status` 获取当前状态。明确失败的启动回执也可能被保留，释放容量后若原键仍返回失败，确认未启动后使用新的请求键。
+
+`task_start` 预算满时返回 `code:"task_budget_exceeded"`，用 `budget_kind:"active_tasks"` 或 `"task_records"` 区分原因，同时返回上述计数与上限。活动任务满时等待结束或取消本人任务；记录满时按以下顺序释放：
+
+1. 用 `task_list` 找到已结束任务，读取需要保留的 `task_output`。
+2. 调用 `task_archive`，参数为该任务的 `task_id` 和当前 `host_instance_id`。运行中的任务必须先取消并等待终止。
+3. 归档释放该任务的实时记录槽、输出缓冲、输入和进程句柄。`task_status` 仍返回精简回执，`archived:true`、`output_available:false`。归档和取消重试不会再次执行命令。
+
+归档还释放本人该任务已结束的启动／标准输入操作回执，`operation_receipts_released` 返回本次释放数，避免连续执行在第 64 份操作回执处再次堵住。`operation_budget` 单独给出操作回执记录数、上限及运行中数量。审批中、执行中、其他任务和其他调用方的记录不会被释放；无任务编号的失败启动回执也保留供核查。该层满时返回 `operation_record_budget_exceeded` 及其计数。归档后原启动／输入审批编号失效；若需要重新提交原请求，仍按原审批规则授权，后端保留的请求键继续防止重复执行。
+
+归档保留请求键和摘要：重试原 `task_start` 返回同一任务，`created_new:false`，修改同一键的命令仍被拒绝。每实例最多保留 4096 份精简归档回执，到达上限时明确报错，不静默丢弃幂等信息。`task_list`、本人任务结果及归档在撤销执行权限后仍可用于清理；它们不会恢复启动命令的权限。管理员任务需显式选择原管理员身份。
+
+`persistent_state` 另外报告持久历史的 `bytes / bytes_limit`、`record_count / record_limit` 和 `healthy`。Windows 历史上限提高至 256 MiB、8192 条记录（含审批及历史实例），原有历史原样保留。归档不删除磁盘事件，但所有者 history 的最新归档记录也只提供精简回执，不再含输出预览；原事件中的有限预览只能用于停机审阅，不能替代归档前保存的完整输出。接近持久容量时应由所有者备份并管理项目数据，不删除正在使用的日志。旧单实例入口没有这份持久历史，`enabled:false`。重启不重放任务，旧请求键在保留历史期间仍受保护。
+
+Mac/Linux 暂不提供这两个新接口。
+
 Windows 1.0.5 的 `task_output` 可指定 `encoding:"utf-8"`、`"cp936"` / `"gbk"` 或 Windows 支持的 `"cpNNNN"`，例如读取中文编译日志：
 
 ```json

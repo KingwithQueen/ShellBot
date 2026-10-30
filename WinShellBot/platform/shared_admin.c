@@ -163,7 +163,7 @@ char *sb_shared_admin_request(sb_shared_admin *state, yyjson_val *root) {
     const char *identity=sb_string(yyjson_obj_get(args,"identity"));
     if (!sb_config_keys(operation,call_keys,2) || !name || !yyjson_is_obj(args) || !identity || strcmp(identity,"administrator"))
         return failure("Explicit administrator identity is required.");
-    bool result_tool=!strcmp(name,"task_status") || !strcmp(name,"task_output") || !strcmp(name,"task_cancel") || !strcmp(name,"approval_status") || !strcmp(name,"approval_cancel");
+    bool result_tool=!strcmp(name,"task_status") || !strcmp(name,"task_output") || !strcmp(name,"task_cancel") || !strcmp(name,"task_list") || !strcmp(name,"task_archive") || !strcmp(name,"approval_status") || !strcmp(name,"approval_cancel");
     if (!project->allowed && !result_tool) return failure("administrator_not_allowed");
     yyjson_mut_doc *doc=yyjson_mut_doc_new(NULL); if (!doc) return NULL;
     yyjson_mut_val *reply=sb_tool_call(&project->host,actor,name,args,doc); yyjson_mut_doc_set_root(doc,reply);

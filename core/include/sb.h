@@ -238,6 +238,7 @@ sb_store *sb_store_new(sb_lease *lease, const char *project, uint64_t revision,
 bool sb_store_append(sb_store *store, const char *kind, const char *id, const char *actor,
                      const char *status, const char *event, yyjson_mut_val *body);
 bool sb_store_healthy(sb_store *store);
+yyjson_mut_val *sb_store_capacity(sb_store *store,yyjson_mut_doc *doc);
 bool sb_store_task_repeated(sb_store *store, const char *actor, const char *key);
 char *sb_store_history(sb_store *store, const char *actor, const char *id, bool full, unsigned offset, unsigned limit);
 void sb_store_free(sb_store *store);
@@ -261,6 +262,8 @@ bool sb_audit_project(sb_audit *audit, const char *event, const char *project, u
 sb_policy *sb_policy_new(unsigned ttl, sb_audit *audit, sb_error *error);
 void sb_policy_limit(sb_policy *policy, unsigned records);
 void sb_policy_free(sb_policy *policy);
+yyjson_mut_val *sb_policy_capacity(sb_policy *policy,yyjson_mut_doc *doc);
+unsigned sb_policy_task_archive(sb_policy *policy,const char *actor,const char *task_id);
 bool sb_policy_operation_begin(sb_host *host, const char *actor, const char *tool,
     const char *parameters, const char *target, const char *version, const char *approval_id,
     bool approval_required, uint64_t offset, uint64_t budget, yyjson_mut_doc *doc,

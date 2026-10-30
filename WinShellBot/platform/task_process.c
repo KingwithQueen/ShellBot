@@ -11,6 +11,7 @@
 
 #define TASK_RECORDS 32
 #define TASK_ACTIVE 8
+#define ARCHIVE_RECORDS 4096
 #define OUTPUT_CAP 262144u
 #define INPUT_RECORDS 1024
 typedef struct { char key[65], hash[65]; char *data; DWORD length; bool eof, sent, delivered; } task_input;
@@ -25,9 +26,10 @@ typedef struct task {
     task_input inputs[INPUT_RECORDS]; size_t input_count;
     sb_win_tasks *owner;
     char *command;
-    bool durable_reserved, durable_warning;
+    bool durable_reserved, durable_warning, archived;
 } task;
-struct sb_win_tasks { SRWLOCK lock; task *items[TASK_RECORDS]; HANDLE stop, monitor, worker; sb_execution_profile profile; bool elevated; sb_resource_limits limits; sb_win_sandbox *sandbox; sb_store *store; sb_audit *audit; };
+typedef struct { char id[33],key[65],hash[65],actor[64]; char *receipt; } archived_task;
+struct sb_win_tasks { SRWLOCK lock; task *items[TASK_RECORDS]; archived_task archives[ARCHIVE_RECORDS]; size_t archive_count; HANDLE stop, monitor, worker; sb_execution_profile profile; bool elevated; sb_resource_limits limits; sb_win_sandbox *sandbox; sb_store *store; sb_audit *audit; };
 typedef struct { task *item; unsigned stream; } reader_context;
 static yyjson_mut_val *snapshot(sb_win_tasks *tasks, task *item, yyjson_mut_doc *doc);
 static bool task_event(task *item, const char *event, const char *status, bool output) {
@@ -72,6 +74,8 @@ bool sb_win_tasks_owned(sb_win_tasks *tasks, const char *actor, const char *id) 
     AcquireSRWLockShared(&tasks->lock);
     for (size_t i = 0; i < TASK_RECORDS; ++i)
         if (tasks->items[i] && !strcmp(tasks->items[i]->actor, actor) && !strcmp(tasks->items[i]->id, id)) found = true;
+    for (size_t i=0;i<tasks->archive_count;++i)
+        if (!strcmp(tasks->archives[i].actor,actor) && !strcmp(tasks->archives[i].id,id)) found=true;
     ReleaseSRWLockShared(&tasks->lock);
     return found;
 }
@@ -84,6 +88,33 @@ static char *fail(const char *message) {
 static char *limit_fail(const char *field,uint64_t actual,uint64_t maximum,const char *unit) {
     yyjson_mut_doc *doc=yyjson_mut_doc_new(NULL);if(!doc)return NULL;
     yyjson_mut_val *root=sb_limit_error(doc,field,actual,maximum,unit);yyjson_mut_obj_add_bool(doc,root,"_error",true);return serialize(doc,root);
+}
+/* 持有 tasks->lock；任务状态只能在同一外层锁下转为 finished。 */
+static void budget(sb_win_tasks *tasks,yyjson_mut_doc *doc,yyjson_mut_val *root) {
+    unsigned active=0,records=0;
+    for(size_t i=0;i<TASK_RECORDS;++i)if(tasks->items[i]){++records;if(!tasks->items[i]->finished)++active;}
+    yyjson_mut_val *b=yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_uint(doc,b,"active_count",active);yyjson_mut_obj_add_uint(doc,b,"active_limit",tasks->limits.active_tasks);
+    yyjson_mut_obj_add_uint(doc,b,"record_count",records);yyjson_mut_obj_add_uint(doc,b,"record_limit",tasks->limits.task_records);
+    yyjson_mut_obj_add_uint(doc,b,"archived_count",tasks->archive_count);yyjson_mut_obj_add_uint(doc,b,"archived_limit",ARCHIVE_RECORDS);
+    yyjson_mut_obj_add_uint(doc,b,"ended_count",records-active);yyjson_mut_obj_add_str(doc,b,"scope","backend_instance_all_callers");
+    yyjson_mut_obj_add_val(doc,root,"task_budget",b);
+}
+static char *task_list(sb_win_tasks *tasks,yyjson_val *args) {
+    const char *actor=sb_string(yyjson_obj_get(args,"actor"));uint64_t offset=0,maximum=0;
+    if(!actor || !sb_integer(yyjson_obj_get(args,"offset"),&offset) || !sb_integer(yyjson_obj_get(args,"max_entries"),&maximum) || !maximum || maximum>1000)return fail("Invalid task list page.");
+    yyjson_mut_doc *doc=yyjson_mut_doc_new(NULL);if(!doc)return NULL;
+    yyjson_mut_val *root=yyjson_mut_obj(doc),*array=yyjson_mut_arr(doc);uint64_t matched=0,returned=0;
+    for(size_t i=0;i<TASK_RECORDS;++i){task *item=tasks->items[i];if(!item || strcmp(item->actor,actor))continue;
+        if(matched++<offset || returned==maximum)continue;
+        AcquireSRWLockShared(&item->lock);yyjson_mut_arr_add_val(array,snapshot(tasks,item,doc));ReleaseSRWLockShared(&item->lock);++returned;
+    }
+    if(yyjson_get_bool(yyjson_obj_get(args,"include_archived")))for(size_t i=0;i<tasks->archive_count;++i){archived_task *a=&tasks->archives[i];if(strcmp(a->actor,actor))continue;
+        if(matched++<offset || returned==maximum)continue;
+        yyjson_doc *saved=yyjson_read(a->receipt,strlen(a->receipt),0);yyjson_mut_arr_add_val(array,yyjson_val_mut_copy(doc,yyjson_doc_get_root(saved)));yyjson_doc_free(saved);++returned;
+    }
+    yyjson_mut_obj_add_val(doc,root,"tasks",array);yyjson_mut_obj_add_uint(doc,root,"next_offset",offset+returned);
+    yyjson_mut_obj_add_bool(doc,root,"has_more",offset+returned<matched);yyjson_mut_obj_add_uint(doc,root,"caller_total",matched);budget(tasks,doc,root);return serialize(doc,root);
 }
 static UINT codepage(const char *name) {
     if(!name)return 0;
@@ -277,6 +308,7 @@ void sb_win_tasks_free(sb_win_tasks *tasks) {
     if (!tasks) return;
     SetEvent(tasks->stop); WaitForSingleObject(tasks->monitor, INFINITE); CloseHandle(tasks->monitor); CloseHandle(tasks->stop);
     for (size_t i = 0; i < TASK_RECORDS; ++i) task_free(tasks->items[i]);
+    for (size_t i=0;i<tasks->archive_count;++i)free(tasks->archives[i].receipt);
     if (tasks->worker) CloseHandle(tasks->worker); free(tasks);
 }
 bool sb_win_tasks_watch_worker(sb_win_tasks *tasks, HANDLE worker) {
@@ -319,10 +351,12 @@ static yyjson_mut_val *snapshot(sb_win_tasks *tasks, task *item, yyjson_mut_doc 
     if (item->reason && !item->finished) yyjson_mut_obj_add_str(doc, result, "termination_requested", item->reason);
     yyjson_mut_obj_add_uint(doc, result, "stdout_bytes", item->lengths[0]);
     yyjson_mut_obj_add_uint(doc, result, "stderr_bytes", item->lengths[1]);
-    yyjson_mut_obj_add_bool(doc, result, "stdin_closed", item->input_closed);
+    yyjson_mut_obj_add_bool(doc, result, "stdin_closed", item->input_closed || item->archived);
     yyjson_mut_obj_add_bool(doc, result, "stdin_failed", item->input_failed);
     yyjson_mut_obj_add_uint(doc, result, "timeout_ms", item->timeout);
     yyjson_mut_obj_add_bool(doc, result, "process_tree_job", true);
+    yyjson_mut_obj_add_bool(doc, result, "archived", item->archived);
+    yyjson_mut_obj_add_bool(doc, result, "output_available", !item->archived);
     if (tasks->store) { yyjson_mut_obj_add_bool(doc,result,"durable",true); yyjson_mut_obj_add_bool(doc,result,"durable_warning",item->durable_warning); }
     return result;
 }
@@ -330,6 +364,12 @@ static char *start(sb_win_tasks *tasks, yyjson_val *args) {
     if (tasks->store && (!sb_store_healthy(tasks->store) || !sb_audit_healthy(tasks->audit))) return fail("Persistent state or audit unavailable; task was not started.");
     const char *key = sb_string(yyjson_obj_get(args, "request_key")), *actor = sb_string(yyjson_obj_get(args, "actor"));
     const char *hash = sb_string(yyjson_obj_get(args, "request_sha256"));
+    for(size_t i=0;key && actor && hash && i<tasks->archive_count;++i){
+        archived_task *a=&tasks->archives[i];if(strcmp(a->actor,actor) || strcmp(a->key,key))continue;
+        if(strcmp(a->hash,hash))return fail("request_key already binds a different archived request.");
+        yyjson_doc *saved=yyjson_read(a->receipt,strlen(a->receipt),0);yyjson_mut_doc *doc=saved?yyjson_doc_mut_copy(saved,NULL):NULL;yyjson_doc_free(saved);
+        if(!doc)return NULL;yyjson_mut_val *root=yyjson_mut_doc_get_root(doc);yyjson_mut_obj_add_bool(doc,root,"created_new",false);return serialize(doc,root);
+    }
     const char *executable = sb_string(yyjson_obj_get(args, "executable")), *cwd = sb_string(yyjson_obj_get(args, "cwd"));
     const char *token_env = sb_string(yyjson_obj_get(args, "token_env"));
     yyjson_val *argv = yyjson_obj_get(args, "argv"); uint64_t timeout = 0;
@@ -349,7 +389,13 @@ static char *start(sb_win_tasks *tasks, yyjson_val *args) {
         }
         ReleaseSRWLockExclusive(&old->lock);
     }
-    if (slot >= tasks->limits.task_records || active >= tasks->limits.active_tasks) return fail("Task record or active process budget reached; records are never silently evicted.");
+    if (slot >= tasks->limits.task_records || active >= tasks->limits.active_tasks) {
+        yyjson_mut_doc *doc=yyjson_mut_doc_new(NULL);if(!doc)return NULL;yyjson_mut_val *root=yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_bool(doc,root,"_error",true);yyjson_mut_obj_add_str(doc,root,"code","task_budget_exceeded");
+        yyjson_mut_obj_add_str(doc,root,"budget_kind",active>=tasks->limits.active_tasks?"active_tasks":"task_records");
+        yyjson_mut_obj_add_str(doc,root,"error",active>=tasks->limits.active_tasks?"Active task limit reached; wait for completion or cancel an owned task.":"Task record limit reached; use task_list, read needed output, then task_archive ended tasks.");
+        return serialize(doc,root);
+    }
     const char *runtime=sb_string(yyjson_obj_get(args,"runtime_directory"));sb_error runtime_error={0};char *fallback=runtime?NULL:sb_platform_default_data_dir(&runtime_error);
     const char *exclude[]={token_env};wchar_t *env=runtime || fallback ? sb_platform_child_environment(runtime?runtime:fallback,exclude,1,&runtime_error):NULL;free(fallback);
     wchar_t *exe = to_wide(executable), *directory = to_wide(cwd), *line = calloc(SB_WINDOWS_COMMAND_CAP,sizeof(wchar_t)); size_t used = 0;
@@ -419,17 +465,34 @@ static char *start(sb_win_tasks *tasks, yyjson_val *args) {
     yyjson_mut_doc *doc=yyjson_mut_doc_new(NULL); if(!doc) return NULL;
     AcquireSRWLockExclusive(&item->lock); yyjson_mut_val *result=snapshot(tasks,item,doc); yyjson_mut_obj_add_bool(doc,result,"created_new",true); ReleaseSRWLockExclusive(&item->lock); return serialize(doc,result);
 }
-char *sb_win_tasks_call(sb_win_tasks *tasks,const char *name,yyjson_val *args) {
+static char *tasks_call(sb_win_tasks *tasks,const char *name,yyjson_val *args) {
     if(!tasks || !name || !yyjson_is_obj(args)) return fail("Task backend unavailable.");
     AcquireSRWLockExclusive(&tasks->lock);
     if(!strcmp(name,"task_start")) { char *result=start(tasks,args); ReleaseSRWLockExclusive(&tasks->lock); return result; }
+    if(!strcmp(name,"task_list")){char *reply=task_list(tasks,args);ReleaseSRWLockExclusive(&tasks->lock);return reply;}
     const char *id=sb_string(yyjson_obj_get(args,"task_id")),*actor=sb_string(yyjson_obj_get(args,"actor")); task *item=NULL;
     for(size_t i=0;id && actor && i<TASK_RECORDS;++i) if(tasks->items[i] && !strcmp(tasks->items[i]->id,id) && !strcmp(tasks->items[i]->actor,actor)) item=tasks->items[i];
+    for(size_t i=0;!item && id && actor && i<tasks->archive_count;++i){archived_task *a=&tasks->archives[i];if(strcmp(a->id,id) || strcmp(a->actor,actor))continue;
+        char *reply=(!strcmp(name,"task_status") || !strcmp(name,"task_archive") || !strcmp(name,"task_cancel"))?sb_strdup(a->receipt):fail("task_archived: live output and stdin were released; only the compact receipt and request_key remain. Save needed output before archiving.");
+        ReleaseSRWLockExclusive(&tasks->lock);return reply;
+    }
     if(!item) { ReleaseSRWLockExclusive(&tasks->lock); return fail("Unknown task_id for this caller or host instance."); }
     AcquireSRWLockExclusive(&item->lock);
     yyjson_mut_doc *doc=yyjson_mut_doc_new(NULL); yyjson_mut_val *result=doc?snapshot(tasks,item,doc):NULL; const char *error=NULL;
     if(!doc) { ReleaseSRWLockExclusive(&item->lock); ReleaseSRWLockExclusive(&tasks->lock); return NULL; }
-    if(!strcmp(name,"task_cancel")) {
+    if(!strcmp(name,"task_archive")) {
+        if(!item->finished)error="task_still_running: only ended tasks can be archived; cancel and wait for termination first.";
+        else if(tasks->archive_count==ARCHIVE_RECORDS)error="archive_receipt_budget_exceeded: compact request_key receipts are full; no record was discarded.";
+        else {
+            item->archived=true;result=snapshot(tasks,item,doc);char *receipt=yyjson_mut_val_write(result,0,NULL);
+            if(!receipt || !task_event(item,"task_archived",item->reason?item->reason:"completed",false)){free(receipt);item->archived=false;error="Cannot persist archive receipt; the task and its output remain available.";}
+            else {
+                archived_task *a=&tasks->archives[tasks->archive_count++];strcpy(a->id,item->id);strcpy(a->key,item->key);strcpy(a->hash,item->hash);strcpy(a->actor,item->actor);a->receipt=receipt;
+                for(size_t i=0;i<TASK_RECORDS;++i)if(tasks->items[i]==item)tasks->items[i]=NULL;
+                ReleaseSRWLockExclusive(&item->lock);task_free(item);ReleaseSRWLockExclusive(&tasks->lock);return serialize(doc,result);
+            }
+        }
+    } else if(!strcmp(name,"task_cancel")) {
         if(!item->finished && !item->reason) { if(TerminateJobObject(item->job,125)) { item->reason="cancelled";task_event(item,"task_cancel_requested","running",false);SetEvent(item->input_event); } else error="Cannot terminate the task job."; }
         result=snapshot(tasks,item,doc);
     } else if(!strcmp(name,"task_output")) {
@@ -473,4 +536,10 @@ char *sb_win_tasks_call(sb_win_tasks *tasks,const char *name,yyjson_val *args) {
     } else if(strcmp(name,"task_status")) error="Unknown task operation.";
     ReleaseSRWLockExclusive(&item->lock); ReleaseSRWLockExclusive(&tasks->lock);
     if(error) { yyjson_mut_doc_free(doc); return fail(error); } return serialize(doc,result);
+}
+char *sb_win_tasks_call(sb_win_tasks *tasks,const char *name,yyjson_val *args) {
+    char *wire=tasks_call(tasks,name,args);if(!tasks || !wire)return wire;
+    yyjson_doc *input=yyjson_read(wire,strlen(wire),0);yyjson_mut_doc *doc=input?yyjson_doc_mut_copy(input,NULL):NULL;yyjson_doc_free(input);
+    if(!doc)return wire;free(wire);yyjson_mut_val *root=yyjson_mut_doc_get_root(doc);yyjson_mut_obj_remove_str(root,"task_budget");
+    AcquireSRWLockShared(&tasks->lock);budget(tasks,doc,root);ReleaseSRWLockShared(&tasks->lock);return serialize(doc,root);
 }
