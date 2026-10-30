@@ -81,6 +81,42 @@ static char *fail(const char *message) {
     yyjson_mut_obj_add_bool(doc, root, "_error", true); yyjson_mut_obj_add_strcpy(doc, root, "error", message);
     return serialize(doc, root);
 }
+static char *limit_fail(const char *field,uint64_t actual,uint64_t maximum,const char *unit) {
+    yyjson_mut_doc *doc=yyjson_mut_doc_new(NULL);if(!doc)return NULL;
+    yyjson_mut_val *root=sb_limit_error(doc,field,actual,maximum,unit);yyjson_mut_obj_add_bool(doc,root,"_error",true);return serialize(doc,root);
+}
+static UINT codepage(const char *name) {
+    if(!name)return 0;
+    if(!_stricmp(name,"utf-8") || !_stricmp(name,"utf8"))return CP_UTF8;
+    if(!_stricmp(name,"gbk"))return 936;
+    if(_strnicmp(name,"cp",2) || !name[2])return 0;
+    unsigned value=0;for(const char *p=name+2;*p;++p){if(*p<'0'||*p>'9'||value>6553)return 0;value=value*10+(unsigned)(*p-'0');}
+    return value && IsValidCodePage(value) ? value : 0;
+}
+static void decoded_output(yyjson_mut_doc *doc,yyjson_mut_val *result,const unsigned char *bytes,size_t length,UINT cp,uint64_t offset,bool terminal) {
+    size_t size=length;int count=0;unsigned trim=0;
+    /* 独立文本游标用于重读跨页的尾字节；原始字节游标始终不变。 */
+    for(;trim<=3 && trim<=length;++trim){
+        size=length-trim;if(!size){count=0;break;}
+        count=MultiByteToWideChar(cp,MB_ERR_INVALID_CHARS,(const char*)bytes,(int)size,NULL,0);
+        if(count)break;
+    }
+    bool valid=count>0 || !length;
+    if(trim && terminal)valid=false;
+    wchar_t *wide=valid && count ? malloc((size_t)count*sizeof(wchar_t)) : NULL;
+    if(valid && count && (!wide || !MultiByteToWideChar(cp,MB_ERR_INVALID_CHARS,(const char*)bytes,(int)size,wide,count)))valid=false;
+    int output=valid && count ? WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,wide,count,NULL,0,NULL,NULL):0;
+    if(valid && count && !output)valid=false;
+    char *text=output ? malloc((size_t)output) : NULL;
+    if(output && (!text || !WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,wide,count,text,output,NULL,NULL)))valid=false;
+    char name[24];if(cp==CP_UTF8)strcpy(name,"utf-8");else snprintf(name,sizeof(name),"cp%u",cp);
+    yyjson_mut_obj_add_strcpy(doc,result,"text_encoding",name);
+    yyjson_mut_obj_add_uint(doc,result,"text_next_offset",offset+(valid?size:0));
+    yyjson_mut_obj_add_str(doc,result,"decode_status",valid?(trim?"partial":"complete"):"invalid_or_incomplete");
+    if(valid)yyjson_mut_obj_add_strncpy(doc,result,"text",text?text:"",(size_t)output);
+    else yyjson_mut_obj_add_str(doc,result,"decode_error","The page cannot be strictly decoded; raw data_base64 is intact. Retry from text_next_offset with more bytes, or select the correct encoding.");
+    free(wide);free(text);
+}
 static bool key_valid(const char *key) { return key && *key && strlen(key) <= 64 && strspn(key, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.") == strlen(key); }
 static wchar_t *to_wide(const char *value) {
     if (!value) return NULL;
@@ -95,9 +131,9 @@ static bool absolute_exe(const wchar_t *path) {
         (path[2] == L'\\' || path[2] == L'/') && !_wcsicmp(path + size - 4, L".exe") && !wcschr(path + 2, L':');
 }
 /* Windows CRT argument rules; the chosen executable may interpret its own arguments. */
-static bool quote(wchar_t *line, size_t *used, const wchar_t *arg) {
+static size_t quoted_size(const wchar_t *arg) {
     /* 精确计算转义后的长度，普通长参数不会再被最坏情况预估提前拒绝。 */
-    size_t bound = (*used ? 1u : 0u) + 2u, slashes = 0;
+    size_t bound = 2u, slashes = 0;
     for (const wchar_t *p = arg; ; ++p) {
         if (*p == L'\\') { ++slashes; continue; }
         bound += (*p == L'"' || !*p) ? slashes * 2 : slashes;
@@ -105,6 +141,10 @@ static bool quote(wchar_t *line, size_t *used, const wchar_t *arg) {
         if (!*p) break;
         bound += *p == L'"' ? 2u : 1u;
     }
+    return bound;
+}
+static bool quote(wchar_t *line, size_t *used, const wchar_t *arg) {
+    size_t bound=quoted_size(arg)+(*used ? 1u : 0u),slashes=0;
     if (*used >= SB_WINDOWS_COMMAND_CAP || bound >= SB_WINDOWS_COMMAND_CAP - *used) return false;
     if (*used) line[(*used)++] = L' ';
     line[(*used)++] = L'"';
@@ -314,8 +354,13 @@ static char *start(sb_win_tasks *tasks, yyjson_val *args) {
     const char *exclude[]={token_env};wchar_t *env=runtime || fallback ? sb_platform_child_environment(runtime?runtime:fallback,exclude,1,&runtime_error):NULL;free(fallback);
     wchar_t *exe = to_wide(executable), *directory = to_wide(cwd), *line = calloc(SB_WINDOWS_COMMAND_CAP,sizeof(wchar_t)); size_t used = 0;
     bool valid = absolute_exe(exe) && directory && line && env && (!tasks->sandbox || sb_win_sandbox_program(tasks->sandbox,exe)) && quote(line,&used,exe);
-    size_t idx,max; yyjson_val *argument;
-    yyjson_arr_foreach(argv,idx,max,argument) { wchar_t *wide = to_wide(sb_string(argument)); valid = valid && wide && quote(line,&used,wide); free(wide); }
+    size_t idx,max; yyjson_val *argument;uint64_t command_length=exe?quoted_size(exe):0;
+    yyjson_arr_foreach(argv,idx,max,argument) {
+        const char *text=sb_string(argument);int units=text?MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,text,-1,NULL,0):0;
+        if(units>(int)SB_WINDOWS_COMMAND_CAP){char field[40];snprintf(field,sizeof(field),"argv[%zu]",idx);free(exe);free(directory);free(line);free(env);return limit_fail(field,(uint64_t)units-1,SB_WINDOWS_COMMAND_CAP-1,"UTF-16 units");}
+        wchar_t *wide=to_wide(text);if(wide)command_length+=1+quoted_size(wide);valid=valid && wide && quote(line,&used,wide);free(wide);
+    }
+    if(command_length>=SB_WINDOWS_COMMAND_CAP){free(exe);free(directory);free(line);free(env);return limit_fail("command_line",command_length,SB_WINDOWS_COMMAND_CAP-1,"UTF-16 units (quoted executable and argv)");}
     if (!valid) { free(exe); free(directory); free(line); free(env); return fail("Executable must be an absolute local .exe path; the quoted command line must fit 32766 UTF-16 units. Use fs_write/artifact_upload plus a script path, or task_input for large source text."); }
     task *item = calloc(1,sizeof(*item));
     if (!item) { free(exe); free(directory); free(line); free(env); return fail("Cannot allocate task."); }
@@ -388,6 +433,8 @@ char *sb_win_tasks_call(sb_win_tasks *tasks,const char *name,yyjson_val *args) {
         if(!item->finished && !item->reason) { if(TerminateJobObject(item->job,125)) { item->reason="cancelled";task_event(item,"task_cancel_requested","running",false);SetEvent(item->input_event); } else error="Cannot terminate the task job."; }
         result=snapshot(tasks,item,doc);
     } else if(!strcmp(name,"task_output")) {
+        const char *encoding=sb_string(yyjson_obj_get(args,"text_encoding"));UINT cp=codepage(encoding);
+        if(encoding && !cp){yyjson_mut_doc_free(doc);ReleaseSRWLockExclusive(&item->lock);ReleaseSRWLockExclusive(&tasks->lock);return fail("Unsupported encoding: use utf-8, cp936/gbk or a supported Windows cpNNNN.");}
         const char *stream=sb_string(yyjson_obj_get(args,"stream")); unsigned selected=stream && !strcmp(stream,"stderr")?1:0; uint64_t offset=0,maximum=0;
         if(!stream || (strcmp(stream,"stdout") && strcmp(stream,"stderr")) || !sb_integer(yyjson_obj_get(args,"offset"),&offset) || !sb_integer(yyjson_obj_get(args,"max_bytes"),&maximum) || maximum<1 || maximum>SB_TASK_OUTPUT_PAGE_LIMIT || offset>item->lengths[selected]) error="Invalid output stream, byte offset or limit.";
         else {
@@ -396,6 +443,7 @@ char *sb_win_tasks_call(sb_win_tasks *tasks,const char *name,yyjson_val *args) {
             if(!encoded) error="Cannot encode task output.";
             else { yyjson_mut_obj_add_strcpy(doc,result,"data_base64",encoded);free(encoded); yyjson_mut_obj_add_str(doc,result,"encoding","base64");
                 const unsigned char *page=item->bytes[selected]+(size_t)offset;
+                if(encoding)decoded_output(doc,result,page,length,cp,offset,item->finished && offset+length==item->lengths[selected]);
                 if (!length || (!memchr(page,0,length) && MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,(const char *)page,(int)length,NULL,0)))
                     yyjson_mut_obj_add_strncpy(doc,result,"text_utf8",(const char *)page,length); yyjson_mut_obj_add_uint(doc,result,"next_offset",offset+length); yyjson_mut_obj_add_bool(doc,result,"eof",item->finished && offset+length==item->lengths[selected]); }
         }

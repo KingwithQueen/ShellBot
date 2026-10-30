@@ -19,6 +19,8 @@ $msbuild = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Com
 if (!$msbuild) { throw 'Install Visual Studio C++ desktop tools and a recent Windows SDK.' }
 & $msbuild (Join-Path $repoRoot 'WinShellBot\WinShellBot.vcxproj') /m /nologo /v:minimal "/p:Configuration=$Configuration" "/p:Platform=$Platform"
 if ($LASTEXITCODE -ne 0) { throw "Build failed ($LASTEXITCODE)." }
+& $msbuild (Join-Path $repoRoot 'ShellBotUpdate\ShellBotUpdate.vcxproj') /m /nologo /v:minimal "/p:Configuration=$Configuration" "/p:Platform=$Platform"
+if ($LASTEXITCODE -ne 0) { throw 'Updater build failed.' }
 if ($WithTests) {
     & $msbuild (Join-Path $repoRoot 'tests\TaskFixture.vcxproj') /m /nologo /v:minimal "/p:Configuration=$Configuration" "/p:Platform=$Platform"
     if ($LASTEXITCODE -ne 0) { throw 'Native test fixture build failed.' }

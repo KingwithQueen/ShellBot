@@ -1,5 +1,17 @@
 # 命令与后台任务
 
+Windows 1.0.5 的 `task_output` 可指定 `encoding:"utf-8"`、`"cp936"` / `"gbk"` 或 Windows 支持的 `"cpNNNN"`，例如读取中文编译日志：
+
+```json
+{"task_id":"返回的任务编号","host_instance_id":"当前实例编号","encoding":"cp936","offset":0,"max_bytes":65536}
+```
+
+`data_base64` 始终保留该页准确原始字节，原有 `encoding:"base64"` 和 `next_offset` 继续描述字节输出。新 `text` 为按指定源编码严格解码的文本，`text_encoding` 标明源编码，`decode_status` 为 `complete`、`partial` 或 `invalid_or_incomplete`。省略输入 encoding 时保持原有 UTF-8 检测与 `text_utf8` 行为。
+
+按文本读取时使用 `text_next_offset` 续读：页尾若截在多字节字符中，该游标停在完整字符边界，下一页会重新读取尾字节。按原始字节组装文件时使用 `next_offset`，不要混用两个游标重复追加 Base64 字节。很小的页可能容不下一个字符，应增大 max_bytes；遇到无效编码应检查编码或原始字节，不循环重试同一份无效页。解码不会替换原始字节、自动猜测系统代码页或启动新任务。
+
+参数超限时回执给出 `field / actual / maximum / unit`。文本以 UTF-8 字节计量，命令行以转义后的 UTF-16 单元计量；两者不等于字符个数。
+
 dev.13 正常项目增加私有任务历史及完整生命周期审计。重启不恢复活动任务或 stdin；已启动任务的 request_key 在保留历史期间不得跨 backend 实例重复使用。先核对实际结果，再显式提交新键。所有者 history 可查有限输出和投递回执，当前 task_status/output 仍绑定活动实例。详见 [M6](REMOTE_APPROVALS.md)。
 
 dev.11 的正常新格式项目按 always/workspace_auto/never 管理 task_start 和 task_input，pending 须经本机 project-owner 批准，实际结果轮询与取消按归属继续可用。受限任务使用实际 LPAC，只接受所有者声明的程序，子进程、网络和 Win32k 均禁止；缺少或未通过启动检查时拒绝执行。新项目命令启动在批准后钉住程序并计算 executable_sha256，参与 request_key 摘要，审批还绑定物理程序版本与 cwd 元数据。不会读取未知环境变量或继承项目 bearer。详见 [项目审批与受限执行](PROJECT_APPROVALS.md)。

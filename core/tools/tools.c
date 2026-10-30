@@ -56,6 +56,8 @@ static yyjson_doc *tool_schema(const tool_definition *definition) {
     if (!doc) return NULL;
     yyjson_mut_val *properties=yyjson_mut_obj_get(yyjson_mut_doc_get_root(doc),"properties");
     const char *name=definition->name;
+    schema_bound(doc,properties,"workspace_id","maxLength",63);schema_bound(doc,properties,"task_id","maxLength",32);
+    schema_bound(doc,properties,"request_key","maxLength",64);schema_bound(doc,properties,"input_key","maxLength",64);
     if (!strcmp(name,"fs_read") || !strcmp(name,"document_read")) schema_bound(doc,properties,"max_bytes","maximum",SB_READ_LIMIT);
     if (!strcmp(name,"document_read")) schema_bound(doc,properties,"offset","maximum",SB_DOCUMENT_TEXT_LIMIT);
     if (!strcmp(name,"image_view") || !strcmp(name,"document_preview")) schema_bound(doc,properties,"max_dimension","maximum",SB_IMAGE_DIMENSION);
@@ -67,12 +69,23 @@ static yyjson_doc *tool_schema(const tool_definition *definition) {
     }
     if (!strcmp(name,"task_start")) schema_bound(doc,properties,"argv","maxItems",SB_TASK_ARG_LIMIT);
     if (!strcmp(name,"task_output")) schema_bound(doc,properties,"max_bytes","maximum",SB_TASK_OUTPUT_PAGE_LIMIT);
+#ifndef SB_POSIX
+    if (!strcmp(name,"task_output")) {
+        yyjson_mut_val *encoding=yyjson_mut_obj(doc);yyjson_mut_obj_add_str(doc,encoding,"type","string");
+        yyjson_mut_obj_add_str(doc,encoding,"description","Optional strict text decoding: utf-8, cp936/gbk, or a supported Windows cpNNNN. Raw bytes and next_offset remain unchanged; use text_next_offset to continue decoded text.");
+        yyjson_mut_obj_add_val(doc,properties,"encoding",encoding);
+    }
+#endif
     if (!strcmp(name,"task_input")) schema_bound(doc,properties,"text","maxLength",SB_TASK_INPUT_LIMIT);
+    if (!strcmp(name,"fs_write")) schema_bound(doc,properties,"text","maxLength",SB_EDIT_LIMIT);
+    if (!strcmp(name,"fs_patch")) {schema_bound(doc,properties,"search","maxLength",SB_EDIT_LIMIT);schema_bound(doc,properties,"replacement","maxLength",SB_EDIT_LIMIT);}
+    if (!strcmp(name,"task_start") || !strcmp(name,"task_input")) schema_bound(doc,properties,!strcmp(name,"task_start")?"request_key":"input_key","maxLength",64);
     if (!strcmp(name,"fs_list")) {
         schema_bound(doc,properties,"offset","maximum",SB_LIST_OFFSET_LIMIT);
         schema_bound(doc,properties,"max_entries","maximum",SB_LIST_LIMIT);
     }
     if (!strcmp(name,"fs_search")) {
+        schema_bound(doc,properties,"query","maxLength",512);
         schema_bound(doc,properties,"max_results","maximum",SB_SEARCH_RESULTS);
         schema_bound(doc,properties,"max_file_bytes","maximum",SB_SEARCH_FILE_LIMIT);
         schema_bound(doc,properties,"max_total_bytes","maximum",SB_SEARCH_TOTAL_LIMIT);
@@ -199,6 +212,26 @@ static yyjson_mut_val *failure(yyjson_mut_doc *doc, const char *message) {
     return content_result(doc, data, true);
 }
 
+/* 在具体类型/策略检查之前定位超限字段，同样覆盖旧 stdio 入口。 */
+static yyjson_mut_val *argument_limit(const tool_definition *definition,yyjson_val *args,yyjson_mut_doc *doc,const sb_host *host) {
+    yyjson_doc *schema=tool_schema(definition);if(!schema)return NULL;
+    yyjson_val *properties=yyjson_obj_get(yyjson_doc_get_root(schema),"properties");
+    yyjson_mut_val *error=NULL;size_t i,n;yyjson_val *key,*value;
+    yyjson_obj_foreach(args,i,n,key,value) {
+        const char *field=sb_string(key);if(!field)continue;
+        yyjson_val *property=yyjson_obj_get(properties,field);uint64_t actual=0,limit=0;const char *unit=NULL;
+        if(yyjson_is_str(value) && sb_integer(yyjson_obj_get(property,"maxLength"),&limit)){actual=yyjson_get_len(value);unit="UTF-8 bytes";}
+        else if(yyjson_is_arr(value) && sb_integer(yyjson_obj_get(property,"maxItems"),&limit)){actual=yyjson_arr_size(value);unit="items";}
+        else if(sb_integer(value,&actual) && sb_integer(yyjson_obj_get(property,"maximum"),&limit)){
+            unit=!strcmp(field,"timeout_ms")?"ms":!strcmp(field,"ttl_seconds")?"seconds":!strcmp(field,"max_dimension")?"pixels":
+                strstr(field,"bytes") || !strcmp(field,"size") || (!strcmp(field,"offset") && strcmp(definition->name,"fs_list")) ? "bytes" : "items";
+            if(!strcmp(field,"timeout_ms") && host->config.limits.task_timeout_ms<limit)limit=host->config.limits.task_timeout_ms;
+        }
+        if(unit && actual>limit){error=sb_limit_error(doc,field,actual,limit,unit);break;}
+    }
+    yyjson_doc_free(schema);return error ? content_result(doc,error,true) : NULL;
+}
+
 static bool number(yyjson_val *args, const char *name, uint64_t fallback, uint64_t min, uint64_t max, uint64_t *output) {
     yyjson_val *v = yyjson_obj_get(args, name);
     *output = fallback;
@@ -253,6 +286,7 @@ static yyjson_mut_val *tool_call_inner(sb_host *host, const char *actor, const c
     const tool_definition *definition = NULL;
     for (size_t i = 0; i < tool_count(); ++i) if (!strcmp(name, definitions[i].name)) definition = &definitions[i];
     if (!definition) return failure(doc, "Unknown tool.");
+    yyjson_mut_val *limit_reply=argument_limit(definition,args,doc,host);if(limit_reply)return limit_reply;
     if (!arguments_valid(definition, args, host)) return failure(doc, "Invalid or unknown tool arguments.");
     if (host->project && !authorized) {
         const sb_project *project = host->project;
@@ -530,7 +564,8 @@ static yyjson_mut_val *tool_call_inner(sb_host *host, const char *actor, const c
         }
     } else {
         uint64_t size = sb_platform_size(file);
-        if (!size || size > SB_IMAGE_INPUT_LIMIT) { result = failure(doc, "Image is empty or exceeds max_image_source_bytes from host_capabilities."); goto done; }
+        if(size>SB_IMAGE_INPUT_LIMIT){result=content_result(doc,sb_limit_error(doc,"image.source_size",size,SB_IMAGE_INPUT_LIMIT,"bytes"),true);goto done;}
+        if (!size) { result = failure(doc, "Image is empty."); goto done; }
         unsigned char *bytes = malloc((size_t)size);
         if (!bytes) { result = failure(doc, "Out of memory."); goto done; }
         size_t got = 0;
@@ -740,6 +775,7 @@ static yyjson_mut_val *project_tool_call(sb_host *host, const char *actor, const
     if (!host->project || host->project->legacy_compatibility) return sb_file_manage_tool(name) ? failure(doc,"Native file management requires a normal versioned project.") : tool_call_inner(host,actor,name,args,doc,NULL,NULL,false);
     const tool_definition *definition = NULL;
     for (size_t i=0;i<tool_count();++i) if(!strcmp(name,definitions[i].name)) definition=&definitions[i];
+    if(definition){yyjson_mut_val *limit=argument_limit(definition,args,doc,host);if(limit)return limit;}
     if (!definition || !project_arguments_valid(host,definition,args)) return failure(doc,"Invalid or unknown tool arguments.");
     const sb_project *project = host->project;
     const char *selected_identity=sb_string(yyjson_obj_get(args,"identity"));

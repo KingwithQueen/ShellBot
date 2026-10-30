@@ -7,6 +7,17 @@ void sb_fail(sb_error *error, const char *message) {
     if (error) snprintf(error->text, sizeof(error->text), "%s", message);
 }
 
+void sb_fail_limit(sb_error *error,const char *field,uint64_t actual,uint64_t maximum,const char *unit) {
+    if(error)snprintf(error->text,sizeof(error->text),"%s: actual=%llu %s, maximum=%llu %s.",field,(unsigned long long)actual,unit,(unsigned long long)maximum,unit);
+}
+/* 超限回执带可读说明及机器字段；不回显参数正文。 */
+yyjson_mut_val *sb_limit_error(yyjson_mut_doc *doc,const char *field,uint64_t actual,uint64_t maximum,const char *unit) {
+    yyjson_mut_val *data=yyjson_mut_obj(doc);sb_error error={0};sb_fail_limit(&error,field,actual,maximum,unit);
+    yyjson_mut_obj_add_strcpy(doc,data,"error",error.text);yyjson_mut_obj_add_str(doc,data,"code","parameter_limit_exceeded");
+    yyjson_mut_obj_add_strcpy(doc,data,"field",field);yyjson_mut_obj_add_uint(doc,data,"actual",actual);
+    yyjson_mut_obj_add_uint(doc,data,"maximum",maximum);yyjson_mut_obj_add_strcpy(doc,data,"unit",unit);return data;
+}
+
 char *sb_strdup(const char *value) {
     size_t size = strlen(value) + 1;
     char *result = malloc(size);

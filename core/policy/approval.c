@@ -453,7 +453,7 @@ static bool edit_text_valid(const char *text, size_t length, sb_error *error) {
     bool ok = length <= SB_EDIT_LIMIT && sb_decode((const unsigned char *)text, length, true,
         "utf-8", true, &decoded, &size, &consumed, &encoding, error);
     free(decoded);
-    if (length > SB_EDIT_LIMIT) sb_fail(error, "Editing requires UTF-8 text within max_edit_bytes from host_capabilities.");
+    if (length > SB_EDIT_LIMIT) sb_fail_limit(error,"file.text",length,SB_EDIT_LIMIT,"UTF-8 bytes");
     return ok;
 }
 static char *edited_text(const char *original, size_t length, const sb_edit_request *request, sb_error *error) {
@@ -470,7 +470,7 @@ static char *edited_text(const char *original, size_t length, const sb_edit_requ
     if (matches != request->expected_matches) { sb_fail(error, "Search occurrence count does not match expected_matches."); return NULL; }
     size_t output_size = length - find_size * matches;
     if (matches && replace_size > (SB_EDIT_LIMIT - output_size) / matches) {
-        sb_fail(error, "Patched text exceeds max_edit_bytes from host_capabilities."); return NULL;
+        sb_fail_limit(error,"patched_text",output_size+(uint64_t)replace_size*matches,SB_EDIT_LIMIT,"UTF-8 bytes"); return NULL;
     }
     output_size += replace_size * matches;
     char *output = malloc(output_size + 1);

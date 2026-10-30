@@ -109,6 +109,8 @@ typedef struct {
 } sb_request_context;
 
 void sb_fail(sb_error *error, const char *message);
+yyjson_mut_val *sb_limit_error(yyjson_mut_doc *doc,const char *field,uint64_t actual,uint64_t maximum,const char *unit);
+void sb_fail_limit(sb_error *error,const char *field,uint64_t actual,uint64_t maximum,const char *unit);
 char *sb_strdup(const char *value);
 const char *sb_string(yyjson_val *value); /* Reject embedded NUL. */
 bool sb_integer(yyjson_val *value, uint64_t *number);

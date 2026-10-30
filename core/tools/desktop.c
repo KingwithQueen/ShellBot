@@ -114,6 +114,16 @@ static yyjson_mut_val *error_result(yyjson_mut_doc *doc, const char *text) {
     yyjson_mut_val *data=yyjson_mut_obj(doc); yyjson_mut_obj_add_strcpy(doc,data,"error",text); return wrap(doc,data,true);
 }
 yyjson_mut_val *sb_desktop_tools_call(sb_host *host, const char *actor, const char *name, yyjson_val *args, yyjson_mut_doc *doc) {
+#ifndef SB_POSIX
+    /* 数据容量可在准备桌面动作之前说明，既不取屏幕内容也不提交输入。 */
+    const char *text=sb_string(yyjson_obj_get(args,"text"));
+    if(text){size_t bytes=strlen(text),maximum=!strcmp(name,"clipboard_write")?524287u:4096u;
+        if(bytes>maximum)return wrap(doc,sb_limit_error(doc,"text",bytes,maximum,"UTF-8 bytes"),true);
+        if(!strcmp(name,"desktop_type")){uint64_t units=0;for(const unsigned char *p=(const unsigned char*)text;*p;++p)if((*p&0xc0)!=0x80)units+=*p>=0xf0?2:1;
+            if(units>512)return wrap(doc,sb_limit_error(doc,"text",units,512,"UTF-16 units"),true);}}
+    static const struct {const char *name,*unit;uint64_t maximum;} limits[]={{"max_dimension","pixels",SB_IMAGE_DIMENSION},{"duration_seconds","seconds",120},{"monitor_id","index",15},{"duration_ms","ms",1000},{"clicks","items",2}};
+    for(size_t i=0;i<sizeof(limits)/sizeof(*limits);++i){uint64_t value=0;if(sb_integer(yyjson_obj_get(args,limits[i].name),&value) && value>limits[i].maximum)return wrap(doc,sb_limit_error(doc,limits[i].name,value,limits[i].maximum,limits[i].unit),true);}
+#endif
     if (!host->project || host->project->legacy_compatibility || host->administrator_host || !host->desktop)
         return error_result(doc,"desktop_requires_enabled_ordinary_project");
     const char *action=sb_string(yyjson_obj_get(args,"action"));

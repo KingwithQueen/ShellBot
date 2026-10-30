@@ -121,8 +121,10 @@ static int handle_bound(struct mg_connection *connection, http_state *state, voi
         return reject(connection, 406, "{\"error\":\"Accept application/json required.\"}", NULL);
     if (mg_get_header(connection, "Transfer-Encoding") || info->content_length < 0)
         return reject(connection, 411, "{\"error\":\"Content-Length required; chunked requests are not supported yet.\"}", NULL);
-    if (info->content_length > SB_REQUEST_LIMIT)
-        return reject(connection, 413, "{\"error\":\"Request exceeds 64 MiB; split large payloads into artifact chunks.\"}", NULL);
+    if (info->content_length > SB_REQUEST_LIMIT) {
+        char message[320];snprintf(message,sizeof(message),"{\"error\":\"request.body: actual=%llu bytes, maximum=%u bytes.\",\"code\":\"parameter_limit_exceeded\",\"field\":\"request.body\",\"actual\":%llu,\"maximum\":%u,\"unit\":\"bytes\"}",(unsigned long long)info->content_length,SB_REQUEST_LIMIT,(unsigned long long)info->content_length,SB_REQUEST_LIMIT);
+        return reject(connection,413,message,NULL);
+    }
     size_t length = (size_t)info->content_length;
     char *request = malloc(length + 1);
     if (!request) return reject(connection, 500, "{\"error\":\"Out of memory.\"}", NULL);

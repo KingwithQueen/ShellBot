@@ -1,7 +1,6 @@
 param(
     [string]$ValidationDirectory,
-    [string]$OutputDirectory,
-    [ValidatePattern('^$|^[a-z0-9][a-z0-9-]{0,39}$')][string]$PackageLabel=''
+    [string]$OutputDirectory
 )
 $ErrorActionPreference='Stop'
 $root=Split-Path -Parent $PSScriptRoot
@@ -22,7 +21,7 @@ Require ($versionHeader -match '(?m)^#define SB_VERSION "(\d+\.\d+\.\d+)"\s*$') 
 $version=$Matches[1]
 $releaseNotes="RELEASE_NOTES_$version.md"
 Require (Test-Path -LiteralPath (Join-Path $root ('docs\'+$releaseNotes))) 'Current release notes are required.'
-$runtime=@('ShellBot.exe','WinShellBot.exe','ShellBot-SandboxProbe.exe','pdfium.dll')
+$runtime=@('ShellBot.exe','WinShellBot.exe','ShellBot-SandboxProbe.exe','ShellBotUpdate.exe','pdfium.dll')
 $artifacts=[ordered]@{};$reports=@()
 $stages=@{'layout'='M21-layout';'refresh'='M14-manager-refresh';'native-ui'='M20-native-ui';'oauth'='M15-OAuth';'native-dialogs'='M20-native-dialogs';'desktop'='M14-desktop';'entry'='M14-entry';'exit'='M14-exit';'oauth-ui'='M15-OAuth-UI';'portable'='M16-portable';'files'='M13-files';'settings'='M13-settings';'images'='M9';'documents'='M10';'document-backend'='M10_PDF_dependency';'transfers'='M11';'gateway'='M3';'eof'='HTTP-EOF';'single-tray'='single-tray';'folder-picker'='folder-picker'}
 foreach($configuration in @('Debug','Release')){
@@ -98,13 +97,12 @@ $acceptance=@{version=$version;kind='stable';status='local_regression_passed';so
 $acceptance.icons=@{source_png_sha256=$icons.source_png_sha256;ico_sha256=$icons.ico_sha256;sizes=$icons.sizes;native_decoded_frames=$icons.native_decoded_frames;verification_sha256=(Digest $iconPath)}
 WriteJson (Join-Path $validation 'acceptance.json') $acceptance
 $name="ShellBot-$version-windows-x64"
-if($PackageLabel){$name+='-'+$PackageLabel}
 $stage=Join-Path $destination $name;$archive=$stage+'.zip'
 Require (!(Test-Path -LiteralPath $stage) -and !(Test-Path -LiteralPath $archive) -and !(Test-Path -LiteralPath ($archive+'.sha256'))) 'Release destination already exists.'
 $files=[ordered]@{}
 foreach($file in $runtime){$files[$file]=Join-Path $root ('out\x64\Release\'+$file)}
 $files['LICENSE.txt']=Join-Path $root 'LICENSE.txt'
-foreach($file in @('USER_GUIDE.md','CAPACITY_LIMITS.md','RELEASE_NOTES_1.0.0.md',$releaseNotes,'FILE_MANAGEMENT.md','FILE_EDIT.md','EXECUTION_PERMISSIONS.md','COMMAND_TASKS.md','REMOTE_APPROVALS.md','DESKTOP_CONTROL.md','IMAGE_VIEW.md','DOCUMENT_READING.md','ARTIFACT_TRANSFER.md','AUDIT.md','PROJECT_APPROVALS.md','SHARED_ADMINISTRATOR.md','STARTUP.md')){$files['docs/'+$file]=Join-Path $root ('docs\'+$file)}
+foreach($file in @('USER_GUIDE.md','UPDATING.md','CAPACITY_LIMITS.md','RELEASE_NOTES_1.0.0.md',$releaseNotes,'FILE_MANAGEMENT.md','FILE_EDIT.md','EXECUTION_PERMISSIONS.md','COMMAND_TASKS.md','REMOTE_APPROVALS.md','DESKTOP_CONTROL.md','IMAGE_VIEW.md','DOCUMENT_READING.md','ARTIFACT_TRANSFER.md','AUDIT.md','PROJECT_APPROVALS.md','SHARED_ADMINISTRATOR.md','STARTUP.md')){$files['docs/'+$file]=Join-Path $root ('docs\'+$file)}
 $files['licenses/yyjson-MIT.txt']=Join-Path $root 'third_party\yyjson\LICENSE'
 $files['licenses/CivetWeb-MIT.txt']=Join-Path $root 'third_party\civetweb\LICENSE.md'
 $files['licenses/PDFium-binaries-MIT.txt']=Join-Path $root 'third_party\pdfium\LICENSE'

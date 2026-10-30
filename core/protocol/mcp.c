@@ -75,7 +75,7 @@ static bool unambiguous(yyjson_val *value, unsigned depth) {
             for (size_t j = 0; j < idx; ++j) if (!strcmp(name, yyjson_get_str(yyjson_obj_iter_next(&it)))) return false;
         }
     } else if (yyjson_is_arr(value)) {
-        if (yyjson_arr_size(value) > 1024) return false;
+        if (yyjson_arr_size(value) > 65536) return false;
         yyjson_arr_foreach(value, idx, max, child) if (!unambiguous(child, depth + 1)) return false;
     }
     return true;
@@ -167,6 +167,7 @@ char *sb_dispatch(sb_host *host, sb_protocol *protocol, const char *request,
     bool modern = meta_version != NULL || (http_version && !strcmp(http_version, "2026-07-28"));
     if (!input) {
         rpc_error(output, response, -32700, "Parse error or request limit exceeded."); *http_status = 400;
+        if(length>SB_REQUEST_LIMIT){yyjson_mut_val *data=sb_limit_error(output,"request.body",length,SB_REQUEST_LIMIT,"bytes");yyjson_mut_obj_add_val(output,yyjson_mut_obj_get(response,"error"),"data",data);}
     } else if (host->project && (!context || context->project != host->project || !context->actor ||
         context->policy_revision != host->project->policy_revision)) {
         rpc_error(output, response, -32003, "Project context binding mismatch."); *http_status = 403;

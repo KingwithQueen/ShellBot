@@ -68,6 +68,10 @@ yyjson_mut_val *sb_tasks_call(sb_host *host,const char *actor,const char *name,y
             if((yyjson_obj_get(args,"stream") && (!stream || (strcmp(stream,"stdout") && strcmp(stream,"stderr")))) ||
                 (offset_value && !sb_integer(offset_value,&offset)) || (limit_value && (!sb_integer(limit_value,&maximum) || !maximum || maximum>SB_TASK_OUTPUT_PAGE_LIMIT))) { sb_fail(&error,"Invalid output stream or page.");goto done; }
             yyjson_mut_obj_add_str(request,parameters,"stream",stream?stream:"stdout");
+#ifndef SB_POSIX
+            yyjson_val *encoding=yyjson_obj_get(args,"encoding");
+            if(encoding){const char *value=sb_string(encoding);if(!value){sb_fail(&error,"encoding must be a string such as utf-8 or cp936.");goto done;}yyjson_mut_obj_add_strcpy(request,parameters,"text_encoding",value);}
+#endif
             yyjson_mut_obj_add_uint(request,parameters,"offset",offset);yyjson_mut_obj_add_uint(request,parameters,"max_bytes",maximum);
         } else if(!strcmp(name,"task_input")) {
             const char *key=sb_string(yyjson_obj_get(args,"input_key")),*text=sb_string(yyjson_obj_get(args,"text")); yyjson_val *eof=yyjson_obj_get(args,"eof");
