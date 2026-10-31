@@ -5,6 +5,7 @@
 )
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
+& (Join-Path $PSScriptRoot 'version.ps1') -Check | Out-Null
 if ($WithTests) {
     if ($Platform -ne 'x64') { throw 'Local test projects are available only for x64.' }
     foreach ($testProject in @('tests\TaskFixture.vcxproj', 'tests\ProjectPolicyTests.vcxproj')) {

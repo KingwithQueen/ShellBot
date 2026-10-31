@@ -4,6 +4,7 @@ param(
 )
 $ErrorActionPreference='Stop'
 $root=Split-Path -Parent $PSScriptRoot
+& (Join-Path $PSScriptRoot 'version.ps1') -Check | Out-Null
 if(!$ValidationDirectory){
     $header=Get-Content (Join-Path $root 'core\include\sb_version.h') -Raw
     if($header -notmatch '(?m)^#define SB_VERSION "(\d+\.\d+\.\d+)"\s*$'){throw 'Stable version is required.'}
@@ -104,7 +105,7 @@ foreach($file in $runtime){$files[$file]=Join-Path $root ('out\x64\Release\'+$fi
 $files['LICENSE.txt']=Join-Path $root 'LICENSE.txt'
 $files['docs/tools/ShellBotRdpClient.ps1']=Join-Path $root 'docs\tools\ShellBotRdpClient.ps1'
 $files['docs/REMOTE_DESKTOP.md']=Join-Path $root 'docs\REMOTE_DESKTOP.md'
-foreach($file in @('USER_GUIDE.md','UPDATING.md','CAPACITY_LIMITS.md','RELEASE_NOTES_1.0.0.md',$releaseNotes,'FILE_MANAGEMENT.md','FILE_EDIT.md','EXECUTION_PERMISSIONS.md','COMMAND_TASKS.md','REMOTE_APPROVALS.md','DESKTOP_CONTROL.md','IMAGE_VIEW.md','DOCUMENT_READING.md','ARTIFACT_TRANSFER.md','AUDIT.md','PROJECT_APPROVALS.md','SHARED_ADMINISTRATOR.md','STARTUP.md')){$files['docs/'+$file]=Join-Path $root ('docs\'+$file)}
+foreach($file in @('USER_GUIDE.md','INTERNAL_ERRORS.md','VERSIONING.md','UPDATING.md','CAPACITY_LIMITS.md','RELEASE_NOTES_1.0.0.md',$releaseNotes,'FILE_MANAGEMENT.md','FILE_EDIT.md','EXECUTION_PERMISSIONS.md','COMMAND_TASKS.md','REMOTE_APPROVALS.md','DESKTOP_CONTROL.md','IMAGE_VIEW.md','DOCUMENT_READING.md','ARTIFACT_TRANSFER.md','AUDIT.md','PROJECT_APPROVALS.md','SHARED_ADMINISTRATOR.md','STARTUP.md')){$files['docs/'+$file]=Join-Path $root ('docs\'+$file)}
 $files['licenses/yyjson-MIT.txt']=Join-Path $root 'third_party\yyjson\LICENSE'
 $files['licenses/CivetWeb-MIT.txt']=Join-Path $root 'third_party\civetweb\LICENSE.md'
 $files['licenses/PDFium-binaries-MIT.txt']=Join-Path $root 'third_party\pdfium\LICENSE'

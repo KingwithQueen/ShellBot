@@ -463,6 +463,9 @@ static char *worker_exchange(manager *m, worker *w, const char *wire, yyjson_val
             else snprintf(url,sizeof(url),"http://127.0.0.1:%u/owner",m->registry.port);
         }
         yyjson_mut_obj_add_strcpy(trusted,yyjson_mut_doc_get_root(trusted),"owner_url",url);
+        if(!yyjson_mut_obj_get(yyjson_mut_doc_get_root(trusted),"request_id")){
+            char request_id[33];sb_request_id(request_id);yyjson_mut_obj_add_strcpy(trusted,yyjson_mut_doc_get_root(trusted),"request_id",request_id);
+        }
         sb_platform_mutex_unlock(m->administrator_lock);
     }
     char *envelope=trusted ? yyjson_mut_write(trusted,0,NULL) : NULL;
@@ -645,6 +648,14 @@ static char *owner_call(void *context,const char *request,size_t length,int *htt
     manager *m=context; AcquireSRWLockShared(&m->registry_lock);
     char *reply=owner_call_unlocked(context,request,length,http_status); ReleaseSRWLockShared(&m->registry_lock); return reply;
 }
+/* Read only an owned process handle, before reap can terminate the Job. */
+static const char *worker_failure_reason(worker *w,char buffer[96]) {
+    DWORD code=0;
+    if(w->process && WaitForSingleObject(w->process,0)==WAIT_OBJECT_0 && GetExitCodeProcess(w->process,&code)){
+        snprintf(buffer,96,"worker_exited_0x%08lx",(unsigned long)code);return buffer;
+    }
+    return "worker_disconnected_deadline_or_invalid_reply";
+}
 static char *gateway_call(void *context, void *binding, const char *request, size_t length,
                           const sb_request_context *transport, size_t *response_length, int *http_status) {
     manager *m = context; worker *w = binding;
@@ -655,36 +666,46 @@ static char *gateway_call(void *context, void *binding, const char *request, siz
         char *failure = sb_strdup("{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32700,\"message\":\"Parse error.\"}}");
         *response_length = failure ? strlen(failure) : 0; return failure;
     }
+    char request_id[33],failure_reason[96];sb_request_id(request_id);bool invoked=false;const char *stage="worker_invoke",*reason="envelope_allocation_failed";
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL); char *wire = NULL, *response = NULL;
     const char *headers[] = {transport->version, transport->method, transport->name};
     const char *names[] = {"version", "method", "name"};
     if (!doc) goto done;
     yyjson_mut_val *envelope = yyjson_mut_obj(doc); yyjson_mut_doc_set_root(doc, envelope);
     yyjson_mut_obj_add_str(doc, envelope, "kind", "http");
+    yyjson_mut_obj_add_strcpy(doc,envelope,"request_id",request_id);
     yyjson_mut_obj_add_val(doc, envelope, "request", yyjson_val_mut_copy(doc, yyjson_doc_get_root(input)));
     for (size_t i = 0; i < 3; ++i) if (headers[i]) {
         if (strlen(headers[i]) > 8192) { *http_status = 400; response = error_json("Protocol header exceeds its limit."); goto done; }
         yyjson_mut_obj_add_str(doc, envelope, names[i], headers[i]);
     }
     wire = yyjson_mut_write(doc, 0, NULL);
-    if (!wire || strlen(wire) > WORKER_REQUEST_LIMIT) { *http_status = 413; response = error_json("Worker request frame exceeds its limit."); goto done; }
+    if(!wire){reason="envelope_serialization_failed";goto done;}
+    if (strlen(wire) > WORKER_REQUEST_LIMIT) { *http_status = 413; response = error_json("Worker request frame exceeds its limit."); goto done; }
     uint64_t deadline = sb_platform_millis() + request_io_ms(yyjson_doc_get_root(input));
+    invoked=true;
     char *frame = worker_exchange(m,w,wire,yyjson_doc_get_root(input),"project-mcp",deadline,SB_RESPONSE_LIMIT);
+    stage="worker_reply";reason="worker_disconnected_deadline_or_invalid_reply";
     yyjson_doc *reply = frame ? yyjson_read(frame, strlen(frame), 0) : NULL;
     yyjson_val *root = yyjson_doc_get_root(reply), *body = yyjson_obj_get(root, "body"); uint64_t status_code = 0;
     static const char *const keys[] = {"status", "body"};
     if (reply && sb_config_keys(root, keys, 2) && sb_integer(yyjson_obj_get(root, "status"), &status_code) &&
-        status_code >= 200 && status_code <= 599 && body && (yyjson_is_obj(body) || (status_code == 202 && yyjson_is_null(body)))) {
+        status_code >= 200 && status_code <= 599 && body && ((yyjson_is_obj(body) && sb_rpc_reply_valid(body,yyjson_doc_get_root(input))) || (status_code == 202 && yyjson_is_null(body)))) {
         *http_status = (int)status_code;
         if (!yyjson_is_null(body)) response = yyjson_val_write(body, 0, NULL);
-        if (!response && status_code != 202) { *http_status = 500; response = error_json("Cannot allocate worker response."); }
+        if (!response && status_code != 202) { *http_status = 500; stage="serialize";response=NULL;reason="worker_response_serialization_failed"; }
     } else {
+        reason=worker_failure_reason(w,failure_reason);
         reap(m, w, "failed"); *http_status = 503;
-        response = error_json("Worker disconnected or exceeded its deadline; review possible side effects before any new request. No automatic replay.");
+        response = NULL;
         sb_audit_project(m->audit, "project_failed", w->project->id, w->project->policy_revision, w->pid);
     }
     yyjson_doc_free(reply); free(frame);
 done:
+    if(!response && *http_status!=202){
+        sb_host diagnostic_host={0};diagnostic_host.audit=m->audit;
+        response=sb_rpc_internal_error(&diagnostic_host,yyjson_doc_get_root(input),request_id,w->instance,stage,invoked,reason);
+    }
     yyjson_doc_free(input); yyjson_mut_doc_free(doc); free(wire);
     *response_length = response ? strlen(response) : 0; return response;
 }
@@ -903,7 +924,9 @@ static char *manager_request_unlocked(void *context, const char *request, size_t
             } else if ((!strcmp(command, "project-request") || !strcmp(command, "project-owner")) && payload) {
                 if (!w->process) failure = "Project is not running; explicit owner start is required.";
                 else {
+                    char request_id[33];sb_request_id(request_id);
                     yyjson_mut_val *envelope = yyjson_mut_obj(doc);
+                    yyjson_mut_obj_add_strcpy(doc,envelope,"request_id",request_id);
                     yyjson_mut_obj_add_str(doc, envelope, "kind", !strcmp(command, "project-owner") ? "owner" : "mcp");
                     yyjson_mut_obj_add_val(doc, envelope, "request", yyjson_val_mut_copy(doc, payload));
                     char *wire = yyjson_mut_val_write(envelope, 0, NULL);
@@ -911,11 +934,20 @@ static char *manager_request_unlocked(void *context, const char *request, size_t
                     char *response = wire ? worker_exchange(m,w,wire,payload,"manager-owner",deadline,SB_RESPONSE_LIMIT - 1024) : NULL;
                     free(wire);
                     yyjson_doc *reply = response ? yyjson_read(response, strlen(response), 0) : NULL;
-                    if (reply) {
+                    if (reply && (!strcmp(command,"project-owner") || sb_rpc_reply_valid(yyjson_doc_get_root(reply),payload) || yyjson_is_true(yyjson_obj_get(yyjson_doc_get_root(reply),"notification")))) {
                         yyjson_mut_obj_add_str(doc, result, "project_id", w->project->id);
                         yyjson_mut_obj_add_val(doc, result, "response", yyjson_val_mut_copy(doc, yyjson_doc_get_root(reply)));
                     } else {
-                        reap(m, w, "failed"); failure = "Worker disconnected or exceeded its deadline; review possible side effects before any new request. No automatic replay.";
+                        char failure_reason[96];const char *reason=worker_failure_reason(w,failure_reason);
+                        reap(m, w, "failed");
+                        if(!strcmp(command,"project-request")){
+                            sb_host diagnostic_host={0};diagnostic_host.audit=m->audit;
+                            char *failure_wire=sb_rpc_internal_error(&diagnostic_host,payload,request_id,w->instance,"worker_reply",true,reason);
+                            yyjson_doc *failure_doc=failure_wire?yyjson_read(failure_wire,strlen(failure_wire),0):NULL;
+                            if(failure_doc)yyjson_mut_obj_add_val(doc,result,"response",yyjson_val_mut_copy(doc,yyjson_doc_get_root(failure_doc)));
+                            else failure="Cannot allocate internal-error response.";
+                            yyjson_doc_free(failure_doc);free(failure_wire);
+                        }else failure="Worker disconnected or exceeded its deadline; inspect owner state before retrying.";
                         sb_audit_project(m->audit, "project_failed", w->project->id, w->project->policy_revision, w->pid);
                     }
                     yyjson_doc_free(reply); free(response);
@@ -1239,14 +1271,16 @@ int sb_project_worker(int argc, wchar_t **argv) {
         char *envelope = receive_frame(pipe, false, 0, WORKER_REQUEST_LIMIT); if (!envelope) break;
         yyjson_doc *input = yyjson_read(envelope, strlen(envelope), 0);
         yyjson_val *root = yyjson_doc_get_root(input), *request = yyjson_obj_get(root, "request");
-        static const char *const keys[] = {"kind", "request", "administrator_backend", "owner_url"};
-        static const char *const http_keys[] = {"kind", "request", "version", "method", "name", "administrator_backend", "owner_url"};
+        static const char *const keys[] = {"kind", "request", "administrator_backend", "owner_url", "request_id"};
+        static const char *const http_keys[] = {"kind", "request", "version", "method", "name", "administrator_backend", "owner_url", "request_id"};
         const char *kind = sb_string(yyjson_obj_get(root, "kind"));
         char *wire = yyjson_val_write(request, 0, NULL), *response = NULL;
         bool is_http = kind && !strcmp(kind, "http");
         bool valid = wire && kind && yyjson_is_bool(yyjson_obj_get(root,"administrator_backend")) &&
-            (is_http ? sb_config_keys(root, http_keys, 7) : yyjson_is_obj(request) && sb_config_keys(root, keys, 4));
+            (is_http ? sb_config_keys(root, http_keys, 8) : yyjson_is_obj(request) && sb_config_keys(root, keys, 5));
         const char *owner_url=sb_string(yyjson_obj_get(root,"owner_url"));
+        const char *request_id=sb_string(yyjson_obj_get(root,"request_id"));
+        if((!kind || strcmp(kind,"shutdown")) && (!request_id || strlen(request_id)!=32 || strspn(request_id,"0123456789abcdef")!=32))valid=false;
         if (!owner_url || strlen(owner_url)>=sizeof(host.owner_url)) valid=false;
         if (valid) strcpy(host.owner_url,owner_url);
         host.administrator_backend=valid && yyjson_get_bool(yyjson_obj_get(root,"administrator_backend"));
@@ -1260,7 +1294,7 @@ int sb_project_worker(int argc, wchar_t **argv) {
         else if (!strcmp(kind, "owner")) response = sb_policy_owner_request(host.policy, wire, strlen(wire));
         else if (!strcmp(kind,"remote-owner")) response=sb_policy_owner_request_actor(host.policy,wire,strlen(wire),"remote-owner");
         else if (!strcmp(kind, "mcp") || is_http) {
-            sb_request_context ctx = {.actor = is_http ? "project-mcp" : "manager-owner", .version = headers[0], .method = headers[1], .name = headers[2],
+            sb_request_context ctx = {.request_id=sb_string(yyjson_obj_get(root,"request_id")), .actor = is_http ? "project-mcp" : "manager-owner", .version = headers[0], .method = headers[1], .name = headers[2],
                 .project = project, .policy_revision = project->policy_revision};
             size_t response_length = 0; int http_status = 0;
             host.http_mode = is_http;

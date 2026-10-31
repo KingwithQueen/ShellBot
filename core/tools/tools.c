@@ -983,7 +983,9 @@ static yyjson_mut_val *tool_call_default(sb_host *host, const char *actor, const
                 if(!parameters){if(single)yyjson_mut_doc_free(single);return failure(doc,"Cannot allocate archive batch continuation; inspect task_list before retrying the same IDs.");}
                 yyjson_mut_obj_remove_str(parameters,"task_ids");yyjson_mut_obj_add_strcpy(single,parameters,"task_id",id);
                 yyjson_doc *input=yyjson_mut_val_imut_copy(parameters,NULL);yyjson_mut_doc_free(single);
-                yyjson_mut_val *reply=input?sb_tool_call(host,actor,name,yyjson_doc_get_root(input),doc):NULL;yyjson_doc_free(input);
+                yyjson_mut_val *reply=input?sb_tool_call(host,actor,name,yyjson_doc_get_root(input),doc):NULL;
+                if(reply)reply=yyjson_mut_val_mut_copy(doc,reply);
+                yyjson_doc_free(input);
                 bool failed=!reply || yyjson_mut_get_bool(yyjson_mut_obj_get(reply,"isError"));if(failed)++errors;else ++completed;
                 yyjson_mut_obj_add_str(doc,entry,"status",failed?"failed":"archived");if(reply)yyjson_mut_obj_add_val(doc,entry,"result",reply);
             }
@@ -1080,6 +1082,8 @@ yyjson_mut_val *sb_tool_call(sb_host *host,const char *actor,const char *name,yy
         for(size_t i=0;i<yyjson_mut_arr_size(old);++i){yyjson_mut_val *item=yyjson_mut_arr_get(old,i);const char *type=yyjson_mut_get_str(yyjson_mut_obj_get(item,"type"));if(type && strcmp(type,"text"))yyjson_mut_arr_add_val(content,yyjson_mut_val_mut_copy(doc,item));}
         yyjson_mut_obj_remove_str(result,"content");yyjson_mut_obj_add_val(doc,result,"content",content);
     }
+    /* Detach strings borrowed from normalized arguments before releasing them. */
+    if(clean && result)result=yyjson_mut_val_mut_copy(doc,result);
     yyjson_doc_free(clean);return result;
 #else
     return tool_call_default(host,actor,name,args,doc);

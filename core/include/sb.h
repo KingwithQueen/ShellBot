@@ -101,6 +101,7 @@ typedef struct {
 
 typedef struct {
     const char *actor; /* Set by transport, never taken from request parameters. */
+    const char *request_id; /* Server-generated correlation, trusted private envelope only. */
     const char *version;
     const char *method;
     const char *name;
@@ -361,4 +362,11 @@ sb_http_server *sb_http_start(const sb_config *config, const sb_http_routes *rou
 bool sb_http_stopping(void);
 void sb_http_stop(sb_http_server *server);
 
+/* Internal failures never imply that a side effect did not happen. */
+void sb_request_id(char id[33]);
+bool sb_rpc_reply_valid(yyjson_val *reply, yyjson_val *request);
+char *sb_rpc_internal_error(sb_host *host, yyjson_val *request, const char *request_id,
+    const char *instance, const char *stage, bool invoked, const char *reason);
+bool sb_audit_diagnostic(sb_audit *audit, const char *request_id, const char *instance,
+    const char *stage, const char *tool, yyjson_val *args, const char *reason);
 #endif
