@@ -102,6 +102,8 @@ Require (!(Test-Path -LiteralPath $stage) -and !(Test-Path -LiteralPath $archive
 $files=[ordered]@{}
 foreach($file in $runtime){$files[$file]=Join-Path $root ('out\x64\Release\'+$file)}
 $files['LICENSE.txt']=Join-Path $root 'LICENSE.txt'
+$files['docs/tools/ShellBotRdpClient.ps1']=Join-Path $root 'docs\tools\ShellBotRdpClient.ps1'
+$files['docs/REMOTE_DESKTOP.md']=Join-Path $root 'docs\REMOTE_DESKTOP.md'
 foreach($file in @('USER_GUIDE.md','UPDATING.md','CAPACITY_LIMITS.md','RELEASE_NOTES_1.0.0.md',$releaseNotes,'FILE_MANAGEMENT.md','FILE_EDIT.md','EXECUTION_PERMISSIONS.md','COMMAND_TASKS.md','REMOTE_APPROVALS.md','DESKTOP_CONTROL.md','IMAGE_VIEW.md','DOCUMENT_READING.md','ARTIFACT_TRANSFER.md','AUDIT.md','PROJECT_APPROVALS.md','SHARED_ADMINISTRATOR.md','STARTUP.md')){$files['docs/'+$file]=Join-Path $root ('docs\'+$file)}
 $files['licenses/yyjson-MIT.txt']=Join-Path $root 'third_party\yyjson\LICENSE'
 $files['licenses/CivetWeb-MIT.txt']=Join-Path $root 'third_party\civetweb\LICENSE.md'
@@ -129,7 +131,7 @@ foreach($document in Get-ChildItem -LiteralPath (Join-Path $stage 'docs') -Filte
 }
 WriteJson (Join-Path $stage 'manifest.json') @{version=$version;kind='stable';default_entry='ShellBot.exe';source_commit=$commit;source_local_changes=$sourceLocalChanges;pushed=$false;tools=37;compiler_language='C17';bundled_data=$false;bundled_credentials=$false;artifacts=$artifacts.Release;acceptance_sha256=(Digest (Join-Path $validation 'acceptance.json'));pending=$acceptance.pending;license='MIT; Copyright (c) 2026 姬敬'}
 $hashes=@(Get-ChildItem -LiteralPath $stage -Recurse -File|Sort-Object FullName|ForEach-Object {@{path=$_.FullName.Substring($stage.Length+1).Replace('\','/');sha256=(Digest $_.FullName)}})
-Require (!($hashes.path -match '(^|/)(Data|tests|config|Runtime)(/|$)|\.(cmd|bat|ps1|py|pdb|sbproj|sbkey|dpapi)$|TestFixture|SettingsUiHost|ShellBot\.storage\.json')) 'Unexpected private or development files.'
+Require (!(@($hashes.path|Where-Object{$_ -ine 'docs/tools/ShellBotRdpClient.ps1'}) -match '(^|/)(Data|tests|config|Runtime)(/|$)|\.(cmd|bat|ps1|py|pdb|sbproj|sbkey|dpapi)$|TestFixture|SettingsUiHost|ShellBot\.storage\.json')) 'Unexpected private or development files.'
 WriteJson (Join-Path $stage 'SHA256SUMS.json') $hashes
 foreach($row in $source){Require ((Digest (Join-Path $root $row.path)) -ceq $row.sha256) 'Source changed during packaging.'}
 foreach($row in $tests){Require ((Digest (Join-Path $root ('tests\'+$row.name))) -ceq $row.sha256) 'Test changed during packaging.'}

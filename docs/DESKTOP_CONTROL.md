@@ -147,3 +147,8 @@ window_focus 的已授权执行路径返回 focus_diagnostic，包含 caller、t
 未通过观察/暂停/目标检查时 api_attempted:false、api_return_value:null；真正调用 SetForegroundWindow 后保留其实际 BOOL 返回值。api_win32_error 始终为 null，api_win32_error_authoritative:false，因为 [Microsoft SetForegroundWindow 文档](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setforegroundwindow) 没有规定 GetLastError；不把残留错误当作失败原因。caller/target 的 desktop_query_win32_error 只属于相应的桌面查询，不属于聚焦 API。
 
 诊断不放宽项目权限、会话、完整性级别、人工暂停或新鲜观察检查，也不会强制抢焦点。参数准备、租约所有权或项目权限阶段被拒绝时不会额外查询和泄露桌面身份。
+
+
+## 1.0.10 RDP 与观察租约
+
+`desktop_lease` acquire 新增 Windows `access:observe`，允许暂停时截图/列窗口，不安装输入钩子、不允许任何桌面修改；默认 control 保持旧行为，renew 不可升级权限。会话诊断和 mstsc 最小化客户端工具见 [RDP 说明](REMOTE_DESKTOP.md)。被控端不能代替连接端修改 mstsc 渲染行为，active RDP 本身不会被排除。

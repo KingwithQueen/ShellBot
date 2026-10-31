@@ -6,6 +6,7 @@
 #include "../platform/manager.h"
 #include "../platform/startup.h"
 #include "../platform/desktop_app.h"
+#include "../platform/desktop.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,6 +20,7 @@ static void usage(void) {
           "                  [--data-dir ABSOLUTE_DIR] [--port 1..65535]\n"
           "                  [--public-url DOMAIN_OR_HTTP_ORIGIN]\n"
           "       WinShellBot --generate-token | --version | --help\n"
+          "       WinShellBot --desktop-session-status (read-only current-session diagnostics)\n"
           "       WinShellBot --validate-projects FILE\n"
             "       WinShellBot --project-settings [--projects REGISTRY]\n"
             "       WinShellBot --project-remove ID --projects REGISTRY --output NEW\n"
@@ -120,6 +122,7 @@ static int run(int argc, char **argv) {
     if (argc >= 2 && sb_manager_option(argv[1])) return sb_manager_cli(argc, argv);
     if (argc == 2 && !strcmp(argv[1], "--help")) { usage(); return 0; }
     if (argc == 2 && !strcmp(argv[1], "--version")) { puts("ShellBot " SB_VERSION " (C17)"); return 0; }
+    if (argc == 2 && !strcmp(argv[1], "--desktop-session-status")) {char *wire=sb_win_desktop_session_status();if(!wire)return 2;puts(wire);free(wire);return 0;}
     if (argc >= 2 && (!strcmp(argv[1], "--validate-projects") || !strcmp(argv[1], "--migrate-config")))
         return project_config_command(argc, argv);
     if (argc == 2 && !strcmp(argv[1], "--generate-token")) {

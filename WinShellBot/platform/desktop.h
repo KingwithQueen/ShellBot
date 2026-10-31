@@ -4,6 +4,7 @@
 /* Disabled projects never create hooks, windows, screenshots or clipboard access. */
 sb_desktop *sb_win_desktop_new(sb_host *host, sb_error *error);
 void sb_win_desktop_free(sb_desktop *desktop);
+char *sb_win_desktop_session_status(void);
 typedef struct sb_win_desktop_session sb_win_desktop_session;
 /* Hold shared pause/epoch state across project worker restarts. No hooks or UI. */
 sb_win_desktop_session *sb_win_desktop_session_new(void);

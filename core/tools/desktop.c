@@ -50,6 +50,9 @@ void sb_desktop_tools_list(sb_host *host, yyjson_mut_doc *doc, yyjson_mut_val *t
 #endif
         if (i==15) {
             add_properties(doc,properties,"{\"action\":{\"type\":\"string\",\"enum\":[\"acquire\",\"renew\",\"release\",\"status\"]},\"duration_seconds\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":120}}");
+#ifndef SB_POSIX
+            add_properties(doc,properties,"{\"access\":{\"type\":\"string\",\"enum\":[\"observe\",\"control\"],\"default\":\"control\",\"description\":\"Acquire only: observe permits screenshots/window lists/authorized clipboard reads even while input is paused, without input hooks. It never permits focus, keys, mouse or clipboard writes. control preserves legacy behavior and requires the local owner to resume input. Release before changing access; renew retains access. Works within the worker session including active RDP, never across sessions or a secure desktop.\"}}");
+#endif
             yyjson_mut_arr_add_str(doc,required,"action");
         } else {
             yyjson_mut_arr_add_str(doc,required,"lease_id"); yyjson_mut_arr_add_str(doc,required,"request_key");

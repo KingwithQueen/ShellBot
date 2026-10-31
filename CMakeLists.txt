@@ -7,7 +7,7 @@ if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin" OR CMAKE_SYSTEM_NAME STREQUAL "Darwi
     set(CMAKE_OSX_ARCHITECTURES "x86_64" CACHE STRING "Supported Intel Mac architecture")
   endif()
 endif()
-project(ShellBot VERSION 1.0.9 LANGUAGES C)
+project(ShellBot VERSION 1.0.10 LANGUAGES C)
 if(WIN32)
   message(FATAL_ERROR "Windows uses scripts/build.ps1 and the existing MSBuild projects.")
 endif()
