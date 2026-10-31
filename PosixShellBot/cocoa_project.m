@@ -1,4 +1,5 @@
 #import "cocoa_project.h"
+#import "cocoa_json.h"
 #import <objc/runtime.h>
 #include <stdlib.h>
 #include <string.h>
@@ -63,7 +64,7 @@ static void put(NSMutableDictionary *root,NSString *path,id value){NSArray *keys
     (void)sender;
     for(unsigned i=0;i<sb_form_field_count;i++){
         const sb_form_field *f=&sb_form_fields[i];NSControl *w=self.fields[i];id value=nil;
-        if(!strcmp(f->kind,"bool"))value=@(((NSButton *)w).state==NSControlStateValueOn);
+        if(!strcmp(f->kind,"bool"))value=sb_macos_json_bool(((NSButton *)w).state==NSControlStateValueOn);
         else if(!strcmp(f->kind,"number")){
             NSString *text=w.stringValue;unsigned long long number=0;NSScanner *scan=[NSScanner scannerWithString:text];
             if(![scan scanUnsignedLongLong:&number]||!scan.isAtEnd||number<f->minimum||number>f->maximum){[self error:[NSString stringWithFormat:@"%@：请输入 %u～%u 的整数。",string(f->label),f->minimum,f->maximum]];return;}value=@(number);
@@ -74,7 +75,7 @@ static void put(NSMutableDictionary *root,NSString *path,id value){NSArray *keys
     NSArray *paths=@[@"workspaces",@"extra_directories",@"policy.execution.runtime_files"];
     for(unsigned type=0;type<3;type++){
         NSMutableArray *array=[NSMutableArray new];
-        for(SBFRow *r in self.rows[type])if(!r.removed){if(type==2)[array addObject:r.path.stringValue];else[array addObject:@{@"id":r.identifier.stringValue,@"path":r.path.stringValue,@"read_only":@(r.readonly.state==NSControlStateValueOn)}];}
+        for(SBFRow *r in self.rows[type])if(!r.removed){if(type==2)[array addObject:r.path.stringValue];else[array addObject:@{@"id":r.identifier.stringValue,@"path":r.path.stringValue,@"read_only":sb_macos_json_bool(r.readonly.state==NSControlStateValueOn)}];}
         put(self.definition,paths[type],array);
     }
     NSMutableArray *tools=[NSMutableArray new];for(unsigned i=0;i<SB_PROJECT_TOOL_COUNT;i++)if(self.tools[i].state==NSControlStateValueOn)[tools addObject:string(sb_project_tool_name(i))];put(self.definition,@"policy.tools",tools);
@@ -84,7 +85,7 @@ static void put(NSMutableDictionary *root,NSString *path,id value){NSArray *keys
     char *valid=definition?sb_projects_edit(registry.bytes,registry.length,definition,strlen(definition),[self.definition[@"id"] UTF8String],self.original.length>0,&e):NULL;
     if(!valid){free(definition);yyjson_mut_doc_free(d);yyjson_doc_free(parsed);[self error:string(e.text)];return;}free(valid);
     NSDictionary *normalized=[NSJSONSerialization JSONObjectWithData:[NSData dataWithBytes:definition length:strlen(definition)] options:0 error:nil];free(definition);yyjson_mut_doc_free(d);yyjson_doc_free(parsed);
-    self.submit(@{@"action":@"configure_project",@"definition":normalized,@"original_id":self.original,@"expected_registry_sha256":self.expected,@"display_name":self.name.stringValue,@"auto_start":@(self.automatic.state==NSControlStateValueOn)});
+    self.submit(@{@"action":@"configure_project",@"definition":normalized,@"original_id":self.original,@"expected_registry_sha256":self.expected,@"display_name":self.name.stringValue,@"auto_start":sb_macos_json_bool(self.automatic.state==NSControlStateValueOn)});
     [self cancel:nil];
 }
 - (void)error:(NSString *)message{NSAlert *a=[NSAlert new];a.messageText=@"请检查项目设置";a.informativeText=message.length?message:@"项目配置无效。";[a beginSheetModalForWindow:self.window completionHandler:nil];}

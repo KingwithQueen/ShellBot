@@ -3,6 +3,7 @@
 #include "native.h"
 #include "credentials.h"
 #import "cocoa_project.h"
+#import "cocoa_json.h"
 #include <sys/stat.h>
 #include <stdlib.h>
 #include <string.h>
@@ -641,7 +642,7 @@ static void putText(NSTextView *view, NSString *text) {
     }
     return [@{@"action":action, @"kind":self.serviceKind.indexOfSelectedItem == 1 ? @"system-service" : @"user-service",
         @"name":self.serviceName.stringValue, @"directory":self.serviceDirectory.stringValue,
-        @"key":self.serviceKey.stringValue, @"oauth":@(self.serviceOAuth.state == NSControlStateValueOn),
+        @"key":self.serviceKey.stringValue, @"oauth":sb_macos_json_bool(self.serviceOAuth.state == NSControlStateValueOn),
         @"starts":starts} mutableCopy];
 }
 - (void)serviceKindChanged:(id)sender {
@@ -731,10 +732,10 @@ static void putText(NSTextView *view, NSString *text) {
                          return;
                      [self send:@{
                          @"action" : @"desktop_permissions",
-                         @"enabled" : @(checks[0].state == NSControlStateValueOn),
-                         @"control" : @(checks[1].state == NSControlStateValueOn),
-                         @"clipboard_read" : @(checks[2].state == NSControlStateValueOn),
-                         @"clipboard_write" : @(checks[3].state == NSControlStateValueOn)
+                         @"enabled" : sb_macos_json_bool(checks[0].state == NSControlStateValueOn),
+                         @"control" : sb_macos_json_bool(checks[1].state == NSControlStateValueOn),
+                         @"clipboard_read" : sb_macos_json_bool(checks[2].state == NSControlStateValueOn),
+                         @"clipboard_write" : sb_macos_json_bool(checks[3].state == NSControlStateValueOn)
                      }];
                    }];
 }
@@ -759,7 +760,7 @@ static void putText(NSTextView *view, NSString *text) {
         [self send:@{
             @"action" : a,
             @"id" : self.requestID,
-            @"persistent" : @(self.persistent.state == NSControlStateValueOn)
+            @"persistent" : sb_macos_json_bool(self.persistent.state == NSControlStateValueOn)
         }];
         self.persistent.state = NSControlStateValueOff;
     } else
@@ -856,9 +857,9 @@ static void putText(NSTextView *view, NSString *text) {
         @"action" : @"settings",
         @"port" : @(self.port.integerValue),
         @"url" : self.url.stringValue,
-        @"http" : @(self.http.state == NSControlStateValueOn),
-        @"oauth" : @(self.oauth.state == NSControlStateValueOn),
-        @"remote_owner":@(self.remoteOwner.state==NSControlStateValueOn),@"owner_env":self.ownerEnv.stringValue,@"default_project_id":self.defaultProject.stringValue
+        @"http" : sb_macos_json_bool(self.http.state == NSControlStateValueOn),
+        @"oauth" : sb_macos_json_bool(self.oauth.state == NSControlStateValueOn),
+        @"remote_owner":sb_macos_json_bool(self.remoteOwner.state==NSControlStateValueOn),@"owner_env":self.ownerEnv.stringValue,@"default_project_id":self.defaultProject.stringValue
     }];
 }
 - (void)enableStartup:(id)sender { (void)sender;[self send:@{@"action":@"startup_install"}]; }
@@ -919,8 +920,8 @@ static void putText(NSTextView *view, NSString *text) {
             @"status" : @"passed",
             @"native" : @"Cocoa",
             @"window" : @(self.window.isVisible),
-            @"hide_restore" : @(hidden && self.window.isVisible),
-            @"tray_registered" : @(self.statusItem.button != nil && self.statusItem.isVisible)
+            @"hide_restore" : sb_macos_json_bool(hidden && self.window.isVisible),
+            @"tray_registered" : sb_macos_json_bool(self.statusItem.button != nil && self.statusItem.isVisible)
         };
         [[NSJSONSerialization dataWithJSONObject:report options:NSJSONWritingPrettyPrinted
                                            error:nil] writeToFile:self.smoke atomically:YES];
