@@ -16,6 +16,6 @@ ZIP 可平铺或包含一个顶层安装包文件夹，必须有四个运行文�
 
 替换前备份所有待覆盖文件，写入后再次校验。普通异常会尝试回滚已替换文件；恢复失败标记为 `recovery_required` 并保留错误及备份位置。多文件更新不是断电原子事务，强制退出或断电后应检查记录并从备份恢复。
 
-每次更新记录保存在根目录 `.shellbot-update/job-…/result.json`，原文件保存在同目录 backup 中。成功后删除本次解压缓存，备份、记录及原 ZIP 保留。URL 下载和下载缓存删除留待后续开发。
+每次更新记录保存在根目录 `.shellbot-update/job-…/result.json`，原文件保存在同目录 backup 中。成功后删除本次解压缓存，遇到短时文件占用最多尝试 9 次、间隔 250 ms，`cache_cleanup_attempts` 记录尝试次数；持续占用以 `cache_warning` 说明残留缓存，安装仍为 completed。备份、记录及原 ZIP 始终保留。URL 下载和下载缓存删除留待后续开发。
 
 交互模式在完成或失败后弹出结果。自动化可用 `--quiet "ZIP路径"` 禁用提示框：启动退出码 0 只表示更新任务已启动，标准输出 `JOB=…` 给出记录目录，最终结果以 result.json 的 status 为准；启动检查失败返回 2。依赖 Windows 自带的 Windows PowerShell 5.1 / .NET Framework，不需要 Python 或第三方解压程序。

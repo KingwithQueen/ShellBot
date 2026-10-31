@@ -100,7 +100,12 @@ try{
     $result.status='completed'
     # payload 是本次新建且已核对范围的缓存；备份、结果及用户 ZIP 保留。
     $clean=[IO.Path]::GetFullPath($payload);if(!$clean.StartsWith($Job+'\',[StringComparison]::OrdinalIgnoreCase)){throw '缓存目录越界。'}
-    try{Remove-Item -LiteralPath $clean -Recurse -Force}catch{$result.cache_warning=$_.Exception.Message}
+    # 文件版本检查或外部读取可能短暂占用 DLL；只重试本次 payload，不动备份或用户 ZIP。
+    for($attempt=1;$attempt -le 9;$attempt++){
+        $result.cache_cleanup_attempts=$attempt
+        try{if(Test-Path -LiteralPath $clean){Remove-Item -LiteralPath $clean -Recurse -Force};break}
+        catch{if($attempt -eq 9){$result.cache_warning=$_.Exception.Message}else{Start-Sleep -Milliseconds 250}}
+    }
 }catch{
     $result.error=$_.Exception.Message
     for($i=$applied.Count-1;$i -ge 0;$i--){$item=$applied[$i];try{$dest=Target $item.name;if($item.existed){[IO.File]::Copy((Join-Path $result.backup $item.name),$dest,$true)}elseif(Test-Path -LiteralPath $dest){[IO.File]::Delete($dest)}}catch{$result.rollback_errors+= $_.Exception.Message}}

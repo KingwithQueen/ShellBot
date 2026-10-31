@@ -120,3 +120,18 @@ powershell.exe -NoProfile -File .\Test-ShellBot-Tasks.ps1 -Administrator
 ```
 
 第二条在普通权限会话运行，启动代理时需要处理 UAC。脚本不统计弹窗数量，实际观察应另外记录。结果写入独立 test-results 子目录。2026-10-09 开发机 Windows 11 build 26300 的普通/管理员专项均通过，用户确认改用原生辅助程序后无新杀毒告警、UAC 一次；这不等于其他杀毒软件或系统均已验收。Server 2025 的 dev.7 命令任务需用新包独立回归。
+
+
+## 1.0.8 批量归档与并发反馈
+
+`task_archive` 保留 `task_id` 单任务用法，也接受 `task_ids` 数组（1–1000 个，和 task_list 单页上限一致），二者不能同时提供。使用相同 `host_instance_id`，管理员任务保持 `identity:"administrator"`。先读取要保留的输出，例如：
+
+```json
+{"host_instance_id":"替换为当前实例ID","task_ids":["替换为任务ID1","替换为任务ID2"]}
+```
+
+服务端在一个请求内依次处理，每项仍独立检查所有权、结束状态、审计和持久回执，某项失败不会中止其他项。返回 `results`（按原顺序，包括重复 ID）及 `archived_count`、`failed_count`、`pending_count`、`complete`。每项 `status` 为 archived / failed / pending；已尝试项目附完整 `result`。计数按请求条目计算，重复 ID 也计入回执条目；后台实际活动数、记录数和上限仍见每项 result.structuredContent.task_budget。有失败时外层 isError=true，已经成功的项目仍然生效。重复 ID 与重复整批请求安全回放原回执，不会重新执行任务。
+
+每批有 4 秒调度预算，超时后剩余项目列为 pending，表示没有尝试；可用同一组 ID 重试。预算在项目之间检查，不能打断进行中的磁盘持久化。错误格式、非法 ID、超出数组上限或过期实例在任何归档开始前拒绝。已结束任务的线程、句柄交由后台确认退出后回收，请求不再持全局任务锁无限等待线程。
+
+同一项目仍保持单请求串行执行。并发请求占用项目超过等待窗口时，HTTP 429 返回 `code:"project_busy"`、`request_queued:false`、`retry_after_ms:1000` 和 `Retry-After: 1`。这表示本次请求没有排队、没有执行；稍后重试原参数，批量归档优先用 task_ids。不同调用方不可归档彼此任务。

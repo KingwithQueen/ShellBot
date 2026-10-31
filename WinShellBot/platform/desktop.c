@@ -27,7 +27,7 @@ typedef struct { RECT rect; wchar_t name[32]; bool primary; unsigned dpi; } moni
 typedef struct { char id[33]; HWND hwnd; DWORD pid,tid; FILETIME created; RECT rect; } window_ref;
 typedef struct {
     char id[33],layout[65]; uint64_t at; HWND foreground; DWORD foreground_pid;
-    LONG input_epoch; RECT foreground_rect; RECT captured; bool capture,invalidated;
+    LONG input_epoch; RECT foreground_rect; RECT captured; bool foreground_rect_known,capture,invalidated;
     window_ref windows[WINDOWS_LIMIT]; unsigned window_count;
 } observation;
 typedef struct {
@@ -325,7 +325,7 @@ static void change_uint(yyjson_mut_doc *doc,yyjson_mut_val *changes,const char *
 static void change_rect(yyjson_mut_doc *doc,yyjson_mut_val *changes,const char *field,const RECT *before,const RECT *after,window_ref *window) {
     if(EqualRect(before,after))return;yyjson_mut_val *v=change(doc,changes,field,window);rect_json(doc,v,"expected",before);rect_json(doc,v,"actual",after);
 }
-static const char *observe_guard(sb_desktop *desktop,observation *view,bool input,yyjson_mut_doc *doc,yyjson_mut_val *data) {
+static const char *observe_guard(sb_desktop *desktop,observation *view,bool input,bool require_foreground,yyjson_mut_doc *doc,yyjson_mut_val *data) {
     if (!desktop->leased || sb_platform_millis()>=desktop->deadline) return "lease_expired";
     if (!interactive(desktop)) return "no_desktop_session: locked, disconnected or secure desktop";
     if (input && WaitForSingleObject(desktop->pause,0)==WAIT_OBJECT_0) return "desktop_paused: local owner must resume";
@@ -343,16 +343,18 @@ static const char *observe_guard(sb_desktop *desktop,observation *view,bool inpu
         window_ref *previous=NULL;for(unsigned i=0;i<view->window_count;++i)if(view->windows[i].hwnd==view->foreground)previous=&view->windows[i];
         change_uint(doc,changes,"foreground.hwnd",(uintptr_t)view->foreground,(uintptr_t)foreground,previous);
         change_uint(doc,changes,"foreground.pid",view->foreground_pid,pid,previous);
-        bool got=GetWindowRect(view->foreground,&rect)!=0;
-        if(!got){yyjson_mut_val *v=change(doc,changes,"foreground.bounds",previous);rect_json(doc,v,"expected",&view->foreground_rect);yyjson_mut_obj_add_null(doc,v,"actual");}
-        else change_rect(doc,changes,"foreground.bounds",&view->foreground_rect,&rect,previous);
+        bool got=foreground && GetWindowRect(foreground,&rect)!=0;
+        if(view->foreground_rect_known!=got){yyjson_mut_val *v=change(doc,changes,"foreground.bounds",previous);
+            if(view->foreground_rect_known)rect_json(doc,v,"expected",&view->foreground_rect);else yyjson_mut_obj_add_null(doc,v,"expected");
+            if(got)rect_json(doc,v,"actual",&rect);else yyjson_mut_obj_add_null(doc,v,"actual");}
+        else if(got && foreground==view->foreground)change_rect(doc,changes,"foreground.bounds",&view->foreground_rect,&rect,previous);
     }
     if(yyjson_mut_arr_size(changes)){
         yyjson_mut_obj_add_str(doc,data,"code","stale_observation");yyjson_mut_obj_add_val(doc,data,"changes",changes);
         yyjson_mut_obj_add_str(doc,data,"recovery","Refresh desktop_state/window_list, inspect changes, then use the new screen_id and a new request_key.");return "stale_observation";
     }
     HWND foreground=GetForegroundWindow();
-    if (input && !input_permitted(desktop,foreground)) return "input_not_permitted: unknown owner or higher integrity target";
+    if (input && require_foreground && !input_permitted(desktop,foreground)) return "input_not_permitted: unknown owner or higher integrity target";
     return NULL;
 }
 static observation *find_observation(sb_desktop *desktop,const char *id) {
@@ -382,7 +384,13 @@ static bool observe(sb_desktop *desktop,yyjson_mut_doc *doc,yyjson_mut_val *data
     observation *view=&desktop->observations[desktop->next_observation++%OBSERVATIONS]; memset(view,0,sizeof(*view));
     if (!nonce(view->id)) return false;
     view->at=sb_platform_millis(); view->input_epoch=InterlockedCompareExchange(desktop->epoch,0,0); strcpy(view->layout,hash);
-    view->foreground=GetForegroundWindow(); GetWindowThreadProcessId(view->foreground,&view->foreground_pid); GetWindowRect(view->foreground,&view->foreground_rect);
+    view->foreground=GetForegroundWindow(); GetWindowThreadProcessId(view->foreground,&view->foreground_pid);
+    view->foreground_rect_known=view->foreground && GetWindowRect(view->foreground,&view->foreground_rect)!=0;
+    yyjson_mut_val *foreground=object(doc);yyjson_mut_obj_add_bool(doc,foreground,"present",view->foreground!=NULL);
+    if(view->foreground)yyjson_mut_obj_add_uint(doc,foreground,"hwnd",(uintptr_t)view->foreground);else yyjson_mut_obj_add_null(doc,foreground,"hwnd");
+    yyjson_mut_obj_add_uint(doc,foreground,"pid",view->foreground_pid);
+    if(view->foreground_rect_known)rect_json(doc,foreground,"bounds",&view->foreground_rect);else yyjson_mut_obj_add_null(doc,foreground,"bounds");
+    yyjson_mut_obj_add_val(doc,data,"foreground",foreground);
     yyjson_mut_obj_add_str(doc,data,"screen_id",view->id); yyjson_mut_obj_add_uint(doc,data,"session_id",desktop->session);
     yyjson_mut_obj_add_uint(doc,data,"captured_at_unix_ms",sb_platform_unix_ms()); yyjson_mut_obj_add_uint(doc,data,"observation_ttl_ms",OBSERVATION_MS);
     yyjson_mut_obj_add_bool(doc,data,"paused",WaitForSingleObject(desktop->pause,0)==WAIT_OBJECT_0);
@@ -399,7 +407,7 @@ static bool observe(sb_desktop *desktop,yyjson_mut_doc *doc,yyjson_mut_val *data
     yyjson_mut_obj_add_val(doc,data,"windows",array); yyjson_mut_obj_add_bool(doc,data,"windows_truncated",context.overflow);
     *output=view; return true;
 }
-typedef struct { const char *code,*stage; DWORD win32; HRESULT hr; uint64_t bytes; bool captured,bytes_known; } capture_diagnostic;
+typedef struct { const char *code,*stage,*method,*first_stage; DWORD win32,first_win32; HRESULT hr; uint64_t bytes; bool captured,bytes_known,fallback; } capture_diagnostic;
 static void capture_report(sb_desktop *desktop,yyjson_mut_doc *doc,yyjson_mut_val *data,const capture_diagnostic *d) {
     yyjson_mut_val *value=object(doc);bool available=interactive(desktop);
     yyjson_mut_obj_add_str(doc,value,"code",d->code?d->code:"not_attempted");yyjson_mut_obj_add_str(doc,value,"stage",d->stage?d->stage:"precondition");
@@ -408,10 +416,28 @@ static void capture_report(sb_desktop *desktop,yyjson_mut_doc *doc,yyjson_mut_va
     yyjson_mut_obj_add_bool(doc,value,"desktop_session_available",available);
     if(d->code || !available)yyjson_mut_obj_add_bool(doc,value,"desktop_capturable",available && d->captured);else yyjson_mut_obj_add_null(doc,value,"desktop_capturable");
     yyjson_mut_obj_add_bool(doc,value,"pixels_captured",d->captured);
+    yyjson_mut_obj_add_str(doc,value,"capture_method",d->method?d->method:"none");yyjson_mut_obj_add_bool(doc,value,"fallback_attempted",d->fallback);
+    if(d->first_stage){yyjson_mut_obj_add_str(doc,value,"initial_failure_stage",d->first_stage);yyjson_mut_obj_add_uint(doc,value,"initial_win32_error",d->first_win32);}
     yyjson_mut_obj_add_str(doc,value,"desktop_status",available?"interactive_default_desktop":"locked_disconnected_secure_or_unavailable");
     yyjson_mut_obj_add_bool(doc,value,"encoded_bytes_known",d->bytes_known);
     if(d->bytes_known)yyjson_mut_obj_add_uint(doc,value,"encoded_bytes",d->bytes);else yyjson_mut_obj_add_null(doc,value,"encoded_bytes");
     yyjson_mut_obj_add_uint(doc,value,"png_limit_bytes",PNG_LIMIT);yyjson_mut_obj_add_val(doc,data,"capture_diagnostic",value);
+}
+/* 某些显示驱动拒绝直接缩放屏幕 DC。先按原尺寸复制到同设备内存，再在内存中缩放。 */
+static bool capture_fallback(HDC screen,HDC memory,const RECT *rect,unsigned width,unsigned height,capture_diagnostic *d) {
+    int w=rect->right-rect->left,h=rect->bottom-rect->top;
+    if((uint64_t)w*h>SB_IMAGE_PIXEL_LIMIT){d->stage="fallback_source_pixel_budget";d->win32=ERROR_FILE_TOO_LARGE;return false;}
+    d->fallback=true;d->method="BitBlt+memory_StretchBlt";d->stage="fallback.CreateCompatibleDC";SetLastError(ERROR_SUCCESS);
+    HDC source=CreateCompatibleDC(screen);HBITMAP bitmap=NULL;HGDIOBJ old=NULL;bool ok=false;
+    if(source){d->stage="fallback.CreateCompatibleBitmap";bitmap=CreateCompatibleBitmap(screen,w,h);}
+    if(bitmap){d->stage="fallback.SelectObject";old=SelectObject(source,bitmap);}
+    if(old && old!=HGDI_ERROR){
+        d->stage="fallback.BitBlt";SetLastError(ERROR_SUCCESS);ok=BitBlt(source,0,0,w,h,screen,rect->left,rect->top,SRCCOPY|CAPTUREBLT)!=0;
+        if(ok){d->stage="fallback.memory_StretchBlt";SetLastError(ERROR_SUCCESS);ok=StretchBlt(memory,0,0,(int)width,(int)height,source,0,0,w,h,SRCCOPY)!=0;}
+        if(ok){d->stage="fallback.GdiFlush";ok=GdiFlush()!=0;}
+    }
+    if(!ok)d->win32=GetLastError();
+    if(old && old!=HGDI_ERROR)SelectObject(source,old);if(bitmap)DeleteObject(bitmap);if(source)DeleteDC(source);return ok;
 }
 static char *capture_png(const RECT *rectangle,unsigned maximum,unsigned *width,unsigned *height,capture_diagnostic *diagnostic) {
     diagnostic->code="capture_failed";diagnostic->stage="validate_region";
@@ -431,11 +457,12 @@ static char *capture_png(const RECT *rectangle,unsigned maximum,unsigned *width,
     bool captured=false;
     if (bitmap && old && old!=HGDI_ERROR) {
         SetStretchBltMode(memory,HALFTONE); SetBrushOrgEx(memory,0,0,NULL);
-        SetLastError(ERROR_SUCCESS);diagnostic->stage="StretchBlt";
+        SetLastError(ERROR_SUCCESS);diagnostic->stage="StretchBlt";diagnostic->method="screen_StretchBlt";
         captured=StretchBlt(memory,0,0,(int)*width,(int)*height,screen,rectangle->left,rectangle->top,source_width,source_height,SRCCOPY|CAPTUREBLT)!=0;
-        if(captured && !GdiFlush()){captured=false;diagnostic->stage="GdiFlush";}
+        if(!captured){diagnostic->first_stage="StretchBlt";diagnostic->first_win32=GetLastError();captured=capture_fallback(screen,memory,rectangle,*width,*height,diagnostic);}
+        if(captured && !GdiFlush()){captured=false;diagnostic->stage="GdiFlush";diagnostic->win32=GetLastError();}
     }
-    diagnostic->captured=captured;if(!captured)diagnostic->win32=GetLastError();
+    diagnostic->captured=captured;if(!captured && !diagnostic->first_stage)diagnostic->win32=GetLastError();
     IWICImagingFactory *factory=NULL; IWICBitmapEncoder *encoder=NULL; IWICBitmapFrameEncode *frame=NULL; IPropertyBag2 *properties=NULL; IStream *stream=NULL;
     HRESULT hr=E_FAIL;
     if(captured){diagnostic->code="png_encoding_failed";diagnostic->stage="WIC.factory";hr=CoCreateInstance(&CLSID_WICImagingFactory,NULL,CLSCTX_INPROC_SERVER,&IID_IWICImagingFactory,(void **)&factory);}
@@ -517,7 +544,7 @@ static const char *coordinate_guard(observation *view,int x,int y) {
 }
 static const char *input_action(sb_desktop *desktop,const char *name,yyjson_val *args,observation *view,yyjson_mut_doc *doc,yyjson_mut_val *data) {
     if(!strcmp(name,"window_focus"))yyjson_mut_obj_add_strcpy(doc,data,"requested_window_id",sb_string(yyjson_obj_get(args,"window_id")));
-    const char *error=observe_guard(desktop,view,true,doc,data); if (error) return error;
+    const char *error=observe_guard(desktop,view,true,strcmp(name,"window_focus")!=0,doc,data); if (error) return error;
     if (GetAsyncKeyState(VK_CONTROL)&0x8000 || GetAsyncKeyState(VK_MENU)&0x8000 || GetAsyncKeyState(VK_SHIFT)&0x8000 ||
         GetAsyncKeyState(VK_LWIN)&0x8000 || GetAsyncKeyState(VK_RWIN)&0x8000 || GetAsyncKeyState(VK_LBUTTON)&0x8000 ||
         GetAsyncKeyState(VK_RBUTTON)&0x8000 || GetAsyncKeyState(VK_MBUTTON)&0x8000) return "user_input_already_held";
@@ -559,7 +586,7 @@ static const char *input_action(sb_desktop *desktop,const char *name,yyjson_val 
         wchar_t *text=wide(sb_string(yyjson_obj_get(args,"text"))); size_t length=text ? wcslen(text) : 0;
         if (!text) return "invalid_unicode_text";
         for (size_t offset=0;offset<length;) {
-            pump(); error=observe_guard(desktop,view,true,doc,data); if (error) break;
+            pump(); error=observe_guard(desktop,view,true,true,doc,data); if (error) break;
             INPUT events[64]; unsigned count=0;
             while (offset<length && count<=60) {
                 WORD key=(WORD)text[offset++]; events[count++]=key_event(desktop,key,0,true); events[count++]=key_event(desktop,key,KEYEVENTF_KEYUP,true);
@@ -597,7 +624,7 @@ static const char *input_action(sb_desktop *desktop,const char *name,yyjson_val 
                 error=coordinate_guard(view,end_x,end_y); if (error) return error;
                 inserted=SendInput(2,events,sizeof(INPUT)); if (inserted!=2) error="partial_input_submission";
                 for (int step=1;!error && step<=20;++step) {
-                    Sleep((DWORD)duration/20); pump(); error=observe_guard(desktop,view,true,doc,data); if (error) break;
+                    Sleep((DWORD)duration/20); pump(); error=observe_guard(desktop,view,true,true,doc,data); if (error) break;
                     if (sb_platform_millis()>=desktop->deadline) { error="desktop_lease_expired"; break; }
                     INPUT move=desktop_mouse_event(desktop,MOUSEEVENTF_MOVE,0,x+(end_x-x)*step/20,y+(end_y-y)*step/20);
                     UINT sent=SendInput(1,&move,sizeof(INPUT)); inserted+=sent; if (!sent) error="partial_input_submission";
@@ -709,7 +736,7 @@ static char *execute(sb_desktop *desktop,desktop_job *job,yyjson_val *args) {
                     char *png=capture_png(&crop,(unsigned)maximum,&image_width,&image_height,&diagnostic);
                     if (!png) error=diagnostic.code;
                     else {
-                        error=observe_guard(desktop,view,false,doc,data);
+                        error=observe_guard(desktop,view,false,false,doc,data);
                         if (!error) {
                             view->captured=crop; view->capture=true;
                             yyjson_mut_obj_add_uint(doc,data,"width",image_width); yyjson_mut_obj_add_uint(doc,data,"height",image_height);

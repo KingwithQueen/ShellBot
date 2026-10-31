@@ -12,7 +12,8 @@ bool sb_desktop_tool_visible(sb_host *host, const char *name) {
     if (!host->project || host->project->legacy_compatibility || !host->desktop) return false;
     sb_request_context context={.actor="tool-discovery",.project=host->project,.policy_revision=host->project->policy_revision};
     sb_project_operation operation={.tool=name,.identity=SB_ID_CURRENT_USER};
-    return sb_project_evaluate(&context,&operation).decision!=SB_DECISION_DENY && sb_desktop_available(host->desktop);
+    /* 发现列表由配置决定；临时锁屏/断开只影响调用，不能让 listChanged:false 的列表漂移。 */
+    return sb_project_evaluate(&context,&operation).decision!=SB_DECISION_DENY;
 }
 static void add_properties(yyjson_mut_doc *doc, yyjson_mut_val *properties, const char *json) {
     yyjson_doc *input=yyjson_read(json,strlen(json),0);

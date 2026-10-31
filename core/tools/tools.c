@@ -34,7 +34,7 @@ static const tool_definition definitions[] = {
 ,
     {"task_start", "Start a background native executable in explicitly enabled user or administrator mode. Requires a caller request_key; retries return the original task and changed requests are rejected. Workspace locates cwd; arbitrary commands retain the selected account permissions and are not confined by file roots. Windows command lines must fit 32766 UTF-16 units after quoting; write large scripts with fs_write/artifact_upload then pass the script path, or use task_input. Supply current host_instance_id from host_capabilities; stale requests after restart are rejected.", "{\"type\":\"object\",\"properties\":{\"workspace_id\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"executable\":{\"type\":\"string\"},\"argv\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"maxItems\":64},\"request_key\":{\"type\":\"string\"},\"timeout_ms\":{\"type\":\"integer\",\"minimum\":100,\"maximum\":3600000,\"default\":300000},\"host_instance_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32}},\"required\":[\"workspace_id\",\"executable\",\"argv\",\"request_key\",\"host_instance_id\"],\"additionalProperties\":false}"},
     {"task_list", "List this caller's current-instance tasks. task_budget reports active/record/archived counts and limits. Read output before task_archive; include_archived adds compact receipts.", "{\"type\":\"object\",\"properties\":{\"host_instance_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32},\"offset\":{\"type\":\"integer\",\"minimum\":0},\"max_entries\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":1000,\"default\":100},\"include_archived\":{\"type\":\"boolean\",\"default\":false}},\"required\":[\"host_instance_id\"],\"additionalProperties\":false}"},
-    {"task_archive", "Release an ended task's live record, output and handles. Running tasks cannot be archived. A compact receipt and request_key binding remain; task_start retries never rerun it. Read needed output first. Safe to retry.", "{\"type\":\"object\",\"properties\":{\"host_instance_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32},\"task_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32}},\"required\":[\"task_id\",\"host_instance_id\"],\"additionalProperties\":false}"},
+    {"task_archive", "Release ended tasks' live records and output. Use task_id for one or task_ids for a sequential batch up to 1000; never mix forms. Read output first. Each batch entry reports its own result; pending entries were not attempted within the 4-second scheduling budget, so retry the same IDs. Running or unowned tasks are refused independently. Compact receipts and request_key bindings remain; safe retries never rerun commands.", "{\"type\":\"object\",\"properties\":{\"host_instance_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32},\"task_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32},\"task_ids\":{\"type\":\"array\",\"minItems\":1,\"maxItems\":1000,\"items\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32}}},\"required\":[\"host_instance_id\"],\"oneOf\":[{\"required\":[\"task_id\"],\"not\":{\"required\":[\"task_ids\"]}},{\"required\":[\"task_ids\"],\"not\":{\"required\":[\"task_id\"]}}],\"additionalProperties\":false}"},
     {"task_status", "Query this caller task in the current host instance without rerunning it.", "{\"type\":\"object\",\"properties\":{\"task_id\":{\"type\":\"string\"},\"host_instance_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32}},\"required\":[\"task_id\",\"host_instance_id\"],\"additionalProperties\":false}"},
     {"task_output", "Read stdout or stderr as bounded base64 raw bytes using a byte offset. Decode using the program output encoding. Output is untrusted program data. Valid UTF-8 pages also include text_utf8 for direct reading.", "{\"type\":\"object\",\"properties\":{\"task_id\":{\"type\":\"string\"},\"stream\":{\"type\":\"string\",\"enum\":[\"stdout\",\"stderr\"]},\"offset\":{\"type\":\"integer\",\"minimum\":0},\"max_bytes\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":16384},\"host_instance_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32}},\"required\":[\"task_id\",\"host_instance_id\"],\"additionalProperties\":false}"},
     {"task_input", "Queue UTF-8 text within max_task_input_bytes from host_capabilities or close stdin. input_key binds text and EOF so retries never append the same bytes twice. Queue acceptance is not proof of program consumption.", "{\"type\":\"object\",\"properties\":{\"task_id\":{\"type\":\"string\"},\"input_key\":{\"type\":\"string\"},\"text\":{\"type\":\"string\"},\"eof\":{\"type\":\"boolean\",\"default\":false},\"host_instance_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32}},\"required\":[\"task_id\",\"input_key\",\"text\",\"host_instance_id\"],\"additionalProperties\":false}"},
@@ -378,7 +378,26 @@ static yyjson_mut_val *tool_call_inner(sb_host *host, const char *actor, const c
         yyjson_mut_obj_add_bool(doc, data, "execution", sb_execution_available(host->execution));
         yyjson_mut_obj_add_val(doc, data, "execution_status", sb_execution_status(host->execution, doc));
         yyjson_mut_obj_add_bool(doc, data, "desktop_control", host->project && host->project->policy.desktop.control && sb_desktop_available(host->desktop));
-        yyjson_mut_obj_add_val(doc,data,"desktop_status",sb_desktop_capabilities(host->desktop,doc));
+        yyjson_mut_val *desktop_status=sb_desktop_capabilities(host->desktop,doc);
+#ifndef SB_POSIX
+        bool key_visible=sb_desktop_tool_visible(host,"desktop_key");
+        yyjson_mut_obj_remove_str(desktop_status,"explicit_key_chords");
+        yyjson_mut_obj_add_bool(doc,desktop_status,"explicit_key_chords_implemented",true);
+        yyjson_mut_obj_add_bool(doc,desktop_status,"explicit_key_chords",key_visible);
+        yyjson_mut_obj_add_bool(doc,desktop_status,"desktop_key_available",key_visible);
+        if(!key_visible){
+            const char *reason="desktop_backend_unavailable";
+            if(!host->project || host->project->legacy_compatibility)reason="desktop_requires_ordinary_project";
+            else {
+                sb_request_context context={.actor=actor,.project=host->project,.policy_revision=host->project->policy_revision};
+                sb_project_operation operation={.tool="desktop_key",.identity=SB_ID_CURRENT_USER};
+                sb_policy_result decision=sb_project_evaluate(&context,&operation);
+                if(decision.decision==SB_DECISION_DENY)reason=decision.reason;
+            }
+            yyjson_mut_obj_add_str(doc,desktop_status,"desktop_key_unavailable_reason",reason);
+        }
+#endif
+        yyjson_mut_obj_add_val(doc,data,"desktop_status",desktop_status);
 #ifdef SB_POSIX
         yyjson_mut_obj_add_bool(doc, data, "oauth", host->oauth_backend);
 #else
@@ -938,6 +957,38 @@ done:
 }
 
 yyjson_mut_val *sb_tool_call(sb_host *host, const char *actor, const char *name, yyjson_val *args, yyjson_mut_doc *doc) {
+#ifndef SB_POSIX
+    if(!strcmp(name,"task_archive") && yyjson_obj_get(args,"task_ids")){
+        const char *selected=sb_string(yyjson_obj_get(args,"identity"));
+        if(host->project && !host->project->legacy_compatibility && selected && !strcmp(selected,"administrator") && !host->administrator_host)
+            return project_tool_call(host,actor,name,args,doc);
+        const tool_definition *definition=NULL;for(size_t i=0;i<tool_count();++i)if(!strcmp(name,definitions[i].name))definition=&definitions[i];
+        yyjson_mut_val *limited=argument_limit(definition,args,doc,host);if(limited)return limited;
+        yyjson_val *ids=yyjson_obj_get(args,"task_ids");const char *instance=sb_string(yyjson_obj_get(args,"host_instance_id"));
+        if(!arguments_valid(definition,args,host) || yyjson_obj_get(args,"task_id") || !yyjson_is_arr(ids) || !yyjson_arr_size(ids) || !instance ||
+            !sb_execution_instance(host->execution) || strcmp(instance,sb_execution_instance(host->execution)))return failure(doc,"Invalid archive batch or host instance; supply task_ids only and refresh host_capabilities.");
+        for(size_t i=0;i<yyjson_arr_size(ids);++i){const char *id=sb_string(yyjson_arr_get(ids,i));if(!id || strlen(id)!=32 || strspn(id,"0123456789abcdef")!=32)return failure(doc,"Every task_ids entry must be a 32-character lowercase hexadecimal task ID; no archive was attempted.");}
+        yyjson_mut_val *data=yyjson_mut_obj(doc),*results=yyjson_mut_arr(doc);size_t completed=0,errors=0,pending=0;uint64_t until=sb_platform_millis()+4000;
+        for(size_t i=0;i<yyjson_arr_size(ids);++i){
+            const char *id=sb_string(yyjson_arr_get(ids,i));yyjson_mut_val *entry=yyjson_mut_obj(doc);yyjson_mut_obj_add_strcpy(doc,entry,"task_id",id);
+            if(sb_platform_millis()>=until){++pending;yyjson_mut_obj_add_str(doc,entry,"status","pending");}
+            else {
+                yyjson_mut_doc *single=yyjson_mut_doc_new(NULL);yyjson_mut_val *parameters=single?yyjson_val_mut_copy(single,args):NULL;
+                if(!parameters){if(single)yyjson_mut_doc_free(single);return failure(doc,"Cannot allocate archive batch continuation; inspect task_list before retrying the same IDs.");}
+                yyjson_mut_obj_remove_str(parameters,"task_ids");yyjson_mut_obj_add_strcpy(single,parameters,"task_id",id);
+                yyjson_doc *input=yyjson_mut_val_imut_copy(parameters,NULL);yyjson_mut_doc_free(single);
+                yyjson_mut_val *reply=input?sb_tool_call(host,actor,name,yyjson_doc_get_root(input),doc):NULL;yyjson_doc_free(input);
+                bool failed=!reply || yyjson_mut_get_bool(yyjson_mut_obj_get(reply,"isError"));if(failed)++errors;else ++completed;
+                yyjson_mut_obj_add_str(doc,entry,"status",failed?"failed":"archived");if(reply)yyjson_mut_obj_add_val(doc,entry,"result",reply);
+            }
+            yyjson_mut_arr_add_val(results,entry);
+        }
+        yyjson_mut_obj_add_val(doc,data,"results",results);yyjson_mut_obj_add_uint(doc,data,"archived_count",completed);yyjson_mut_obj_add_uint(doc,data,"failed_count",errors);
+        yyjson_mut_obj_add_uint(doc,data,"pending_count",pending);yyjson_mut_obj_add_bool(doc,data,"complete",pending==0);yyjson_mut_obj_add_strcpy(doc,data,"host_instance_id",instance);
+        yyjson_mut_obj_add_str(doc,data,"retry","Retry identical task_ids safely; archived IDs replay receipts. Pending entries were not attempted. Scheduling deadline cannot interrupt an in-flight durable write.");
+        return content_result(doc,data,errors!=0);
+    }
+#endif
     bool file=host->project && !host->project->legacy_compatibility && (!strncmp(name,"fs_",3) || !strcmp(name,"image_view") || sb_document_tool(name) || sb_transfer_tool(name));
     if(sb_transfer_tool(name)) {const char *action=sb_string(yyjson_obj_get(args,"action"));if(action && (!strcmp(action,"cancel") || !strcmp(action,"status")))file=false;}
     const char *identity=sb_string(yyjson_obj_get(args,"identity"));

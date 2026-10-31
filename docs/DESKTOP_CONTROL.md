@@ -125,3 +125,14 @@ dev.15 为普通、新格式项目提供当前用户会话的截图、窗口列�
 本机专项使用专用 Win32 窗口核对真实像素、Unicode 输入、组合键、点击、拖动、滚动、前台切换、陈旧观察拒绝、跨项目和跨管理器互斥、租约过期、暂停及进程退出清理。剪贴板写入测试先在内存复制全部原格式并恢复，报告不保存正文。模拟外部输入和实际注册热键事件属于自动检查，不替代人工操作。
 
 真实物理停止键、托盘菜单、锁屏/UAC/RDP 会话变化、不同缩放的多显示器、独立系统和真实 MCP 客户端仍须分别验收；本轮不触发 UAC 或进入安全桌面。最终结果、摘要及未覆盖项目见 [M8 交接](HANDOFF_20261011_M8.md)。测试源码和脚本继续由 `.gitignore` 排除，仅开发机保留。
+
+
+## 1.0.8 工具发现、前台窗口与截图兼容
+
+`desktop_key` 需要项目同时授权工具白名单中的 `desktop_key`、`desktop.enabled` 和 `desktop.control`。不会因升级自动扩大既有权限。`host_capabilities.tools` 与 `tools/list` 应同时出现它；`desktop_status.explicit_key_chords_implemented` 表示后端已实现，`explicit_key_chords` 与 `desktop_key_available` 表示当前项目向调用方暴露该接口，未暴露时提供 `desktop_key_unavailable_reason`（如 `tool_disabled`、`desktop_control_disabled`）。`available` 单独表示当前会话能否使用桌面。列表由配置决定，锁屏/暂时断开不再悄悄移除工具。修改项目配置或升级后请重新连接客户端刷新工具定义。
+
+观察结果增加 `foreground` 对象：`present`、`hwnd`、`pid`、`bounds`。没有前台窗口时 hwnd/bounds 是 null；不会拿未知矩形与零矩形比较。`window_focus` 可以从没有前台窗口的状态，尝试聚焦观察中身份、位置仍一致的授权目标；暂停、租约、输入代次、布局及目标完整性检查仍有效。直接按键和鼠标输入仍要求有已确认的前台目标。Windows 拒绝聚焦时仍返回 `focus_refused_by_windows`，不会强制抢焦点。
+
+直接屏幕 `StretchBlt` 失败后，尝试同设备 `BitBlt` 复制，再以内存 `StretchBlt` 缩放（原图最多使用现有 `max_image_source_pixels` 的 64 MP 临时预算）。诊断新增 `capture_method`、`fallback_attempted`、`initial_failure_stage`、`initial_win32_error`；最终 `stage`/`win32_error` 仍保留实际失败。兼容路径成功时 `pixels_captured:true`，初次错误仍可查询；两条路径均拒绝访问时继续报错。不会访问锁屏、UAC 或安全桌面。
+
+设备限制依据 [Microsoft StretchBlt 文档](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/nf-wingdi-stretchblt) 与 [BitBlt 文档](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/nf-wingdi-bitblt)。原反馈机器的错误 5 仍需该机器复测，故障注入恢复不代表全部驱动均可恢复。

@@ -201,10 +201,10 @@ static int handle(struct mg_connection *connection) {
         if (!binding) {
             const char *body = status == 401 ? "{\"error\":\"Project bearer token required.\"}" :
                 status == 404 ? "{\"error\":\"Project route not found.\"}" :
-                status == 429 ? "{\"error\":\"Project has an in-flight request. No request was queued.\"}" :
+                status == 429 ? "{\"error\":\"Project has an in-flight request. No request was queued; retry after one second or use task_archive task_ids for a sequential batch.\",\"code\":\"project_busy\",\"request_queued\":false,\"retry_after_ms\":1000}" :
                 "{\"error\":\"Project is unavailable; explicit owner action is required.\"}";
             char *challenge=status==401 && state->routes.challenge?state->routes.challenge(state->user,info->local_uri):NULL;
-            int result=reject(connection,status,body,status==401?(challenge?challenge:"WWW-Authenticate: Bearer realm=\"ShellBot project\"\r\n"):NULL);free(challenge);return result;
+            int result=reject(connection,status,body,status==401?(challenge?challenge:"WWW-Authenticate: Bearer realm=\"ShellBot project\"\r\n"):status==429?"Retry-After: 1\r\n":NULL);free(challenge);return result;
         }
     } else {
         if (!authorized(connection, state)) return reject(connection, 401, "{\"error\":\"Bearer token required.\"}", "WWW-Authenticate: Bearer realm=\"ShellBot local development\"\r\n");

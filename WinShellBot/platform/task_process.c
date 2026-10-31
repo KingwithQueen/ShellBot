@@ -27,9 +27,10 @@ typedef struct task {
     sb_win_tasks *owner;
     char *command;
     bool durable_reserved, durable_warning, archived;
+    struct task *retired_next;
 } task;
 typedef struct { char id[33],key[65],hash[65],actor[64]; char *receipt; } archived_task;
-struct sb_win_tasks { SRWLOCK lock; task *items[TASK_RECORDS]; archived_task archives[ARCHIVE_RECORDS]; size_t archive_count; HANDLE stop, monitor, worker; sb_execution_profile profile; bool elevated; sb_resource_limits limits; sb_win_sandbox *sandbox; sb_store *store; sb_audit *audit; };
+struct sb_win_tasks { SRWLOCK lock; task *items[TASK_RECORDS],*retired; archived_task archives[ARCHIVE_RECORDS]; size_t archive_count; HANDLE stop, monitor, worker; sb_execution_profile profile; bool elevated; sb_resource_limits limits; sb_win_sandbox *sandbox; sb_store *store; sb_audit *audit; };
 typedef struct { task *item; unsigned stream; } reader_context;
 static yyjson_mut_val *snapshot(sb_win_tasks *tasks, task *item, yyjson_mut_doc *doc);
 static bool task_event(task *item, const char *event, const char *status, bool output) {
@@ -239,6 +240,12 @@ static DWORD WINAPI write_input(void *parameter) {
     item->input_closed = true;
     ReleaseSRWLockExclusive(&item->lock); return 0;
 }
+static void task_free(task *item);
+static bool task_threads_done(task *item) {
+    HANDLE threads[]={item->readers[0],item->readers[1],item->writer};
+    for(unsigned i=0;i<3;++i)if(threads[i] && WaitForSingleObject(threads[i],0)!=WAIT_OBJECT_0)return false;
+    return true;
+}
 static DWORD WINAPI monitor_tasks(void *parameter) {
     sb_win_tasks *tasks = parameter;
     while (WaitForSingleObject(tasks->stop, 25) == WAIT_TIMEOUT) {
@@ -264,7 +271,11 @@ static DWORD WINAPI monitor_tasks(void *parameter) {
             }
             ReleaseSRWLockExclusive(&item->lock);
         }
+        /* 已归档任务不再被调用方访问；只回收已退出的线程，绝不持全局锁等待。 */
+        task *ready=NULL,**link=&tasks->retired;
+        while(*link){task *item=*link;if(task_threads_done(item)){*link=item->retired_next;item->retired_next=ready;ready=item;}else link=&item->retired_next;}
         ReleaseSRWLockExclusive(&tasks->lock);
+        while(ready){task *next=ready->retired_next;task_free(ready);ready=next;}
     }
     return 0;
 }
@@ -308,6 +319,7 @@ void sb_win_tasks_free(sb_win_tasks *tasks) {
     if (!tasks) return;
     SetEvent(tasks->stop); WaitForSingleObject(tasks->monitor, INFINITE); CloseHandle(tasks->monitor); CloseHandle(tasks->stop);
     for (size_t i = 0; i < TASK_RECORDS; ++i) task_free(tasks->items[i]);
+    while(tasks->retired){task *item=tasks->retired;tasks->retired=item->retired_next;task_free(item);}
     for (size_t i=0;i<tasks->archive_count;++i)free(tasks->archives[i].receipt);
     if (tasks->worker) CloseHandle(tasks->worker); free(tasks);
 }
@@ -489,7 +501,8 @@ static char *tasks_call(sb_win_tasks *tasks,const char *name,yyjson_val *args) {
             else {
                 archived_task *a=&tasks->archives[tasks->archive_count++];strcpy(a->id,item->id);strcpy(a->key,item->key);strcpy(a->hash,item->hash);strcpy(a->actor,item->actor);a->receipt=receipt;
                 for(size_t i=0;i<TASK_RECORDS;++i)if(tasks->items[i]==item)tasks->items[i]=NULL;
-                ReleaseSRWLockExclusive(&item->lock);task_free(item);ReleaseSRWLockExclusive(&tasks->lock);return serialize(doc,result);
+                SetEvent(item->input_event);item->retired_next=tasks->retired;tasks->retired=item;
+                ReleaseSRWLockExclusive(&item->lock);ReleaseSRWLockExclusive(&tasks->lock);return serialize(doc,result);
             }
         }
     } else if(!strcmp(name,"task_cancel")) {
