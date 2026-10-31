@@ -72,10 +72,16 @@ static yyjson_doc *tool_schema(const tool_definition *definition) {
     if (!strcmp(name,"task_start")) schema_bound(doc,properties,"argv","maxItems",SB_TASK_ARG_LIMIT);
     if (!strcmp(name,"task_output")) schema_bound(doc,properties,"max_bytes","maximum",SB_TASK_OUTPUT_PAGE_LIMIT);
 #ifndef SB_POSIX
+    const char *mode_schema="{\"type\":\"string\",\"enum\":[\"full\",\"compact\"],\"default\":\"full\",\"description\":\"compact retains structuredContent and media but replaces duplicated JSON text content with one summary; does not change authorization or request-key identity.\"}";
+    yyjson_doc *mode=yyjson_read(mode_schema,strlen(mode_schema),0);
+    yyjson_mut_obj_add_val(doc,properties,"response_mode",yyjson_val_mut_copy(doc,yyjson_doc_get_root(mode)));yyjson_doc_free(mode);
     if (!strcmp(name,"task_output")) {
         yyjson_mut_val *encoding=yyjson_mut_obj(doc);yyjson_mut_obj_add_str(doc,encoding,"type","string");
         yyjson_mut_obj_add_str(doc,encoding,"description","Optional strict text decoding: utf-8, cp936/gbk, or a supported Windows cpNNNN. Raw bytes and next_offset remain unchanged; use text_next_offset to continue decoded text.");
         yyjson_mut_obj_add_val(doc,properties,"encoding",encoding);
+        const char *payload_schema="{\"type\":\"string\",\"enum\":[\"text\",\"bytes\",\"both\"],\"description\":\"Select a single decoded text field (UTF-8 by default), only raw Base64 bytes, or both. Omit for legacy output. Text mode keeps raw bytes in the task and uses text_next_offset for continuation.\"}";
+        yyjson_doc *payload=yyjson_read(payload_schema,strlen(payload_schema),0);
+        yyjson_mut_obj_add_val(doc,properties,"payload_mode",yyjson_val_mut_copy(doc,yyjson_doc_get_root(payload)));yyjson_doc_free(payload);
     }
 #endif
     if (!strcmp(name,"task_input")) schema_bound(doc,properties,"text","maxLength",SB_TASK_INPUT_LIMIT);
@@ -956,7 +962,7 @@ done:
     free(relative);sb_platform_root_close(account.root);return result;
 }
 
-yyjson_mut_val *sb_tool_call(sb_host *host, const char *actor, const char *name, yyjson_val *args, yyjson_mut_doc *doc) {
+static yyjson_mut_val *tool_call_default(sb_host *host, const char *actor, const char *name, yyjson_val *args, yyjson_mut_doc *doc) {
 #ifndef SB_POSIX
     if(!strcmp(name,"task_archive") && yyjson_obj_get(args,"task_ids")){
         const char *selected=sb_string(yyjson_obj_get(args,"identity"));
@@ -1007,4 +1013,75 @@ yyjson_mut_val *sb_tool_call(sb_host *host, const char *actor, const char *name,
         yyjson_mut_obj_add_str(doc,data,"audit_warning","The result is authoritative; the final audit record could not be flushed.");
     }
     return result;
+}
+
+#ifndef SB_POSIX
+static void copy_field(yyjson_mut_doc *doc,yyjson_mut_val *dest,yyjson_mut_val *source,const char *key) {
+    yyjson_mut_val *value=yyjson_mut_obj_get(source,key);
+    if(value)yyjson_mut_obj_add_val(doc,dest,key,yyjson_mut_val_mut_copy(doc,value));
+}
+static yyjson_mut_val *compact_archive(sb_host *host,const char *actor,yyjson_val *args,yyjson_mut_doc *doc,yyjson_mut_val *original) {
+    yyjson_mut_val *old=yyjson_mut_obj_get(original,"structuredContent"),*rows=yyjson_mut_obj_get(old,"results");
+    if(!yyjson_mut_is_arr(rows))return original;
+    yyjson_mut_val *data=yyjson_mut_obj(doc),*results=yyjson_mut_arr(doc),*pending=yyjson_mut_arr(doc),*counts=yyjson_mut_obj(doc);
+    copy_field(doc,data,old,"complete");copy_field(doc,data,old,"host_instance_id");
+    const char *old_counts[]={"archived_count","failed_count","pending_count"},*new_counts[]={"archived","failed","pending"};
+    for(unsigned i=0;i<3;++i)yyjson_mut_obj_add_uint(doc,counts,new_counts[i],yyjson_mut_get_uint(yyjson_mut_obj_get(old,old_counts[i])));
+    yyjson_mut_obj_add_val(doc,data,"counts",counts);
+    for(size_t i=0;i<yyjson_mut_arr_size(rows);++i){
+        yyjson_mut_val *row=yyjson_mut_arr_get(rows,i);const char *status=yyjson_mut_get_str(yyjson_mut_obj_get(row,"status"));
+        if(status && !strcmp(status,"pending")){yyjson_mut_arr_add_val(pending,yyjson_mut_val_mut_copy(doc,yyjson_mut_obj_get(row,"task_id")));continue;}
+        yyjson_mut_val *item=yyjson_mut_obj(doc),*reply=yyjson_mut_obj_get(row,"result"),*body=yyjson_mut_obj_get(reply,"structuredContent");
+        copy_field(doc,item,row,"task_id");copy_field(doc,item,row,"status");
+        if(status && !strcmp(status,"failed")){
+            yyjson_mut_val *error=yyjson_mut_obj(doc);const char *code=yyjson_mut_get_str(yyjson_mut_obj_get(body,"code")),*message=yyjson_mut_get_str(yyjson_mut_obj_get(body,"error"));
+            if(!code)code=message && !strcmp(message,"task_not_owned")?"TASK_NOT_OWNED":"OPERATION_FAILED";
+            yyjson_mut_obj_add_strcpy(doc,error,"code",code);yyjson_mut_obj_add_bool(doc,error,"retryable",yyjson_mut_get_bool(yyjson_mut_obj_get(body,"retryable")));
+            if(message)yyjson_mut_obj_add_strcpy(doc,error,"message",message);yyjson_mut_obj_add_val(doc,item,"error",error);
+        }
+        copy_field(doc,item,body,"audit_warning");
+        if(yyjson_mut_get_bool(yyjson_mut_obj_get(body,"durable_warning")))yyjson_mut_obj_add_bool(doc,item,"durable_warning",true);
+        yyjson_mut_arr_add_val(results,item);
+    }
+    yyjson_mut_obj_add_val(doc,data,"results",results);yyjson_mut_obj_add_val(doc,data,"pending_task_ids",pending);
+    /* 一次只读快照返回整批结束后的预算；不会重新执行归档。 */
+    yyjson_mut_doc *query=yyjson_mut_doc_new(NULL);yyjson_mut_val *parameters=query?yyjson_mut_obj(query):NULL;
+    if(parameters){
+        const char *fields[]={"host_instance_id","identity"};for(unsigned i=0;i<2;++i){yyjson_val *v=yyjson_obj_get(args,fields[i]);if(v)yyjson_mut_obj_add_val(query,parameters,fields[i],yyjson_val_mut_copy(query,v));}
+        yyjson_mut_obj_add_uint(query,parameters,"max_entries",1);yyjson_doc *input=yyjson_mut_val_imut_copy(parameters,NULL);
+        yyjson_mut_val *reply=input?tool_call_default(host,actor,"task_list",yyjson_doc_get_root(input),doc):NULL;yyjson_doc_free(input);
+        yyjson_mut_val *body=yyjson_mut_obj_get(reply,"structuredContent");const char *shared[]={"task_budget","operation_budget","persistent_state","project_id","policy_revision"};
+        for(unsigned i=0;i<5;++i)copy_field(doc,data,body,shared[i]);
+    }
+    yyjson_mut_doc_free(query);
+    yyjson_mut_obj_add_str(doc,data,"pending_semantics","Only pending_task_ids were not attempted within the scheduling budget; failed items were attempted and may require action before retry.");
+    yyjson_mut_obj_remove_str(original,"structuredContent");yyjson_mut_obj_add_val(doc,original,"structuredContent",data);return original;
+}
+#endif
+
+yyjson_mut_val *sb_tool_call(sb_host *host,const char *actor,const char *name,yyjson_val *args,yyjson_mut_doc *doc) {
+#ifndef SB_POSIX
+    yyjson_val *mode=yyjson_obj_get(args,"response_mode");const char *value=sb_string(mode);
+    if(mode && (!value || (strcmp(value,"full") && strcmp(value,"compact"))))return failure(doc,"response_mode must be full or compact; no operation was attempted.");
+    bool compact=value && !strcmp(value,"compact");yyjson_mut_doc *normalized=NULL;yyjson_doc *clean=NULL;
+    if(mode){
+        normalized=yyjson_mut_doc_new(NULL);yyjson_mut_val *parameters=normalized?yyjson_val_mut_copy(normalized,args):NULL;
+        if(parameters){yyjson_mut_obj_remove_str(parameters,"response_mode");clean=yyjson_mut_val_imut_copy(parameters,NULL);}yyjson_mut_doc_free(normalized);
+        if(!clean)return failure(doc,"Cannot allocate response presentation arguments; no operation was attempted.");args=yyjson_doc_get_root(clean);
+    }
+    yyjson_mut_val *result=tool_call_default(host,actor,name,args,doc);
+    if(compact && result){
+        if(!strcmp(name,"task_archive") && yyjson_obj_get(args,"task_ids"))result=compact_archive(host,actor,args,doc,result);
+        yyjson_mut_val *content=yyjson_mut_arr(doc),*entry=yyjson_mut_obj(doc),*old=yyjson_mut_obj_get(result,"content"),*data=yyjson_mut_obj_get(result,"structuredContent");char summary[192];
+        yyjson_mut_val *counts=yyjson_mut_obj_get(data,"counts");
+        if(counts)snprintf(summary,sizeof(summary),"task_archive: %llu archived, %llu failed, %llu pending; details in structuredContent.",(unsigned long long)yyjson_mut_get_uint(yyjson_mut_obj_get(counts,"archived")),(unsigned long long)yyjson_mut_get_uint(yyjson_mut_obj_get(counts,"failed")),(unsigned long long)yyjson_mut_get_uint(yyjson_mut_obj_get(counts,"pending")));
+        else snprintf(summary,sizeof(summary),"%s: %s; details in structuredContent.",name,yyjson_mut_get_bool(yyjson_mut_obj_get(result,"isError"))?"failed":"receipt available");
+        yyjson_mut_obj_add_str(doc,entry,"type","text");yyjson_mut_obj_add_strcpy(doc,entry,"text",summary);yyjson_mut_arr_add_val(content,entry);
+        for(size_t i=0;i<yyjson_mut_arr_size(old);++i){yyjson_mut_val *item=yyjson_mut_arr_get(old,i);const char *type=yyjson_mut_get_str(yyjson_mut_obj_get(item,"type"));if(type && strcmp(type,"text"))yyjson_mut_arr_add_val(content,yyjson_mut_val_mut_copy(doc,item));}
+        yyjson_mut_obj_remove_str(result,"content");yyjson_mut_obj_add_val(doc,result,"content",content);
+    }
+    yyjson_doc_free(clean);return result;
+#else
+    return tool_call_default(host,actor,name,args,doc);
+#endif
 }

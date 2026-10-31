@@ -84,6 +84,12 @@ static char *fail(const char *message) {
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL); if (!doc) return NULL;
     yyjson_mut_val *root = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_bool(doc, root, "_error", true); yyjson_mut_obj_add_strcpy(doc, root, "error", message);
+    const char *code=NULL;bool retryable=false;
+    if(!strncmp(message,"task_still_running:",strlen("task_still_running:"))){code="TASK_RUNNING";retryable=true;}
+    else if(!strncmp(message,"archive_receipt_budget_exceeded:",strlen("archive_receipt_budget_exceeded:")))code="ARCHIVE_RECEIPT_LIMIT";
+    else if(!strncmp(message,"Cannot persist archive receipt;",strlen("Cannot persist archive receipt;"))){code="ARCHIVE_PERSIST_FAILED";retryable=true;}
+    else if(!strncmp(message,"Unknown task_id for this caller",strlen("Unknown task_id for this caller")))code="TASK_NOT_OWNED_OR_UNKNOWN";
+    if(code){yyjson_mut_obj_add_str(doc,root,"code",code);yyjson_mut_obj_add_bool(doc,root,"retryable",retryable);}
     return serialize(doc, root);
 }
 static char *limit_fail(const char *field,uint64_t actual,uint64_t maximum,const char *unit) {
@@ -146,7 +152,7 @@ static void decoded_output(yyjson_mut_doc *doc,yyjson_mut_val *result,const unsi
     yyjson_mut_obj_add_uint(doc,result,"text_next_offset",offset+(valid?size:0));
     yyjson_mut_obj_add_str(doc,result,"decode_status",valid?(trim?"partial":"complete"):"invalid_or_incomplete");
     if(valid)yyjson_mut_obj_add_strncpy(doc,result,"text",text?text:"",(size_t)output);
-    else yyjson_mut_obj_add_str(doc,result,"decode_error","The page cannot be strictly decoded; raw data_base64 is intact. Retry from text_next_offset with more bytes, or select the correct encoding.");
+    else yyjson_mut_obj_add_str(doc,result,"decode_error","The page cannot be strictly decoded. Raw bytes remain in the task; use payload_mode bytes, retry from text_next_offset with more bytes, or select the correct encoding.");
     free(wide);free(text);
 }
 static bool key_valid(const char *key) { return key && *key && strlen(key) <= 64 && strspn(key, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.") == strlen(key); }
@@ -358,6 +364,21 @@ static yyjson_mut_val *snapshot(sb_win_tasks *tasks, task *item, yyjson_mut_doc 
     yyjson_mut_obj_add_bool(doc, result, "elevated", tasks->elevated);
     if(tasks->sandbox){yyjson_mut_obj_add_bool(doc,result,"appcontainer",true);yyjson_mut_obj_add_bool(doc,result,"less_privileged_appcontainer",true);yyjson_mut_obj_add_bool(doc,result,"child_processes_allowed",false);}
     yyjson_mut_obj_add_uint(doc, result, "process_id", item->pid);
+    /* 入口退出不代表整个 Job 已结束；用句柄等待状态区分真实退出码 259。 */
+    yyjson_mut_val *entry=yyjson_mut_obj(doc),*job=yyjson_mut_obj(doc);DWORD wait=WaitForSingleObject(item->process,0),exit=0,entry_error=0;
+    bool exited=wait==WAIT_OBJECT_0,exit_known=false;
+    if(exited){exit_known=GetExitCodeProcess(item->process,&exit)!=0;if(!exit_known)entry_error=GetLastError();}
+    else if(wait==WAIT_FAILED)entry_error=GetLastError();
+    yyjson_mut_obj_add_uint(doc,entry,"pid",item->pid);yyjson_mut_obj_add_str(doc,entry,"state",exited?"exited":wait==WAIT_TIMEOUT?"running":"unknown");
+    if(exit_known)yyjson_mut_obj_add_uint(doc,entry,"exit_code",exit);else yyjson_mut_obj_add_null(doc,entry,"exit_code");
+    yyjson_mut_obj_add_uint(doc,entry,"query_win32_error",entry_error);
+    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting={0};bool known=item->job && QueryInformationJobObject(item->job,JobObjectBasicAccountingInformation,&accounting,sizeof(accounting),NULL)!=0;DWORD job_error=known?0:item->job?GetLastError():ERROR_INVALID_HANDLE;
+    yyjson_mut_obj_add_str(doc,job,"state",known?(accounting.ActiveProcesses?"running":"empty"):"unknown");
+    if(known)yyjson_mut_obj_add_uint(doc,job,"active_process_count",accounting.ActiveProcesses);else yyjson_mut_obj_add_null(doc,job,"active_process_count");
+    yyjson_mut_obj_add_uint(doc,job,"query_win32_error",job_error);
+    yyjson_mut_obj_add_val(doc,result,"entry_process",entry);yyjson_mut_obj_add_val(doc,result,"job",job);
+    yyjson_mut_obj_add_bool(doc,result,"entry_exited_job_running",exited && known && accounting.ActiveProcesses>0);
+    yyjson_mut_obj_add_bool(doc,result,"output_drained",item->output_done[0] && item->output_done[1]);
     yyjson_mut_obj_add_str(doc, result, "status", item->finished ? (item->reason ? item->reason : "completed") : "running");
     if (item->finished) yyjson_mut_obj_add_uint(doc, result, "exit_code", item->exit_code);
     if (item->reason && !item->finished) yyjson_mut_obj_add_str(doc, result, "termination_requested", item->reason);
@@ -511,16 +532,19 @@ static char *tasks_call(sb_win_tasks *tasks,const char *name,yyjson_val *args) {
     } else if(!strcmp(name,"task_output")) {
         const char *encoding=sb_string(yyjson_obj_get(args,"text_encoding"));UINT cp=codepage(encoding);
         if(encoding && !cp){yyjson_mut_doc_free(doc);ReleaseSRWLockExclusive(&item->lock);ReleaseSRWLockExclusive(&tasks->lock);return fail("Unsupported encoding: use utf-8, cp936/gbk or a supported Windows cpNNNN.");}
+        const char *payload=sb_string(yyjson_obj_get(args,"payload_mode"));bool raw=!payload || strcmp(payload,"text"),text=payload && strcmp(payload,"bytes");
+        if(yyjson_obj_get(args,"payload_mode") && (!payload || (strcmp(payload,"text") && strcmp(payload,"bytes") && strcmp(payload,"both")))){yyjson_mut_doc_free(doc);ReleaseSRWLockExclusive(&item->lock);ReleaseSRWLockExclusive(&tasks->lock);return fail("payload_mode must be text, bytes or both.");}
         const char *stream=sb_string(yyjson_obj_get(args,"stream")); unsigned selected=stream && !strcmp(stream,"stderr")?1:0; uint64_t offset=0,maximum=0;
         if(!stream || (strcmp(stream,"stdout") && strcmp(stream,"stderr")) || !sb_integer(yyjson_obj_get(args,"offset"),&offset) || !sb_integer(yyjson_obj_get(args,"max_bytes"),&maximum) || maximum<1 || maximum>SB_TASK_OUTPUT_PAGE_LIMIT || offset>item->lengths[selected]) error="Invalid output stream, byte offset or limit.";
         else {
             size_t length=item->lengths[selected]-(size_t)offset; if(length>maximum) length=(size_t)maximum;
-            char *encoded=sb_base64(item->bytes[selected]+(size_t)offset,length);
-            if(!encoded) error="Cannot encode task output.";
-            else { yyjson_mut_obj_add_strcpy(doc,result,"data_base64",encoded);free(encoded); yyjson_mut_obj_add_str(doc,result,"encoding","base64");
+            char *encoded=raw?sb_base64(item->bytes[selected]+(size_t)offset,length):NULL;
+            if(raw && !encoded) error="Cannot encode task output.";
+            else { if(raw){yyjson_mut_obj_add_strcpy(doc,result,"data_base64",encoded);free(encoded);yyjson_mut_obj_add_str(doc,result,"encoding","base64");}
                 const unsigned char *page=item->bytes[selected]+(size_t)offset;
-                if(encoding)decoded_output(doc,result,page,length,cp,offset,item->finished && offset+length==item->lengths[selected]);
-                if (!length || (!memchr(page,0,length) && MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,(const char *)page,(int)length,NULL,0)))
+                if((encoding && !payload) || text)decoded_output(doc,result,page,length,cp?cp:CP_UTF8,offset,item->finished && offset+length==item->lengths[selected]);
+                if(payload)yyjson_mut_obj_add_strcpy(doc,result,"payload_mode",payload);
+                if (!payload && (!length || (!memchr(page,0,length) && MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,(const char *)page,(int)length,NULL,0))))
                     yyjson_mut_obj_add_strncpy(doc,result,"text_utf8",(const char *)page,length); yyjson_mut_obj_add_uint(doc,result,"next_offset",offset+length); yyjson_mut_obj_add_bool(doc,result,"eof",item->finished && offset+length==item->lengths[selected]); }
         }
     } else if(!strcmp(name,"task_input")) {

@@ -136,3 +136,14 @@ dev.15 为普通、新格式项目提供当前用户会话的截图、窗口列�
 直接屏幕 `StretchBlt` 失败后，尝试同设备 `BitBlt` 复制，再以内存 `StretchBlt` 缩放（原图最多使用现有 `max_image_source_pixels` 的 64 MP 临时预算）。诊断新增 `capture_method`、`fallback_attempted`、`initial_failure_stage`、`initial_win32_error`；最终 `stage`/`win32_error` 仍保留实际失败。兼容路径成功时 `pixels_captured:true`，初次错误仍可查询；两条路径均拒绝访问时继续报错。不会访问锁屏、UAC 或安全桌面。
 
 设备限制依据 [Microsoft StretchBlt 文档](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/nf-wingdi-stretchblt) 与 [BitBlt 文档](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/nf-wingdi-bitblt)。原反馈机器的错误 5 仍需该机器复测，故障注入恢复不代表全部驱动均可恢复。
+
+
+## 1.0.9 聚焦诊断与精简呈现
+
+Windows 桌面工具同样支持 response_mode:compact；结构化回执和原生图像保留，文本 content 改为一句摘要。切换呈现模式不改变租约、screen_id、request_key 或审批绑定。
+
+window_focus 的已授权执行路径返回 focus_diagnostic，包含 caller、target、foreground_before、foreground_after 的 hwnd/PID/TID/session/desktop_name，api_attempted 及 api_return_value。caller 指实际调用 Win32 API 的本机 ShellBot 工作进程/线程；不是远程客户端的操作系统进程。目标同时提供观察时 PID/TID，以便识别窗口身份变化。无法查询的字段为 null，桌面名称查询是否成功及对应错误单独说明，不将未知值替换成零或 Default。
+
+未通过观察/暂停/目标检查时 api_attempted:false、api_return_value:null；真正调用 SetForegroundWindow 后保留其实际 BOOL 返回值。api_win32_error 始终为 null，api_win32_error_authoritative:false，因为 [Microsoft SetForegroundWindow 文档](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setforegroundwindow) 没有规定 GetLastError；不把残留错误当作失败原因。caller/target 的 desktop_query_win32_error 只属于相应的桌面查询，不属于聚焦 API。
+
+诊断不放宽项目权限、会话、完整性级别、人工暂停或新鲜观察检查，也不会强制抢焦点。参数准备、租约所有权或项目权限阶段被拒绝时不会额外查询和泄露桌面身份。

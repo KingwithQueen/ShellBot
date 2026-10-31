@@ -130,7 +130,14 @@ static yyjson_mut_val *approval_prompt(sb_host *host, yyjson_mut_doc *doc, yyjso
     if (!modern || yyjson_obj_get(params,"requestState") || !yyjson_is_obj(yyjson_obj_get(yyjson_obj_get(caps,"elicitation"),"url"))) {
         /* Older clients may display only text content, ignoring structuredContent. */
         yyjson_mut_val *entry=yyjson_mut_arr_get(yyjson_mut_obj_get(result,"content"),0);
-        char *text=yyjson_mut_val_write(details,0,NULL);
+        char *text=NULL;
+#ifndef SB_POSIX
+        const char *mode=sb_string(yyjson_obj_get(yyjson_obj_get(params,"arguments"),"response_mode"));
+        if(mode && !strcmp(mode,"compact")){
+            char summary[1024];snprintf(summary,sizeof(summary),"Owner approval required: inspect %s, then retry unchanged arguments with approval_id %s; opening the link does not approve execution.",url,id);text=sb_strdup(summary);
+        }else
+#endif
+        text=yyjson_mut_val_write(details,0,NULL);
         if (entry && text) { yyjson_mut_obj_remove_str(entry,"text"); yyjson_mut_obj_add_strcpy(doc,entry,"text",text); }
         free(text); return result;
     }

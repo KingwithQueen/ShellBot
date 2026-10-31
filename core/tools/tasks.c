@@ -76,6 +76,9 @@ yyjson_mut_val *sb_tasks_call(sb_host *host,const char *actor,const char *name,y
                 (offset_value && !sb_integer(offset_value,&offset)) || (limit_value && (!sb_integer(limit_value,&maximum) || !maximum || maximum>SB_TASK_OUTPUT_PAGE_LIMIT))) { sb_fail(&error,"Invalid output stream or page.");goto done; }
             yyjson_mut_obj_add_str(request,parameters,"stream",stream?stream:"stdout");
 #ifndef SB_POSIX
+            const char *payload=sb_string(yyjson_obj_get(args,"payload_mode"));
+            if(yyjson_obj_get(args,"payload_mode") && (!payload || (strcmp(payload,"text") && strcmp(payload,"bytes") && strcmp(payload,"both")))){sb_fail(&error,"payload_mode must be text, bytes or both.");goto done;}
+            if(payload)yyjson_mut_obj_add_strcpy(request,parameters,"payload_mode",payload);
             yyjson_val *encoding=yyjson_obj_get(args,"encoding");
             if(encoding){const char *value=sb_string(encoding);if(!value){sb_fail(&error,"encoding must be a string such as utf-8 or cp936.");goto done;}yyjson_mut_obj_add_strcpy(request,parameters,"text_encoding",value);}
 #endif

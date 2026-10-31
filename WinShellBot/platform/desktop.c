@@ -542,7 +542,42 @@ static const char *coordinate_guard(observation *view,int x,int y) {
         (view->capture && !PtInRect(&view->captured,point))) return "coordinate_outside_observed_foreground_target";
     return NULL;
 }
-static const char *input_action(sb_desktop *desktop,const char *name,yyjson_val *args,observation *view,yyjson_mut_doc *doc,yyjson_mut_val *data) {
+typedef struct { bool attempted; BOOL returned; HWND before; } focus_attempt;
+static yyjson_mut_val *focus_identity(yyjson_mut_doc *doc,HWND hwnd,DWORD pid,DWORD tid) {
+    yyjson_mut_val *value=object(doc);DWORD session=0;
+    if(hwnd)yyjson_mut_obj_add_uint(doc,value,"hwnd",(uintptr_t)hwnd);else yyjson_mut_obj_add_null(doc,value,"hwnd");
+    if(pid)yyjson_mut_obj_add_uint(doc,value,"pid",pid);else yyjson_mut_obj_add_null(doc,value,"pid");
+    if(tid)yyjson_mut_obj_add_uint(doc,value,"tid",tid);else yyjson_mut_obj_add_null(doc,value,"tid");
+    if(pid && ProcessIdToSessionId(pid,&session))yyjson_mut_obj_add_uint(doc,value,"session_id",session);else yyjson_mut_obj_add_null(doc,value,"session_id");
+    HDESK handle=tid?GetThreadDesktop(tid):NULL;DWORD error=tid && !handle?GetLastError():ERROR_NOT_FOUND,bytes=0;char *name=NULL;
+    if(handle){
+        GetUserObjectInformationW(handle,UOI_NAME,NULL,0,&bytes);
+        if(bytes){wchar_t *buffer=calloc(1,(size_t)bytes+sizeof(wchar_t));
+            if(buffer){if(GetUserObjectInformationW(handle,UOI_NAME,buffer,bytes,&bytes)){name=utf8(buffer);error=name?0:ERROR_NO_UNICODE_TRANSLATION;}else error=GetLastError();free(buffer);}
+            else error=ERROR_NOT_ENOUGH_MEMORY;
+        }else error=GetLastError();
+    }
+    yyjson_mut_obj_add_bool(doc,value,"desktop_name_known",name!=NULL);
+    if(name)yyjson_mut_obj_add_strcpy(doc,value,"desktop_name",name);else yyjson_mut_obj_add_null(doc,value,"desktop_name");free(name);
+    yyjson_mut_obj_add_uint(doc,value,"desktop_query_win32_error",error);return value;
+}
+static yyjson_mut_val *focus_window_identity(yyjson_mut_doc *doc,HWND hwnd) {
+    DWORD pid=0,tid=hwnd?GetWindowThreadProcessId(hwnd,&pid):0;return focus_identity(doc,hwnd,pid,tid);
+}
+static void focus_report(yyjson_mut_doc *doc,yyjson_mut_val *data,window_ref *target,const focus_attempt *attempt) {
+    yyjson_mut_val *value=object(doc);
+    yyjson_mut_obj_add_val(doc,value,"caller",focus_identity(doc,NULL,GetCurrentProcessId(),GetCurrentThreadId()));
+    yyjson_mut_obj_add_val(doc,value,"target",focus_window_identity(doc,target?target->hwnd:NULL));
+    if(target){yyjson_mut_obj_add_strcpy(doc,value,"target_window_id",target->id);yyjson_mut_obj_add_uint(doc,value,"observed_target_pid",target->pid);yyjson_mut_obj_add_uint(doc,value,"observed_target_tid",target->tid);}
+    yyjson_mut_obj_add_val(doc,value,"foreground_before",focus_window_identity(doc,attempt->before));
+    yyjson_mut_obj_add_val(doc,value,"foreground_after",focus_window_identity(doc,GetForegroundWindow()));
+    yyjson_mut_obj_add_str(doc,value,"api","SetForegroundWindow");yyjson_mut_obj_add_bool(doc,value,"api_attempted",attempt->attempted);
+    if(attempt->attempted)yyjson_mut_obj_add_int(doc,value,"api_return_value",attempt->returned);else yyjson_mut_obj_add_null(doc,value,"api_return_value");
+    yyjson_mut_obj_add_null(doc,value,"api_win32_error");yyjson_mut_obj_add_bool(doc,value,"api_win32_error_authoritative",false);
+    yyjson_mut_obj_add_str(doc,value,"reason","SetForegroundWindow documents BOOL success/failure, not GetLastError. No residual last-error value is used as the cause; unavailable identity fields remain null.");
+    yyjson_mut_obj_add_val(doc,data,"focus_diagnostic",value);
+}
+static const char *input_action_inner(sb_desktop *desktop,const char *name,yyjson_val *args,observation *view,yyjson_mut_doc *doc,yyjson_mut_val *data,focus_attempt *focus) {
     if(!strcmp(name,"window_focus"))yyjson_mut_obj_add_strcpy(doc,data,"requested_window_id",sb_string(yyjson_obj_get(args,"window_id")));
     const char *error=observe_guard(desktop,view,true,strcmp(name,"window_focus")!=0,doc,data); if (error) return error;
     if (GetAsyncKeyState(VK_CONTROL)&0x8000 || GetAsyncKeyState(VK_MENU)&0x8000 || GetAsyncKeyState(VK_SHIFT)&0x8000 ||
@@ -573,7 +608,7 @@ static const char *input_action(sb_desktop *desktop,const char *name,yyjson_val 
             yyjson_mut_obj_add_str(doc,data,"code","stale_window_id");yyjson_mut_obj_add_val(doc,data,"changes",changes);return "stale_window_id";
         }
         if (!input_permitted(desktop,target->hwnd)) return "input_not_permitted: higher integrity or unknown window owner";
-        if (target->hwnd!=GetForegroundWindow() && !SetForegroundWindow(target->hwnd)) return "focus_refused_by_windows";
+        if (target->hwnd!=GetForegroundWindow()) {focus->attempted=true;focus->returned=SetForegroundWindow(target->hwnd);if(!focus->returned)return "focus_refused_by_windows";}
         uint64_t until=sb_platform_millis()+250;
         while (target->hwnd!=GetForegroundWindow() && sb_platform_millis()<until) {
             Sleep(5); pump();
@@ -636,6 +671,13 @@ static const char *input_action(sb_desktop *desktop,const char *name,yyjson_val 
     yyjson_mut_obj_add_uint(doc,data,"events_inserted",inserted); yyjson_mut_obj_add_bool(doc,data,"application_success_confirmed",false);
     yyjson_mut_obj_add_str(doc,data,"next_action","Obtain a fresh observation and verify the application result; do not assume business completion.");
     invalidate(desktop); return error;
+}
+static const char *input_action(sb_desktop *desktop,const char *name,yyjson_val *args,observation *view,yyjson_mut_doc *doc,yyjson_mut_val *data) {
+    bool focusing=!strcmp(name,"window_focus");focus_attempt attempt={0};window_ref *target=NULL;
+    if(focusing){attempt.before=GetForegroundWindow();const char *id=sb_string(yyjson_obj_get(args,"window_id"));
+        for(unsigned i=0;view && id && i<view->window_count;++i)if(!strcmp(view->windows[i].id,id))target=&view->windows[i];}
+    const char *error=input_action_inner(desktop,name,args,view,doc,data,&attempt);
+    if(focusing)focus_report(doc,data,target,&attempt);return error;
 }
 static const char *clipboard_action(sb_desktop *desktop,const char *name,yyjson_val *args,yyjson_mut_doc *doc,yyjson_mut_val *data) {
     uint64_t expected=0; sb_integer(yyjson_obj_get(args,"expected_sequence"),&expected);

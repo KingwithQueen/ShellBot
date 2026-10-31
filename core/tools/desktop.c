@@ -45,6 +45,9 @@ void sb_desktop_tools_list(sb_host *host, yyjson_mut_doc *doc, yyjson_mut_val *t
         yyjson_mut_obj_add_val(doc,schema,"properties",properties);
         yyjson_mut_obj_add_val(doc,schema,"required",required);
         add_properties(doc,properties,"{\"lease_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32},\"request_key\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":64},\"approval_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32}}");
+#ifndef SB_POSIX
+        add_properties(doc,properties,"{\"response_mode\":{\"type\":\"string\",\"enum\":[\"full\",\"compact\"],\"default\":\"full\",\"description\":\"compact retains structuredContent and images but replaces duplicated JSON text with a short summary. Presentation only; safe to change on identical retries.\"}}");
+#endif
         if (i==15) {
             add_properties(doc,properties,"{\"action\":{\"type\":\"string\",\"enum\":[\"acquire\",\"renew\",\"release\",\"status\"]},\"duration_seconds\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":120}}");
             yyjson_mut_arr_add_str(doc,required,"action");

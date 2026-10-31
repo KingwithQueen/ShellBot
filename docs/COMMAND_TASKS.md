@@ -135,3 +135,34 @@ powershell.exe -NoProfile -File .\Test-ShellBot-Tasks.ps1 -Administrator
 每批有 4 秒调度预算，超时后剩余项目列为 pending，表示没有尝试；可用同一组 ID 重试。预算在项目之间检查，不能打断进行中的磁盘持久化。错误格式、非法 ID、超出数组上限或过期实例在任何归档开始前拒绝。已结束任务的线程、句柄交由后台确认退出后回收，请求不再持全局任务锁无限等待线程。
 
 同一项目仍保持单请求串行执行。并发请求占用项目超过等待窗口时，HTTP 429 返回 `code:"project_busy"`、`request_queued:false`、`retry_after_ms:1000` 和 `Retry-After: 1`。这表示本次请求没有排队、没有执行；稍后重试原参数，批量归档优先用 task_ids。不同调用方不可归档彼此任务。
+
+
+## 1.0.9 精简回执与任务进程状态
+
+Windows 工具均支持可选 `response_mode:"compact"`，省略或选择 `full` 保持原回执。compact 保留 structuredContent 和原生图像等非文本内容，外层 content 仅保留一句摘要，不再把完整 JSON 再复制一遍。仅支持文本内容的旧客户端应使用默认 full。response_mode 只控制呈现，不参与操作参数、审批和 request_key 绑定；可在同一操作重试时切换，不会重复执行。
+
+批量 `task_archive` 的 compact 结构为：
+
+```json
+{
+  "complete": false,
+  "counts": {"archived": 1, "failed": 1, "pending": 1},
+  "results": [
+    {"task_id": "已结束任务ID", "status": "archived"},
+    {"task_id": "仍运行任务ID", "status": "failed", "error": {"code": "TASK_RUNNING", "retryable": true, "message": "任务尚未结束"}}
+  ],
+  "pending_task_ids": ["尚未尝试任务ID"]
+}
+```
+
+示例中的 ID/错误消息仅为说明，真实 ID 为 32 位小写十六进制。结果还会整批返回一次 host_instance_id、task_budget、operation_budget、persistent_state 和项目元数据；每项不重复嵌套预算、完整回执或 content。必要的 audit_warning/durable_warning 会保留。counts 按请求条目计数，重复 ID 也计为一个回执条目。
+
+pending 只表示调度预算结束前尚未尝试；它们只出现在 pending_task_ids，results 只含已尝试项。可仅提交 pending_task_ids 重试。complete 表示整批是否都已尝试，有 failed 时仍可能 complete:true。TASK_RUNNING 的 retryable:true 表示等待任务结束后可归档，不表示自动重启命令。TASK_NOT_OWNED、TASK_NOT_OWNED_OR_UNKNOWN、ARCHIVE_RECEIPT_LIMIT 等不会自动重试；未知失败使用 OPERATION_FAILED 并保留原始消息，保守标记 retryable:false。
+
+`task_output` 可选 `payload_mode:"text"|"bytes"|"both"`：text 只返回规范的 text 字段，bytes 只返回 data_base64，both 返回这两者；显式模式均不再增加 text_utf8 别名。省略保持旧格式。text/both 默认严格 UTF-8，可结合 encoding:cp936/gbk/cpNNNN；bytes 保留原始字节，不做文本解码。读取中文编译日志推荐同时选择 response_mode:compact、payload_mode:text、encoding:cp936。
+
+next_offset 仍为本页原始字节终点；text_next_offset 为成功解码的完整字符前缀终点。文本分页应从 text_next_offset 继续，避免丢掉跨页尾字节。解码失败不伪造文本，保留 decode_status/decode_error，仍可改选 bytes 读取同一 offset。原始输出始终保留在任务中，直到显式归档释放。
+
+任务 status 仍表示整个 Job 和输出读取是否结束，旧 exit_code 只在任务完成后出现。新增 entry_process（pid、state、exit_code、query_win32_error）、job（state、active_process_count、query_win32_error）、entry_exited_job_running 和 output_drained。入口可能已 exited:7，但 Job 仍 running、active_process_count:1，此时 status 仍 running，表示辅助进程还在运行。Job empty 且输出排空后才完成；真实退出码 259 通过进程句柄等待状态识别，不当作仍在运行。
+
+查询依据 [GetExitCodeProcess](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getexitcodeprocess) 与 [QueryInformationJobObject](https://learn.microsoft.com/en-us/windows/win32/api/jobapi2/nf-jobapi2-queryinformationjobobject)。此处 Job 活动数包含仍运行的入口进程，状态为查询时的快照。
