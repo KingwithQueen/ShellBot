@@ -152,3 +152,9 @@ window_focus 的已授权执行路径返回 focus_diagnostic，包含 caller、t
 ## 1.0.10 RDP 与观察租约
 
 `desktop_lease` acquire 新增 Windows `access:observe`，允许暂停时截图/列窗口，不安装输入钩子、不允许任何桌面修改；默认 control 保持旧行为，renew 不可升级权限。会话诊断和 mstsc 最小化客户端工具见 [RDP 说明](REMOTE_DESKTOP.md)。被控端不能代替连接端修改 mstsc 渲染行为，active RDP 本身不会被排除。
+
+## 1.1.2 窗口恢复和前台确认
+
+window_list 现在返回最小化应用窗口及 `minimized`。window_focus 可选 restore:true（默认）、wait_ms:1500（默认，0～3000 ms），在有效控制租约和新观察下先异步恢复，再核实目标身份并请求激活。读取观察租约仍不能恢复或聚焦。恢复/激活后的旧观察失效，继续键鼠操作前必须刷新。
+
+回执中的 foreground_observed 确认实际前台，screenshot_verified:false 表示未以截图验证；focus_diagnostic 分开显示恢复请求、SetForegroundWindow 返回值、前台前后状态和经过时间。RDP 最小化导致像素不可用并不等于无法创建普通 GUI 进程；实际输入仍要求可操作的输入桌面。具体流程与已知限制见 [远程桌面说明](REMOTE_DESKTOP.md)。

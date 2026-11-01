@@ -18,6 +18,12 @@ yyjson_mut_val *sb_tasks_call(sb_host *host,const char *actor,const char *name,y
         sb_fail(&error,"Host instance changed or is missing; refresh host_capabilities and review the prior task before submitting another request.");goto done;
     }
     if(!strcmp(name,"task_start")) {
+#ifndef SB_POSIX
+        yyjson_val *mode_value=yyjson_obj_get(args,"launch_mode");const char *mode=sb_string(mode_value);
+        if(mode_value && (!mode || (strcmp(mode,"background") && strcmp(mode,"gui")))){sb_fail(&error,"launch_mode must be background or gui.");goto done;}
+        bool gui=mode && !strcmp(mode,"gui");
+        if(gui && host->config.execution_profile!=SB_EXEC_USER){sb_fail(&error,"GUI launch requires ordinary current_user execution; no elevated or restricted fallback.");goto done;}
+#endif
         workspace_id=sb_string(yyjson_obj_get(args,"workspace_id"));
         const char *path=sb_string(yyjson_obj_get(args,"path")),*exe=sb_string(yyjson_obj_get(args,"executable")),*key=sb_string(yyjson_obj_get(args,"request_key"));
         yyjson_val *argv=yyjson_obj_get(args,"argv"),*timeout_value=yyjson_obj_get(args,"timeout_ms"); uint64_t timeout=host->config.limits.task_timeout_ms < 300000 ? host->config.limits.task_timeout_ms : 300000;
@@ -46,6 +52,10 @@ yyjson_mut_val *sb_tasks_call(sb_host *host,const char *actor,const char *name,y
         yyjson_mut_obj_add_strcpy(request,parameters,"cwd",cwd);
         yyjson_mut_obj_add_strcpy(request,parameters,"workspace_id",workspace_id);
         yyjson_mut_obj_add_uint(request,parameters,"timeout_ms",timeout);
+#ifndef SB_POSIX
+        /* Omitted/background keep the existing digest. GUI is a different operation. */
+        if(gui)yyjson_mut_obj_add_str(request,parameters,"launch_mode","gui");
+#endif
         canonical=yyjson_mut_val_write(parameters,0,NULL);
         if(!canonical || !sb_platform_sha256(canonical,strlen(canonical),request_hash,&error)) goto done;
 #ifdef SB_POSIX

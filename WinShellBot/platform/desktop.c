@@ -24,7 +24,7 @@
 #define PNG_LIMIT SB_IMAGE_LIMIT
 #define CLIPBOARD_BYTES (1024u*1024u)
 typedef struct { RECT rect; wchar_t name[32]; bool primary; unsigned dpi; } monitor;
-typedef struct { char id[33]; HWND hwnd; DWORD pid,tid; FILETIME created; RECT rect; } window_ref;
+typedef struct { char id[33]; HWND hwnd; DWORD pid,tid; FILETIME created; RECT rect; bool minimized; } window_ref;
 typedef struct {
     char id[33],layout[65]; uint64_t at; HWND foreground; DWORD foreground_pid;
     LONG input_epoch; RECT foreground_rect; RECT captured; bool foreground_rect_known,capture,invalidated;
@@ -275,7 +275,7 @@ static bool arguments(sb_desktop *desktop,const char *name,yyjson_val *args) {
     if (tool==15) { allowed[count++]="action"; allowed[count++]="duration_seconds";allowed[count++]="access"; }
     if (tool>=19 && tool<=24) allowed[count++]="screen_id";
     if (tool==17) { const char *fields[]={"monitor_id","max_dimension","x","y","width","height"}; for (unsigned i=0;i<6;++i) allowed[count++]=fields[i]; }
-    if (tool==19) allowed[count++]="window_id";
+    if (tool==19) {allowed[count++]="window_id";allowed[count++]="restore";allowed[count++]="wait_ms";}
     if (tool>=20 && tool<=22) { allowed[count++]="x"; allowed[count++]="y"; }
     if (tool==20 || tool==21) allowed[count++]="button";
     if (tool==20) allowed[count++]="clicks";
@@ -285,6 +285,7 @@ static bool arguments(sb_desktop *desktop,const char *name,yyjson_val *args) {
     if (tool==24) {allowed[count++]="keys";allowed[count++]="key";allowed[count++]="modifiers";}
     if (tool==25 || tool==26) allowed[count++]="expected_sequence";
     if (!sb_config_keys(args,allowed,count)) return false;
+    if(tool==19){yyjson_val *restore=yyjson_obj_get(args,"restore");if((restore && !yyjson_is_bool(restore)) || !integer(args,"wait_ms",1500,0,3000,&n))return false;}
     const char *action=sb_string(yyjson_obj_get(args,"action")),*lease=sb_string(yyjson_obj_get(args,"lease_id")),*key=sb_string(yyjson_obj_get(args,"request_key"));
     bool cleanup=tool==15 && action && (!strcmp(action,"status") || !strcmp(action,"release"));
     if (tool==15 && (!action || (strcmp(action,"acquire") && strcmp(action,"renew") && strcmp(action,"release") && strcmp(action,"status")))) return false;
@@ -335,7 +336,7 @@ static bool owns(sb_desktop *desktop,const char *actor,const char *lease) {
 }
 static bool window_identity(window_ref *reference) {
     DWORD pid=0; DWORD tid=GetWindowThreadProcessId(reference->hwnd,&pid); RECT rect;
-    if (!IsWindowVisible(reference->hwnd) || IsIconic(reference->hwnd) || pid!=reference->pid || tid!=reference->tid ||
+    if (!IsWindowVisible(reference->hwnd) || (IsIconic(reference->hwnd)!=FALSE)!=reference->minimized || pid!=reference->pid || tid!=reference->tid ||
         !GetWindowRect(reference->hwnd,&rect) || !EqualRect(&rect,&reference->rect)) return false;
     HANDLE process=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,pid); FILETIME created={0},exit,kernel,user;
     bool ok=process && GetProcessTimes(process,&created,&exit,&kernel,&user) && !memcmp(&created,&reference->created,sizeof(created));
@@ -400,16 +401,17 @@ static BOOL CALLBACK window_visit(HWND hwnd,LPARAM parameter) {
     if (!IsWindowVisible(hwnd) || hwnd==context->desktop->window) return TRUE;
     DWORD pid=0; DWORD tid=GetWindowThreadProcessId(hwnd,&pid),session=0;
     RECT rect; if (!pid || !ProcessIdToSessionId(pid,&session) || session!=context->desktop->session ||
-        !GetWindowRect(hwnd,&rect) || rect.right<=rect.left || rect.bottom<=rect.top || IsIconic(hwnd)) return TRUE;
+        !GetWindowRect(hwnd,&rect) || rect.right<=rect.left || rect.bottom<=rect.top) return TRUE;
     if (view->window_count>=WINDOWS_LIMIT) { context->overflow=true; return FALSE; }
     HANDLE process=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,pid); FILETIME created={0},exit,kernel,user;
     bool ok=process && GetProcessTimes(process,&created,&exit,&kernel,&user); if (process) CloseHandle(process); if (!ok) return TRUE;
     window_ref *item=&view->windows[view->window_count]; memset(item,0,sizeof(*item));
-    if (!nonce(item->id)) return FALSE; item->hwnd=hwnd; item->pid=pid; item->tid=tid; item->created=created; item->rect=rect; ++view->window_count;
+    if (!nonce(item->id)) return FALSE; item->hwnd=hwnd; item->pid=pid; item->tid=tid; item->created=created; item->rect=rect;item->minimized=IsIconic(hwnd)!=FALSE; ++view->window_count;
     wchar_t title[513]={0}; GetWindowTextW(hwnd,title,513); char *text=utf8(title);
     yyjson_mut_val *value=object(context->doc); yyjson_mut_obj_add_str(context->doc,value,"window_id",item->id);
     yyjson_mut_obj_add_uint(context->doc,value,"pid",pid); yyjson_mut_obj_add_strcpy(context->doc,value,"title",text?text:""); free(text);
     yyjson_mut_obj_add_bool(context->doc,value,"foreground",hwnd==view->foreground);
+    yyjson_mut_obj_add_bool(context->doc,value,"minimized",item->minimized);
     yyjson_mut_obj_add_bool(context->doc,value,"input_permitted",input_permitted(context->desktop,hwnd));
     rect_json(context->doc,value,"bounds",&rect); yyjson_mut_arr_add_val(context->windows,value); return TRUE;
 }
@@ -576,7 +578,7 @@ static const char *coordinate_guard(observation *view,int x,int y) {
         (view->capture && !PtInRect(&view->captured,point))) return "coordinate_outside_observed_foreground_target";
     return NULL;
 }
-typedef struct { bool attempted; BOOL returned; HWND before; } focus_attempt;
+typedef struct { bool attempted,restore_attempted; BOOL returned,restore_returned; HWND before; uint64_t elapsed; } focus_attempt;
 static yyjson_mut_val *focus_identity(yyjson_mut_doc *doc,HWND hwnd,DWORD pid,DWORD tid) {
     yyjson_mut_val *value=object(doc);DWORD session=0;
     if(hwnd)yyjson_mut_obj_add_uint(doc,value,"hwnd",(uintptr_t)hwnd);else yyjson_mut_obj_add_null(doc,value,"hwnd");
@@ -605,6 +607,9 @@ static void focus_report(yyjson_mut_doc *doc,yyjson_mut_val *data,window_ref *ta
     if(target){yyjson_mut_obj_add_strcpy(doc,value,"target_window_id",target->id);yyjson_mut_obj_add_uint(doc,value,"observed_target_pid",target->pid);yyjson_mut_obj_add_uint(doc,value,"observed_target_tid",target->tid);}
     yyjson_mut_obj_add_val(doc,value,"foreground_before",focus_window_identity(doc,attempt->before));
     yyjson_mut_obj_add_val(doc,value,"foreground_after",focus_window_identity(doc,GetForegroundWindow()));
+    yyjson_mut_obj_add_bool(doc,value,"restore_attempted",attempt->restore_attempted);
+    if(attempt->restore_attempted)yyjson_mut_obj_add_bool(doc,value,"restore_request_queued",attempt->restore_returned!=0);
+    yyjson_mut_obj_add_uint(doc,value,"elapsed_ms",attempt->elapsed);
     yyjson_mut_obj_add_str(doc,value,"api","SetForegroundWindow");yyjson_mut_obj_add_bool(doc,value,"api_attempted",attempt->attempted);
     if(attempt->attempted)yyjson_mut_obj_add_int(doc,value,"api_return_value",attempt->returned);else yyjson_mut_obj_add_null(doc,value,"api_return_value");
     yyjson_mut_obj_add_null(doc,value,"api_win32_error");yyjson_mut_obj_add_bool(doc,value,"api_win32_error_authoritative",false);
@@ -629,7 +634,7 @@ static const char *input_action_inner(sb_desktop *desktop,const char *name,yyjso
                 DWORD pid=0,tid=GetWindowThreadProcessId(target->hwnd,&pid);RECT rect={0};bool got=GetWindowRect(target->hwnd,&rect)!=0;
                 change_uint(doc,changes,"window.exists",1,IsWindow(target->hwnd)!=0,target);
                 change_uint(doc,changes,"window.pid",target->pid,pid,target);change_uint(doc,changes,"window.thread_id",target->tid,tid,target);
-                change_uint(doc,changes,"window.visible",1,IsWindowVisible(target->hwnd)!=0,target);change_uint(doc,changes,"window.minimized",0,IsIconic(target->hwnd)!=0,target);
+                change_uint(doc,changes,"window.visible",1,IsWindowVisible(target->hwnd)!=0,target);change_uint(doc,changes,"window.minimized",target->minimized,IsIconic(target->hwnd)!=0,target);
                 if(got)change_rect(doc,changes,"window.bounds",&target->rect,&rect,target);
                 else {yyjson_mut_val *v=change(doc,changes,"window.bounds",target);rect_json(doc,v,"expected",&target->rect);yyjson_mut_obj_add_null(doc,v,"actual");}
                 FILETIME created={0},exit,kernel,user;HANDLE process=pid?OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,pid):NULL;
@@ -643,14 +648,35 @@ static const char *input_action_inner(sb_desktop *desktop,const char *name,yyjso
             yyjson_mut_obj_add_str(doc,data,"code","stale_window_id");yyjson_mut_obj_add_val(doc,data,"changes",changes);return "stale_window_id";
         }
         if (!input_permitted(desktop,target->hwnd)) return "input_not_permitted: higher integrity or unknown window owner";
-        if (target->hwnd!=GetForegroundWindow()) {focus->attempted=true;focus->returned=SetForegroundWindow(target->hwnd);if(!focus->returned)return "focus_refused_by_windows";}
-        uint64_t until=sb_platform_millis()+250;
-        while (target->hwnd!=GetForegroundWindow() && sb_platform_millis()<until) {
-            Sleep(5); pump();
-            if (!interactive(desktop) || !desktop->leased || sb_platform_millis()>=desktop->deadline ||
-                WaitForSingleObject(desktop->pause,0)==WAIT_OBJECT_0 || view->input_epoch!=InterlockedCompareExchange(desktop->epoch,0,0)) return "focus_interrupted: obtain a fresh observation";
+        int wait=1500;integer(args,"wait_ms",1500,0,3000,&wait);uint64_t started=sb_platform_millis(),until=started+(unsigned)wait;
+        bool restore=!yyjson_is_false(yyjson_obj_get(args,"restore"));char observed_id[33];strcpy(observed_id,view->id);
+        const char *lease=sb_string(yyjson_obj_get(args,"lease_id"));
+        if(IsIconic(target->hwnd)){
+            if(!restore)return "target_minimized: restore is disabled";
+            focus->restore_attempted=true;focus->restore_returned=ShowWindowAsync(target->hwnd,SW_RESTORE);
         }
-        if (target->hwnd!=GetForegroundWindow()) return "focus_not_observed";
+        for(;;){
+            pump();
+            if (!interactive(desktop) || !desktop->leased || desktop->observation_lease || view->invalidated || strcmp(observed_id,view->id) ||
+                (lease && strcmp(lease,desktop->lease_id)) || sb_platform_millis()>=desktop->deadline ||
+                WaitForSingleObject(desktop->pause,0)==WAIT_OBJECT_0 || view->input_epoch!=InterlockedCompareExchange(desktop->epoch,0,0))return "focus_interrupted: obtain a fresh observation";
+            DWORD pid=0,tid=GetWindowThreadProcessId(target->hwnd,&pid);FILETIME created={0},exit,kernel,user;
+            HANDLE process=pid?OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,pid):NULL;
+            bool same=process && GetProcessTimes(process,&created,&exit,&kernel,&user) && !memcmp(&created,&target->created,sizeof(created));if(process)CloseHandle(process);
+            if(!same || pid!=target->pid || tid!=target->tid || !IsWindowVisible(target->hwnd) || !input_permitted(desktop,target->hwnd))return "focus_target_changed: obtain a fresh observation";
+            topology monitors;char hash[65];if(!layout(&monitors,hash) || strcmp(hash,view->layout))return "focus_layout_changed: obtain a fresh observation";
+            if(!IsIconic(target->hwnd)){
+                if(target->hwnd==GetForegroundWindow())break;
+                if(!focus->attempted){focus->attempted=true;focus->returned=SetForegroundWindow(target->hwnd);}
+                if(target->hwnd==GetForegroundWindow())break;
+            }
+            if(sb_platform_millis()>=until){focus->elapsed=sb_platform_millis()-started;
+                return IsIconic(target->hwnd)?"window_restore_not_observed":focus->attempted && !focus->returned?"focus_refused_by_windows":"focus_not_observed";}
+            Sleep(10);
+        }
+        focus->elapsed=sb_platform_millis()-started;
+        yyjson_mut_obj_add_bool(doc,data,"window_visible",true);yyjson_mut_obj_add_bool(doc,data,"window_minimized",false);
+        yyjson_mut_obj_add_bool(doc,data,"screenshot_verified",false);
         yyjson_mut_obj_add_bool(doc,data,"foreground_observed",true);
     } else if (!strcmp(name,"desktop_type")) {
         wchar_t *text=wide(sb_string(yyjson_obj_get(args,"text"))); size_t length=text ? wcslen(text) : 0;
@@ -711,8 +737,8 @@ static const char *input_action(sb_desktop *desktop,const char *name,yyjson_val 
     bool focusing=!strcmp(name,"window_focus");focus_attempt attempt={0};window_ref *target=NULL;
     if(focusing){attempt.before=GetForegroundWindow();const char *id=sb_string(yyjson_obj_get(args,"window_id"));
         for(unsigned i=0;view && id && i<view->window_count;++i)if(!strcmp(view->windows[i].id,id))target=&view->windows[i];}
-    const char *error=input_action_inner(desktop,name,args,view,doc,data,&attempt);
-    if(focusing)focus_report(doc,data,target,&attempt);return error;
+    uint64_t started=sb_platform_millis();const char *error=input_action_inner(desktop,name,args,view,doc,data,&attempt);attempt.elapsed=sb_platform_millis()-started;
+    if(focusing){focus_report(doc,data,target,&attempt);if(attempt.attempted || attempt.restore_attempted)invalidate(desktop);}return error;
 }
 static const char *clipboard_action(sb_desktop *desktop,const char *name,yyjson_val *args,yyjson_mut_doc *doc,yyjson_mut_val *data) {
     if(desktop->observation_lease && !strcmp(name,"clipboard_write"))return "desktop_observation_lease_cannot_write_clipboard";
@@ -862,6 +888,7 @@ static char *capabilities(sb_desktop *desktop) {
     yyjson_mut_obj_add_uint(doc,data,"observation_ttl_ms",OBSERVATION_MS); yyjson_mut_obj_add_uint(doc,data,"max_observations",OBSERVATIONS);
     yyjson_mut_obj_add_uint(doc,data,"max_png_bytes",PNG_LIMIT); yyjson_mut_obj_add_uint(doc,data,"max_image_dimension",SB_IMAGE_DIMENSION);
     yyjson_mut_obj_add_uint(doc,data,"max_type_utf16_units",512); yyjson_mut_obj_add_uint(doc,data,"max_clipboard_bytes",CLIPBOARD_BYTES);
+    yyjson_mut_obj_add_bool(doc,data,"minimized_windows_listed",true);yyjson_mut_obj_add_bool(doc,data,"window_restore_supported",true);yyjson_mut_obj_add_uint(doc,data,"max_focus_wait_ms",3000);
     yyjson_mut_obj_add_bool(doc,data,"explicit_key_chords",true);yyjson_mut_obj_add_uint(doc,data,"max_key_modifiers",3);
     yyjson_mut_obj_add_bool(doc,data,"key_hold_supported",false);
     char key[24]; snprintf(key,sizeof(key),"Ctrl+Alt+F%u",desktop->policy.emergency_function_key); yyjson_mut_obj_add_strcpy(doc,data,"emergency_hotkey",key);

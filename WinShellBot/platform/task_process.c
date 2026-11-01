@@ -1,5 +1,6 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <wtsapi32.h>
 #include "sb.h"
 #include "execution.h"
 #include "task_process.h"
@@ -26,12 +27,20 @@ typedef struct task {
     task_input inputs[INPUT_RECORDS]; size_t input_count;
     sb_win_tasks *owner;
     char *command;
-    bool durable_reserved, durable_warning, archived;
+    bool durable_reserved, durable_warning, archived, gui, foreground_granted;
     struct task *retired_next;
 } task;
 typedef struct { char id[33],key[65],hash[65],actor[64]; char *receipt; } archived_task;
 struct sb_win_tasks { SRWLOCK lock; task *items[TASK_RECORDS],*retired; archived_task archives[ARCHIVE_RECORDS]; size_t archive_count; HANDLE stop, monitor, worker; sb_execution_profile profile; bool elevated; sb_resource_limits limits; sb_win_sandbox *sandbox; sb_store *store; sb_audit *audit; };
 typedef struct { task *item; unsigned stream; } reader_context;
+static bool gui_desktop(void){
+    wchar_t station[64]={0},desktop[64]={0};DWORD size=0,session=0;LPWSTR state=NULL;
+    bool active=ProcessIdToSessionId(GetCurrentProcessId(),&session) && WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE,session,WTSConnectState,&state,&size) && size>=sizeof(WTS_CONNECTSTATE_CLASS) && *(WTS_CONNECTSTATE_CLASS*)state==WTSActive;WTSFreeMemory(state);
+    bool ok=active && GetUserObjectInformationW(GetProcessWindowStation(),UOI_NAME,station,sizeof(station),&size) && !_wcsicmp(station,L"WinSta0") &&
+        GetUserObjectInformationW(GetThreadDesktop(GetCurrentThreadId()),UOI_NAME,desktop,sizeof(desktop),&size) && !_wcsicmp(desktop,L"Default");
+    /* Starting an ordinary GUI on Default does not require input-desktop or pixel access. */
+    return ok;
+}
 static yyjson_mut_val *snapshot(sb_win_tasks *tasks, task *item, yyjson_mut_doc *doc);
 static bool task_event(task *item, const char *event, const char *status, bool output) {
     sb_win_tasks *tasks=item->owner;
@@ -364,6 +373,10 @@ static yyjson_mut_val *snapshot(sb_win_tasks *tasks, task *item, yyjson_mut_doc 
     yyjson_mut_obj_add_bool(doc, result, "elevated", tasks->elevated);
     if(tasks->sandbox){yyjson_mut_obj_add_bool(doc,result,"appcontainer",true);yyjson_mut_obj_add_bool(doc,result,"less_privileged_appcontainer",true);yyjson_mut_obj_add_bool(doc,result,"child_processes_allowed",false);}
     yyjson_mut_obj_add_uint(doc, result, "process_id", item->pid);
+    yyjson_mut_obj_add_str(doc,result,"launch_mode",item->gui?"gui":"background");
+    if(item->gui){DWORD session=0;ProcessIdToSessionId(GetCurrentProcessId(),&session);yyjson_mut_obj_add_uint(doc,result,"session_id",session);
+        yyjson_mut_obj_add_str(doc,result,"desktop","WinSta0/Default");yyjson_mut_obj_add_bool(doc,result,"foreground_permission_granted",item->foreground_granted);
+        yyjson_mut_obj_add_bool(doc,result,"process_created",true);yyjson_mut_obj_add_str(doc,result,"window_verification","Use fresh window_list then window_focus; single-instance applications may reuse an existing process.");}
     /* 入口退出不代表整个 Job 已结束；用句柄等待状态区分真实退出码 259。 */
     yyjson_mut_val *entry=yyjson_mut_obj(doc),*job=yyjson_mut_obj(doc);DWORD wait=WaitForSingleObject(item->process,0),exit=0,entry_error=0;
     bool exited=wait==WAIT_OBJECT_0,exit_known=false;
@@ -395,6 +408,9 @@ static yyjson_mut_val *snapshot(sb_win_tasks *tasks, task *item, yyjson_mut_doc 
 }
 static char *start(sb_win_tasks *tasks, yyjson_val *args) {
     if (tasks->store && (!sb_store_healthy(tasks->store) || !sb_audit_healthy(tasks->audit))) return fail("Persistent state or audit unavailable; task was not started.");
+    yyjson_val *mode_value=yyjson_obj_get(args,"launch_mode");const char *launch=sb_string(mode_value);
+    if(mode_value && (!launch || (strcmp(launch,"background") && strcmp(launch,"gui"))))return fail("Invalid normalized launch_mode.");
+    bool gui=launch && !strcmp(launch,"gui");
     const char *key = sb_string(yyjson_obj_get(args, "request_key")), *actor = sb_string(yyjson_obj_get(args, "actor"));
     const char *hash = sb_string(yyjson_obj_get(args, "request_sha256"));
     for(size_t i=0;key && actor && hash && i<tasks->archive_count;++i){
@@ -441,9 +457,10 @@ static char *start(sb_win_tasks *tasks, yyjson_val *args) {
     }
     if(command_length>=SB_WINDOWS_COMMAND_CAP){free(exe);free(directory);free(line);free(env);return limit_fail("command_line",command_length,SB_WINDOWS_COMMAND_CAP-1,"UTF-16 units (quoted executable and argv)");}
     if (!valid) { free(exe); free(directory); free(line); free(env); return fail("Executable must be an absolute local .exe path; the quoted command line must fit 32766 UTF-16 units. Use fs_write/artifact_upload plus a script path, or task_input for large source text."); }
+    if(gui && (tasks->profile!=SB_EXEC_USER || tasks->sandbox || !gui_desktop())){free(exe);free(directory);free(line);free(env);return fail("gui_desktop_unavailable: ordinary interactive WinSta0/Default session required; no cross-session fallback.");}
     task *item = calloc(1,sizeof(*item));
     if (!item) { free(exe); free(directory); free(line); free(env); return fail("Cannot allocate task."); }
-    InitializeSRWLock(&item->lock); strcpy(item->key,key); strcpy(item->hash,hash); strcpy(item->actor,actor); item->timeout=timeout; item->owner=tasks;
+    InitializeSRWLock(&item->lock);item->gui=gui; strcpy(item->key,key); strcpy(item->hash,hash); strcpy(item->actor,actor); item->timeout=timeout; item->owner=tasks;
     item->command=tasks->store ? yyjson_val_write(args,0,NULL) : NULL;
     unsigned char random[16]; sb_error error={0}; bool ok = sb_platform_random(random,sizeof(random),&error);
     for(size_t i=0;ok && i<16;++i) snprintf(item->id+i*2,3,"%02x",random[i]);
@@ -465,6 +482,7 @@ static char *start(sb_win_tasks *tasks, yyjson_val *args) {
     ok=ok && initialized && UpdateProcThreadAttribute(attributes,0,PROC_THREAD_ATTRIBUTE_HANDLE_LIST,inherited,sizeof(inherited),NULL,NULL);
     if(ok && tasks->sandbox)ok=sb_win_sandbox_attributes(tasks->sandbox,attributes);
     STARTUPINFOEXW startup={0}; startup.StartupInfo.cb=sizeof(startup); startup.StartupInfo.dwFlags=STARTF_USESTDHANDLES; startup.StartupInfo.hStdInput=child_input; startup.StartupInfo.hStdOutput=child_output[0]; startup.StartupInfo.hStdError=child_output[1]; startup.lpAttributeList=attributes;
+    if(gui){startup.StartupInfo.lpDesktop=L"winsta0\\default";startup.StartupInfo.dwFlags|=STARTF_USESHOWWINDOW;startup.StartupInfo.wShowWindow=SW_SHOWNORMAL;}
     PROCESS_INFORMATION process={0};
     unsigned phase=1;
     DWORD flags=CREATE_SUSPENDED|(tasks->sandbox?DETACHED_PROCESS:CREATE_NO_WINDOW)|CREATE_UNICODE_ENVIRONMENT|EXTENDED_STARTUPINFO_PRESENT;
@@ -485,6 +503,7 @@ static char *start(sb_win_tasks *tasks, yyjson_val *args) {
         ok=item->command && task_event(item,"task_start_intent","starting",false);
         if (ok) { item->durable_reserved=true; tasks->items[slot]=item; }
     }
+    if(ok && gui)item->foreground_granted=AllowSetForegroundWindow(process.dwProcessId)!=FALSE;
     if(ok) ok=ResumeThread(process.hThread)!=(DWORD)-1;
     if(ok && tasks->store) { AcquireSRWLockExclusive(&item->lock); ok=task_event(item,"task_started","running",false); ReleaseSRWLockExclusive(&item->lock); }
     if(process.hThread) CloseHandle(process.hThread);

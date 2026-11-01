@@ -75,6 +75,10 @@ static yyjson_doc *tool_schema(const tool_definition *definition) {
     const char *mode_schema="{\"type\":\"string\",\"enum\":[\"full\",\"compact\"],\"default\":\"full\",\"description\":\"compact retains structuredContent and media but replaces duplicated JSON text content with one summary; does not change authorization or request-key identity.\"}";
     yyjson_doc *mode=yyjson_read(mode_schema,strlen(mode_schema),0);
     yyjson_mut_obj_add_val(doc,properties,"response_mode",yyjson_val_mut_copy(doc,yyjson_doc_get_root(mode)));yyjson_doc_free(mode);
+    if(!strcmp(name,"task_start")){
+        const char *json="{\"type\":\"string\",\"enum\":[\"background\",\"gui\"],\"default\":\"background\",\"description\":\"gui launches into the current ordinary interactive WinSta0/Default session; approval, Job lifetime and timeout still apply. Verify window_list then window_focus separately; process creation does not prove visibility, focus or capture. No administrator/restricted/cross-session GUI.\"}";
+        yyjson_doc *launch=yyjson_read(json,strlen(json),0);yyjson_mut_obj_add_val(doc,properties,"launch_mode",yyjson_val_mut_copy(doc,yyjson_doc_get_root(launch)));yyjson_doc_free(launch);
+    }
     if (!strcmp(name,"task_output")) {
         yyjson_mut_val *encoding=yyjson_mut_obj(doc);yyjson_mut_obj_add_str(doc,encoding,"type","string");
         yyjson_mut_obj_add_str(doc,encoding,"description","Optional strict text decoding: utf-8, cp936/gbk, or a supported Windows cpNNNN. Raw bytes and next_offset remain unchanged; use text_next_offset to continue decoded text.");

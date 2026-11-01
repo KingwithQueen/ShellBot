@@ -166,3 +166,9 @@ next_offset 仍为本页原始字节终点；text_next_offset 为成功解码的
 任务 status 仍表示整个 Job 和输出读取是否结束，旧 exit_code 只在任务完成后出现。新增 entry_process（pid、state、exit_code、query_win32_error）、job（state、active_process_count、query_win32_error）、entry_exited_job_running 和 output_drained。入口可能已 exited:7，但 Job 仍 running、active_process_count:1，此时 status 仍 running，表示辅助进程还在运行。Job empty 且输出排空后才完成；真实退出码 259 通过进程句柄等待状态识别，不当作仍在运行。
 
 查询依据 [GetExitCodeProcess](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getexitcodeprocess) 与 [QueryInformationJobObject](https://learn.microsoft.com/en-us/windows/win32/api/jobapi2/nf-jobapi2-queryinformationjobobject)。此处 Job 活动数包含仍运行的入口进程，状态为查询时的快照。
+
+## 1.1.2 可见 GUI 启动
+
+Windows 普通 current_user 的 task_start 可选 `launch_mode:"gui"`。后台模式仍默认；GUI 模式在当前活动用户会话的 WinSta0/Default 请求正常显示，不需要截图成功，也不会自动切换到控制台、管理员或其他用户。它仍受相同审批、请求键、Job 和超时管理，**默认 5 分钟超时仍有效**，并非永久脱离任务的启动器。
+
+成功只表示进程已创建。使用 window_list 找到窗口；已有单实例应用可能由旧进程响应，不能只看入口 PID。window_focus 可以恢复最小化窗口并核实前台，截图另行验证。详见 [RDP 与 GUI 流程](REMOTE_DESKTOP.md#112-gui-启动与恢复)。GUI 与后台模式不同，不能用相同 request_key 切换；显式 background 与省略模式维持原任务摘要。

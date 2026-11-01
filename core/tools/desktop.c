@@ -69,6 +69,10 @@ void sb_desktop_tools_list(sb_host *host, yyjson_mut_doc *doc, yyjson_mut_val *t
 #endif
         }
         if (i==19) {
+#ifndef SB_POSIX
+            add_properties(doc,properties,"{\"restore\":{\"type\":\"boolean\",\"default\":true},\"wait_ms\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":3000,\"default\":1500}}");
+            yyjson_mut_obj_remove_str(tool,"description");yyjson_mut_obj_add_str(doc,tool,"description","Restore a minimized application window (restore:true by default), then request foreground activation and verify it within wait_ms (0..3000, default 1500). Use window_id/screen_id from a fresh window_list, caller control lease and new request_key. Restoring may change geometry: refresh before any coordinates/input. Does not require a screenshot or prove pixels are capturable; Windows can refuse activation. No synthesized Alt, input-queue attachment, cross-session or elevated fallback. Do not automatically replay after uncertain results.");
+#endif
             add_properties(doc,properties,"{\"window_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32}}"); yyjson_mut_arr_add_str(doc,required,"window_id");
         }
         if (i>=20 && i<=22) {
