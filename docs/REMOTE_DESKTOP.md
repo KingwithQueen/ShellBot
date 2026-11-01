@@ -82,3 +82,7 @@ RDP 客户端最小化不会一律阻止 GUI 进程创建。是否启动、目�
 成功回执确认 `foreground_observed:true`，并明确 `screenshot_verified:false`；截图另行调用 desktop_capture。窗口能显示不能证明最小化 mstsc 时持续渲染，截图失败也不能反推没有成功启动 GUI。
 
 真实验收用相同 EXE、账户、权限和会话做两组对照：交互终端延迟启动，以及 ShellBot GUI 模式延迟启动；分别记录连接可见、mstsc 最小化期间和恢复后的 PID/窗口/前台/会话。必须记录最小化期间的 GetForegroundWindow，而不是只看重新打开 mstsc 后的画面。开发用本地 GUI 探针只在显式 --window 时显示窗口，15 秒后出现、45 秒后自动关闭并按 250 ms 记录前台，自动化模式不创建可见窗口。原生恢复/聚焦测试拦截 API，不能代替这一真实验收。
+
+## 1.1.3 元素操作
+
+UIA 提供独立于像素坐标的元素树和 pattern 动作，使用说明见 [交互工具](INTERACTIVE_TOOLS.md#windows-ui-automation)。它仍要求可用的同用户交互桌面；动作要求目标窗口已经前台，保留人工暂停和观察规则。UIA 不能替代真实 RDP 最小化验收，也不保证应用提供完整可访问性信息。

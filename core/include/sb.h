@@ -312,6 +312,9 @@ bool sb_decode(const unsigned char *data, size_t length, bool end_of_file,
                size_t *consumed, const char **detected, sb_error *error);
 yyjson_mut_val *sb_tools_list(yyjson_mut_doc *document);
 yyjson_mut_val *sb_project_tools_list(sb_host *host, yyjson_mut_doc *document);
+#ifndef SB_POSIX
+yyjson_mut_val *sb_search_ex(sb_workspace *workspace,const char *path,const char *query,bool recursive,bool content,size_t maximum,size_t per_file,size_t total_bytes,yyjson_val *options,yyjson_mut_doc *doc,sb_error *error);
+#endif
 yyjson_mut_val *sb_search(sb_workspace *workspace, const char *path, const char *query,
                          bool recursive, bool content, size_t maximum, size_t per_file,
                          size_t total_bytes, yyjson_mut_doc *document, sb_error *error);

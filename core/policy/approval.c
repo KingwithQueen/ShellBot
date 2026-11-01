@@ -91,7 +91,7 @@ static bool audit_record(sb_policy *policy, record *r, const char *event, const 
             if (desktop) {
                 yyjson_mut_obj_remove_str(saved,"content");
                 yyjson_mut_val *details=yyjson_mut_obj_get(saved,"structuredContent");
-                if (details) { yyjson_mut_obj_remove_str(details,"text"); yyjson_mut_obj_remove_str(details,"windows"); }
+                if (details) { yyjson_mut_obj_remove_str(details,"text"); yyjson_mut_obj_remove_str(details,"windows"); yyjson_mut_obj_remove_str(details,"nodes"); }
             }
 #ifndef SB_POSIX
             /* 完整响应仅供当前实例的幂等重试，历史不复制 Base64 图像或产物块。 */
@@ -117,7 +117,7 @@ static bool audit_record(sb_policy *policy, record *r, const char *event, const 
 static bool logical_read(const record *r) {
     return r->logical && ((!strncmp(r->tool,"fs_",3) && strcmp(r->tool,"fs_write") && strcmp(r->tool,"fs_patch") &&
         (!sb_file_manage_tool(r->tool) || !strcmp(r->tool,"fs_stat"))) || !strcmp(r->tool,"image_view") || sb_document_tool(r->tool) || sb_transfer_tool(r->tool) ||
-        !strcmp(r->tool,"desktop_capture") || !strcmp(r->tool,"desktop_state") || !strcmp(r->tool,"window_list") || !strcmp(r->tool,"clipboard_read"));
+        !strcmp(r->tool,"desktop_capture") || !strcmp(r->tool,"desktop_state") || !strcmp(r->tool,"window_list") || !strcmp(r->tool,"uia_tree") || !strcmp(r->tool,"clipboard_read"));
 }
 static void expire(sb_policy *policy, record *r) {
     if ((r->status == PENDING || r->status == APPROVED || (r->status==COMPLETED && logical_read(r))) && sb_platform_millis() >= r->deadline) {

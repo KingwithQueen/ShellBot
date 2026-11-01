@@ -32,3 +32,9 @@ M13 收尾补丁：CivetWeb Windows 关闭连接前先有界接收对端结束�
 Linux/macOS x86_64 use the separate PDFium 157.0.8086.0 no-V8/no-XFA artifacts under `pdfium/linux-x64` and `pdfium/mac-x64`. Each folder retains its publisher provenance (bblanchon, independently built from upstream PDFium), archive SHA-256, library SHA-256, build arguments and complete license set. The shared public headers match both publisher archives. CMake and the runtime verify fixed library hashes; Windows artifacts are unchanged.
 
 `stb/stb_image.h` is pinned to nothings/stb commit `a7d4c2175630e1ea5b6f8dd00ab96fed0b97b96d`, with exact hashes in `stb/PROVENANCE.json` and the upstream dual MIT/public-domain license. POSIX builds enable only memory PNG/JPEG decoding. System Expat (MIT), zlib, and Linux Pango/Cairo or Mac CoreText provide bounded XML parsing and text rasterization. These system dependencies are not redistributed here. See [media tools](../docs/POSIX_MEDIA.md).
+
+## Windows PCRE2 模式搜索（1.1.3）
+
+PCRE2 固定为官方 10.49，源码发布摘要和构建选择保存在 [provenance.json](pcre2/provenance.json)。下载源为 PCRE2Project 官方 GitHub release，摘要与发布资产 SHA-256 匹配。保留实际使用的 C 源、头文件、上游构建说明、[LICENCE.md](pcre2/LICENCE.md)、COPYING 与 AUTHORS.md；BSD-3-Clause WITH PCRE2-exception 等完整声明随正式包分发。
+
+Windows MSBuild 单独构建静态 8 位 Unicode 库，无 JIT、无额外运行 DLL。config.h 由上游 generic 配置启用 SUPPORT_PCRE2_8/SUPPORT_UNICODE，pcre2.h 和默认字符表由上游模板复制；pcre2.vcxproj 为本项目构建入口。查询使用 UTF-8/UCP 和有界匹配/编译，不运行 shell 或外部搜索器。Mac/Linux 暂不接入此依赖。ConPTY 与 UIA 使用 Windows 系统 API，不分发新的系统组件。

@@ -5,6 +5,7 @@
 #include "execution.h"
 #include "task_process.h"
 #include "sandbox.h"
+#include "conpty.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -15,11 +16,12 @@
 #define ARCHIVE_RECORDS 4096
 #define OUTPUT_CAP 262144u
 #define INPUT_RECORDS 1024
-typedef struct { char key[65], hash[65]; char *data; DWORD length; bool eof, sent, delivered; } task_input;
+typedef struct { char key[65], hash[65]; char *data; DWORD length; SHORT columns,rows; HRESULT resize_hresult; bool eof, sent, delivered; } task_input;
 typedef struct task {
-    SRWLOCK lock;
+    SRWLOCK lock,pty_lock;
     char id[33], key[65], hash[65], actor[64];
-    HANDLE job, process, input, output[2], readers[2], writer, input_event;
+    HANDLE job, process, input, output[2], readers[2], writer, input_event,pty_closer;
+    HPCON pty;SHORT columns,rows;bool pty_closed;
     unsigned char *bytes[2]; size_t lengths[2], capacities[2], output_cap;
     bool output_done[2], input_closed, input_failed, finished;
     DWORD pid, exit_code; uint64_t started, timeout;
@@ -41,6 +43,7 @@ static bool gui_desktop(void){
     /* Starting an ordinary GUI on Default does not require input-desktop or pixel access. */
     return ok;
 }
+bool sb_win_tasks_terminal_available(void){return sb_pty_available();}
 static yyjson_mut_val *snapshot(sb_win_tasks *tasks, task *item, yyjson_mut_doc *doc);
 static bool task_event(task *item, const char *event, const char *status, bool output) {
     sb_win_tasks *tasks=item->owner;
@@ -57,6 +60,7 @@ static bool task_event(task *item, const char *event, const char *status, bool o
             task_input *input=&item->inputs[i]; yyjson_mut_val *entry=yyjson_mut_obj(doc);
             yyjson_mut_obj_add_str(doc,entry,"input_key",input->key); yyjson_mut_obj_add_str(doc,entry,"sha256",input->hash);
             yyjson_mut_obj_add_bool(doc,entry,"eof",input->eof); yyjson_mut_obj_add_uint(doc,entry,"bytes",input->length);
+            if(input->columns){yyjson_mut_obj_add_uint(doc,entry,"terminal_columns",(unsigned)input->columns);yyjson_mut_obj_add_uint(doc,entry,"terminal_rows",(unsigned)input->rows);}
             yyjson_mut_obj_add_str(doc,entry,"status",input->sent ? input->delivered ? "delivered" : "failed" : "queued"); yyjson_mut_arr_add_val(inputs,entry);
         }
         yyjson_mut_obj_add_val(doc,body,"input_receipts",inputs);
@@ -226,6 +230,7 @@ static DWORD WINAPI read_output(void *parameter) {
     }
     AcquireSRWLockExclusive(&item->lock); item->output_done[stream] = true; ReleaseSRWLockExclusive(&item->lock); return 0;
 }
+static DWORD WINAPI close_terminal(void *parameter){task *item=parameter;AcquireSRWLockExclusive(&item->pty_lock);if(!item->pty_closed){item->pty_closed=true;sb_pty_close(item->pty);}ReleaseSRWLockExclusive(&item->pty_lock);return 0;}
 static DWORD WINAPI write_input(void *parameter) {
     task *item = parameter; size_t next = 0;
     for (;;) {
@@ -240,9 +245,12 @@ static DWORD WINAPI write_input(void *parameter) {
         bool recorded=task_event(item,"task_input_started","running",false);
         ReleaseSRWLockExclusive(&item->lock);
         DWORD written = 0;
-        bool delivered = recorded && (!input->length || (WriteFile(item->input, input->data, input->length, &written, NULL) && written == input->length));
+        AcquireSRWLockShared(&item->pty_lock);HRESULT resized_hr=!input->columns?S_OK:item->pty_closed?HRESULT_FROM_WIN32(ERROR_INVALID_HANDLE):sb_pty_resize(item->pty,(COORD){input->columns,input->rows});bool resized=SUCCEEDED(resized_hr);ReleaseSRWLockShared(&item->pty_lock);
+        bool delivered = recorded && resized && (!input->length || (WriteFile(item->input, input->data, input->length, &written, NULL) && written == input->length));
         AcquireSRWLockExclusive(&item->lock);
         input->sent = true; input->delivered = delivered;
+        input->resize_hresult=resized_hr;
+        if(resized && input->columns){item->columns=input->columns;item->rows=input->rows;}
         free(input->data); input->data = NULL; ++next;
         if (!delivered) item->input_failed = true;
         task_event(item,delivered ? "task_input_delivered" : "task_input_failed","running",false);
@@ -257,8 +265,8 @@ static DWORD WINAPI write_input(void *parameter) {
 }
 static void task_free(task *item);
 static bool task_threads_done(task *item) {
-    HANDLE threads[]={item->readers[0],item->readers[1],item->writer};
-    for(unsigned i=0;i<3;++i)if(threads[i] && WaitForSingleObject(threads[i],0)!=WAIT_OBJECT_0)return false;
+    HANDLE threads[]={item->readers[0],item->readers[1],item->writer,item->pty_closer};
+    for(unsigned i=0;i<4;++i)if(threads[i] && WaitForSingleObject(threads[i],0)!=WAIT_OBJECT_0)return false;
     return true;
 }
 static DWORD WINAPI monitor_tasks(void *parameter) {
@@ -278,6 +286,8 @@ static DWORD WINAPI monitor_tasks(void *parameter) {
                 if (queried && accounting.ActiveProcesses && !item->reason && sb_platform_millis() - item->started >= item->timeout) {
                     item->reason = "timed_out"; task_event(item,"task_timed_out","running",false); TerminateJobObject(item->job, 124);
                 }
+                /* Close on a separate thread while the reader keeps draining VT output. */
+                if(item->pty && !item->pty_closer && ((queried && !accounting.ActiveProcesses) || item->reason))item->pty_closer=CreateThread(NULL,0,close_terminal,item,0,NULL);
                 if (queried && !accounting.ActiveProcesses && item->output_done[0] && item->output_done[1]) {
                     if (!GetExitCodeProcess(item->process, &item->exit_code)) { item->exit_code = 125; if (!item->reason) item->reason = "failed"; }
                     item->finished = true; SetEvent(item->input_event);
@@ -300,6 +310,11 @@ static void task_free(task *item) {
     AcquireSRWLockExclusive(&item->lock); bool unfinished=!item->finished;
     item->finished = true; if (unfinished && !item->reason) item->reason="cancelled";
     if (item->input_event) SetEvent(item->input_event); ReleaseSRWLockExclusive(&item->lock);
+    if(item->pty){
+        if(!item->readers[0]){reader_context *context=malloc(sizeof(*context));if(context){context->item=item;context->stream=0;item->readers[0]=CreateThread(NULL,0,read_output,context,0,NULL);if(!item->readers[0])free(context);}}
+        if(!item->readers[0] && item->output[0]){CloseHandle(item->output[0]);item->output[0]=NULL;}
+        if(item->pty_closer){WaitForSingleObject(item->pty_closer,INFINITE);CloseHandle(item->pty_closer);}else close_terminal(item);
+    }
     HANDLE threads[] = {item->readers[0],item->readers[1],item->writer};
     for (size_t i = 0; i < 3; ++i) if (threads[i]) { CancelSynchronousIo(threads[i]); WaitForSingleObject(threads[i], INFINITE); CloseHandle(threads[i]); }
     if (unfinished && item->durable_reserved) {
@@ -374,6 +389,8 @@ static yyjson_mut_val *snapshot(sb_win_tasks *tasks, task *item, yyjson_mut_doc 
     if(tasks->sandbox){yyjson_mut_obj_add_bool(doc,result,"appcontainer",true);yyjson_mut_obj_add_bool(doc,result,"less_privileged_appcontainer",true);yyjson_mut_obj_add_bool(doc,result,"child_processes_allowed",false);}
     yyjson_mut_obj_add_uint(doc, result, "process_id", item->pid);
     yyjson_mut_obj_add_str(doc,result,"launch_mode",item->gui?"gui":"background");
+    yyjson_mut_obj_add_str(doc,result,"io_mode",item->pty?"terminal":"pipe");
+    if(item->pty){yyjson_mut_obj_add_uint(doc,result,"terminal_columns",item->columns);yyjson_mut_obj_add_uint(doc,result,"terminal_rows",item->rows);yyjson_mut_obj_add_str(doc,result,"terminal_output","stdout is merged UTF-8 VT bytes; stderr is empty. No terminal screen emulation; query raw output and verify application state.");}
     if(item->gui){DWORD session=0;ProcessIdToSessionId(GetCurrentProcessId(),&session);yyjson_mut_obj_add_uint(doc,result,"session_id",session);
         yyjson_mut_obj_add_str(doc,result,"desktop","WinSta0/Default");yyjson_mut_obj_add_bool(doc,result,"foreground_permission_granted",item->foreground_granted);
         yyjson_mut_obj_add_bool(doc,result,"process_created",true);yyjson_mut_obj_add_str(doc,result,"window_verification","Use fresh window_list then window_focus; single-instance applications may reuse an existing process.");}
@@ -411,6 +428,8 @@ static char *start(sb_win_tasks *tasks, yyjson_val *args) {
     yyjson_val *mode_value=yyjson_obj_get(args,"launch_mode");const char *launch=sb_string(mode_value);
     if(mode_value && (!launch || (strcmp(launch,"background") && strcmp(launch,"gui"))))return fail("Invalid normalized launch_mode.");
     bool gui=launch && !strcmp(launch,"gui");
+    const char *io=sb_string(yyjson_obj_get(args,"io_mode"));bool terminal=io && !strcmp(io,"terminal");uint64_t columns=120,rows=30;
+    if(terminal && (gui || tasks->profile!=SB_EXEC_USER || tasks->sandbox || !sb_pty_available() || !sb_integer(yyjson_obj_get(args,"terminal_columns"),&columns) || !columns || columns>1000 || !sb_integer(yyjson_obj_get(args,"terminal_rows"),&rows) || !rows || rows>1000))return fail("conpty_unavailable_or_invalid_size: Windows 10 1809+, ordinary current_user, background launch and 1..1000 cells required.");
     const char *key = sb_string(yyjson_obj_get(args, "request_key")), *actor = sb_string(yyjson_obj_get(args, "actor"));
     const char *hash = sb_string(yyjson_obj_get(args, "request_sha256"));
     for(size_t i=0;key && actor && hash && i<tasks->archive_count;++i){
@@ -460,7 +479,7 @@ static char *start(sb_win_tasks *tasks, yyjson_val *args) {
     if(gui && (tasks->profile!=SB_EXEC_USER || tasks->sandbox || !gui_desktop())){free(exe);free(directory);free(line);free(env);return fail("gui_desktop_unavailable: ordinary interactive WinSta0/Default session required; no cross-session fallback.");}
     task *item = calloc(1,sizeof(*item));
     if (!item) { free(exe); free(directory); free(line); free(env); return fail("Cannot allocate task."); }
-    InitializeSRWLock(&item->lock);item->gui=gui; strcpy(item->key,key); strcpy(item->hash,hash); strcpy(item->actor,actor); item->timeout=timeout; item->owner=tasks;
+    InitializeSRWLock(&item->lock);InitializeSRWLock(&item->pty_lock);item->gui=gui; strcpy(item->key,key); strcpy(item->hash,hash); strcpy(item->actor,actor); item->timeout=timeout; item->owner=tasks;
     item->command=tasks->store ? yyjson_val_write(args,0,NULL) : NULL;
     unsigned char random[16]; sb_error error={0}; bool ok = sb_platform_random(random,sizeof(random),&error);
     for(size_t i=0;ok && i<16;++i) snprintf(item->id+i*2,3,"%02x",random[i]);
@@ -474,19 +493,21 @@ static char *start(sb_win_tasks *tasks, yyjson_val *args) {
     item->job=CreateJobObjectW(NULL,NULL); item->input_event=CreateEventW(NULL,FALSE,FALSE,NULL);
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits={0}; limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE|JOB_OBJECT_LIMIT_ACTIVE_PROCESS; limits.BasicLimitInformation.ActiveProcessLimit=tasks->sandbox?1:64;
     ok=ok && item->job && item->input_event && SetInformationJobObject(item->job,JobObjectExtendedLimitInformation,&limits,sizeof(limits));
+    HRESULT terminal_error=S_OK;if(ok && terminal){item->columns=(SHORT)columns;item->rows=(SHORT)rows;terminal_error=sb_pty_create((COORD){item->columns,item->rows},child_input,child_output[0],&item->pty);ok=SUCCEEDED(terminal_error);}
     DWORD attribute_count=tasks->sandbox?4:1;
     SIZE_T attribute_size=0; InitializeProcThreadAttributeList(NULL,attribute_count,0,&attribute_size);
     LPPROC_THREAD_ATTRIBUTE_LIST attributes=attribute_size?malloc(attribute_size):NULL;
     bool initialized=attributes && InitializeProcThreadAttributeList(attributes,attribute_count,0,&attribute_size);
     HANDLE inherited[]={child_input,child_output[0],child_output[1]};
-    ok=ok && initialized && UpdateProcThreadAttribute(attributes,0,PROC_THREAD_ATTRIBUTE_HANDLE_LIST,inherited,sizeof(inherited),NULL,NULL);
+    ok=ok && initialized && (terminal?UpdateProcThreadAttribute(attributes,0,PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,item->pty,sizeof(item->pty),NULL,NULL):UpdateProcThreadAttribute(attributes,0,PROC_THREAD_ATTRIBUTE_HANDLE_LIST,inherited,sizeof(inherited),NULL,NULL));
     if(ok && tasks->sandbox)ok=sb_win_sandbox_attributes(tasks->sandbox,attributes);
     STARTUPINFOEXW startup={0}; startup.StartupInfo.cb=sizeof(startup); startup.StartupInfo.dwFlags=STARTF_USESTDHANDLES; startup.StartupInfo.hStdInput=child_input; startup.StartupInfo.hStdOutput=child_output[0]; startup.StartupInfo.hStdError=child_output[1]; startup.lpAttributeList=attributes;
+    if(terminal){startup.StartupInfo.dwFlags=0;startup.StartupInfo.hStdInput=startup.StartupInfo.hStdOutput=startup.StartupInfo.hStdError=NULL;}
     if(gui){startup.StartupInfo.lpDesktop=L"winsta0\\default";startup.StartupInfo.dwFlags|=STARTF_USESHOWWINDOW;startup.StartupInfo.wShowWindow=SW_SHOWNORMAL;}
     PROCESS_INFORMATION process={0};
     unsigned phase=1;
-    DWORD flags=CREATE_SUSPENDED|(tasks->sandbox?DETACHED_PROCESS:CREATE_NO_WINDOW)|CREATE_UNICODE_ENVIRONMENT|EXTENDED_STARTUPINFO_PRESENT;
-    ok=ok && (tasks->sandbox?sb_win_sandbox_launch(tasks->sandbox,exe,line,true,flags,env,directory,&startup.StartupInfo,&process):CreateProcessW(exe,line,NULL,NULL,TRUE,flags,env,directory,&startup.StartupInfo,&process));
+    DWORD flags=CREATE_SUSPENDED|(tasks->sandbox?DETACHED_PROCESS:terminal?0:CREATE_NO_WINDOW)|CREATE_UNICODE_ENVIRONMENT|EXTENDED_STARTUPINFO_PRESENT;
+    ok=ok && (tasks->sandbox?sb_win_sandbox_launch(tasks->sandbox,exe,line,true,flags,env,directory,&startup.StartupInfo,&process):CreateProcessW(exe,line,NULL,NULL,terminal?FALSE:TRUE,flags,env,directory,&startup.StartupInfo,&process));
     if(process.hProcess) { item->process=process.hProcess; item->pid=process.dwProcessId; }
     if(ok){phase=2;ok=AssignProcessToJobObject(item->job,item->process)!=FALSE;}
     if(ok && tasks->sandbox){phase=3;ok=sb_win_sandbox_token(tasks->sandbox,item->process);}
@@ -511,7 +532,7 @@ static char *start(sb_win_tasks *tasks, yyjson_val *args) {
         if(item->job) TerminateJobObject(item->job,125);
         if(item->process) TerminateProcess(item->process,125);
         if (item->durable_reserved) { AcquireSRWLockExclusive(&item->lock); item->reason="failed"; ReleaseSRWLockExclusive(&item->lock); SetEvent(item->input_event); return fail("Task startup was interrupted after its durable intent; request_key remains reserved. Review this task before submitting another key."); }
-        task_free(item);char message[192];snprintf(message,sizeof(message),"Cannot create and contain task (phase %u, Windows error %lu). No uncontained process is resumed.",phase,native_error);return fail(message);
+        task_free(item);char message[192];if(FAILED(terminal_error))snprintf(message,sizeof(message),"CreatePseudoConsole failed: HRESULT 0x%08lx. No task process resumed.",(unsigned long)terminal_error);else snprintf(message,sizeof(message),"Cannot create and contain task (phase %u, Windows error %lu). No uncontained process is resumed.",phase,native_error);return fail(message);
     }
     tasks->items[slot]=item;
     yyjson_mut_doc *doc=yyjson_mut_doc_new(NULL); if(!doc) return NULL;
@@ -568,26 +589,30 @@ static char *tasks_call(sb_win_tasks *tasks,const char *name,yyjson_val *args) {
         }
     } else if(!strcmp(name,"task_input")) {
         const char *key=sb_string(yyjson_obj_get(args,"input_key")),*text=sb_string(yyjson_obj_get(args,"text")); yyjson_val *eof_value=yyjson_obj_get(args,"eof");
+        uint64_t columns=0,rows=0;yyjson_val *cv=yyjson_obj_get(args,"terminal_columns"),*rv=yyjson_obj_get(args,"terminal_rows");
+        bool dimensions=(!cv && !rv) || (item->pty && sb_integer(cv,&columns) && columns && columns<=1000 && sb_integer(rv,&rows) && rows && rows<=1000);
         bool eof=yyjson_get_bool(eof_value); size_t length=text?strlen(text):0; char hash[65]; sb_error hash_error={0}; task_input *existing=NULL; size_t queued=0;
         if (tasks->store && (!sb_store_healthy(tasks->store) || !sb_audit_healthy(tasks->audit))) error="Persistent state or audit unavailable; stdin was not queued.";
-        else if(!key_valid(key) || !text || length>SB_TASK_INPUT_LIMIT || !yyjson_is_bool(eof_value) || (!length && !eof) || !sb_platform_sha256(text,length,hash,&hash_error)) error="Invalid input key, UTF-8 text or EOF flag.";
+        else if(item->pty && eof)error="terminal_eof_unsupported: send application exit input or task_cancel; no input queued.";
+        else if((cv || rv) && !item->pty)error="terminal_resize_requires_terminal_task";
+        else if(!dimensions || !key_valid(key) || !text || length>SB_TASK_INPUT_LIMIT || !yyjson_is_bool(eof_value) || (!length && !eof && !columns) || !sb_platform_sha256(text,length,hash,&hash_error)) error="Invalid input key, UTF-8 text or EOF flag.";
         else {
             for(size_t i=0;i<item->input_count;++i) { if(item->inputs[i].data) queued+=item->inputs[i].length; if(!strcmp(item->inputs[i].key,key)) existing=&item->inputs[i]; }
-            if(existing && (strcmp(existing->hash,hash) || existing->eof!=eof)) error="input_key already binds different input.";
+            if(existing && (strcmp(existing->hash,hash) || existing->eof!=eof || existing->columns!=columns || existing->rows!=rows)) error="input_key already binds different input.";
             else if(!existing && (item->finished || item->reason || item->input_closed || (item->input_count && item->inputs[item->input_count-1].eof))) error="Task stdin is closed or closing.";
             else if(!existing && length>SB_TASK_INPUT_QUEUE_LIMIT-queued) error="Stdin queue is full; wait for delivery and retry the same input_key.";
             else if(!existing && item->input_count>=INPUT_RECORDS) error="Task input receipt budget reached.";
             else if(!existing) {
                 char *copy=sb_strdup(text); if(!copy) error="Cannot queue stdin data.";
                 else {
-                    existing=&item->inputs[item->input_count++];strcpy(existing->key,key);strcpy(existing->hash,hash);existing->data=copy;existing->length=(DWORD)length;existing->eof=eof;
+                    existing=&item->inputs[item->input_count++];strcpy(existing->key,key);strcpy(existing->hash,hash);existing->data=copy;existing->length=(DWORD)length;existing->eof=eof;existing->columns=(SHORT)columns;existing->rows=(SHORT)rows;
                     if (!task_event(item,"task_input_queued","running",false)) {
                         existing->sent=true; existing->delivered=false; item->reason="failed"; TerminateJobObject(item->job,125); error="Cannot persist stdin intent; input was not sent.";
                     }
                     SetEvent(item->input_event);
                 }
             }
-            if(!error && existing) { yyjson_mut_obj_add_strcpy(doc,result,"input_key",key); yyjson_mut_obj_add_str(doc,result,"input_status",existing->sent?(existing->delivered?"delivered":"failed"):"queued"); }
+            if(!error && existing) { yyjson_mut_obj_add_strcpy(doc,result,"input_key",key); yyjson_mut_obj_add_str(doc,result,"input_status",existing->sent?(existing->delivered?"delivered":"failed"):"queued");if(existing->columns && existing->sent)yyjson_mut_obj_add_uint(doc,result,"terminal_resize_hresult",(uint32_t)existing->resize_hresult); }
         }
     } else if(strcmp(name,"task_status")) error="Unknown task operation.";
     ReleaseSRWLockExclusive(&item->lock); ReleaseSRWLockExclusive(&tasks->lock);

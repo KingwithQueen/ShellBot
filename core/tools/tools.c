@@ -75,6 +75,11 @@ static yyjson_doc *tool_schema(const tool_definition *definition) {
     const char *mode_schema="{\"type\":\"string\",\"enum\":[\"full\",\"compact\"],\"default\":\"full\",\"description\":\"compact retains structuredContent and media but replaces duplicated JSON text content with one summary; does not change authorization or request-key identity.\"}";
     yyjson_doc *mode=yyjson_read(mode_schema,strlen(mode_schema),0);
     yyjson_mut_obj_add_val(doc,properties,"response_mode",yyjson_val_mut_copy(doc,yyjson_doc_get_root(mode)));yyjson_doc_free(mode);
+    if(!strcmp(name,"task_start") || !strcmp(name,"task_input")){
+        const char *extra=!strcmp(name,"task_start")?"{\"io_mode\":{\"type\":\"string\",\"enum\":[\"pipe\",\"terminal\"],\"default\":\"pipe\",\"description\":\"terminal creates a ConPTY for ordinary current_user background tasks. stdout merges stdout/stderr as raw UTF-8 VT; read and send terminal input through task_output/task_input. No screen scraping or physical keys. Job, approval and timeout remain in effect.\"}}":"{}";
+        yyjson_doc *options=yyjson_read(extra,strlen(extra),0);size_t i,n;yyjson_val *k,*v;yyjson_obj_foreach(yyjson_doc_get_root(options),i,n,k,v)yyjson_mut_obj_add(properties,yyjson_mut_strcpy(doc,yyjson_get_str(k)),yyjson_val_mut_copy(doc,v));yyjson_doc_free(options);
+        const char *dims[]={"terminal_columns","terminal_rows"};for(unsigned d=0;d<2;++d){yyjson_mut_val *dim=yyjson_mut_obj(doc);yyjson_mut_obj_add_str(doc,dim,"type","integer");yyjson_mut_obj_add_uint(doc,dim,"minimum",1);yyjson_mut_obj_add_uint(doc,dim,"maximum",1000);yyjson_mut_obj_add_str(doc,dim,"description","Cells. Start defaults to 120 columns and 30 rows; input resize requires both fields and a new input_key (text may be empty). Resize and text are queued together; eof is unavailable for terminals. Use text \\u0003 for Ctrl+C, application-specific exit input or task_cancel.");yyjson_mut_obj_add_val(doc,properties,dims[d],dim);}
+    }
     if(!strcmp(name,"task_start")){
         const char *json="{\"type\":\"string\",\"enum\":[\"background\",\"gui\"],\"default\":\"background\",\"description\":\"gui launches into the current ordinary interactive WinSta0/Default session; approval, Job lifetime and timeout still apply. Verify window_list then window_focus separately; process creation does not prove visibility, focus or capture. No administrator/restricted/cross-session GUI.\"}";
         yyjson_doc *launch=yyjson_read(json,strlen(json),0);yyjson_mut_obj_add_val(doc,properties,"launch_mode",yyjson_val_mut_copy(doc,yyjson_doc_get_root(launch)));yyjson_doc_free(launch);
@@ -97,7 +102,11 @@ static yyjson_doc *tool_schema(const tool_definition *definition) {
         schema_bound(doc,properties,"max_entries","maximum",SB_LIST_LIMIT);
     }
     if (!strcmp(name,"fs_search")) {
-        schema_bound(doc,properties,"query","maxLength",512);
+        schema_bound(doc,properties,"query","maxLength",16384);
+#ifndef SB_POSIX
+        const char *json="{\"pattern_type\":{\"type\":\"string\",\"enum\":[\"literal\",\"regex\",\"glob\"],\"default\":\"literal\"},\"ignore_case\":{\"type\":\"boolean\",\"default\":false},\"file_glob\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":16384,\"description\":\"Optional include glob on slash-separated paths relative to search directory. ** crosses directories, * and ? do not; hidden files are included, reparse directories are never followed.\"}}";
+        yyjson_doc *opts=yyjson_read(json,strlen(json),0);size_t i,n;yyjson_val *k,*v;yyjson_obj_foreach(yyjson_doc_get_root(opts),i,n,k,v)yyjson_mut_obj_add(properties,yyjson_mut_strcpy(doc,yyjson_get_str(k)),yyjson_val_mut_copy(doc,v));yyjson_doc_free(opts);
+#endif
         schema_bound(doc,properties,"max_results","maximum",SB_SEARCH_RESULTS);
         schema_bound(doc,properties,"max_file_bytes","maximum",SB_SEARCH_FILE_LIMIT);
         schema_bound(doc,properties,"max_total_bytes","maximum",SB_SEARCH_TOTAL_LIMIT);
@@ -160,7 +169,7 @@ static bool project_tool_visible(sb_host *host, const char *name) {
     if (sb_file_manage_tool(name) && (!host->project || host->project->legacy_compatibility)) return false;
     if (!host->project) return true;
     int index = sb_project_tool_index(name);
-    if (index >= SB_DESKTOP_TOOL_FIRST && index < SB_DESKTOP_TOOL_END) return sb_desktop_tool_visible(host,name);
+    if (sb_desktop_tool(name)) return sb_desktop_tool_visible(host,name);
     /* Result polling and cancellation remain visible for already owned tasks. */
     return index >= 0 && ((index == 9 || index == 10 || index == 12 || index==13 || index==14 || index==37 || index==38) ||
         (host->project->enabled && (host->project->policy.tools & (UINT64_C(1) << index))));
@@ -236,7 +245,7 @@ static yyjson_mut_val *argument_limit(const tool_definition *definition,yyjson_v
         if(yyjson_is_str(value) && sb_integer(yyjson_obj_get(property,"maxLength"),&limit)){actual=yyjson_get_len(value);unit="UTF-8 bytes";}
         else if(yyjson_is_arr(value) && sb_integer(yyjson_obj_get(property,"maxItems"),&limit)){actual=yyjson_arr_size(value);unit="items";}
         else if(sb_integer(value,&actual) && sb_integer(yyjson_obj_get(property,"maximum"),&limit)){
-            unit=!strcmp(field,"timeout_ms")?"ms":!strcmp(field,"ttl_seconds")?"seconds":!strcmp(field,"max_dimension")?"pixels":
+            unit=(!strcmp(field,"terminal_columns") || !strcmp(field,"terminal_rows"))?"cells":!strcmp(field,"timeout_ms")?"ms":!strcmp(field,"ttl_seconds")?"seconds":!strcmp(field,"max_dimension")?"pixels":
                 strstr(field,"bytes") || !strcmp(field,"size") || (!strcmp(field,"offset") && strcmp(definition->name,"fs_list")) ? "bytes" : "items";
             if(!strcmp(field,"timeout_ms") && host->config.limits.task_timeout_ms<limit)limit=host->config.limits.task_timeout_ms;
         }
@@ -346,8 +355,8 @@ static yyjson_mut_val *tool_call_inner(sb_host *host, const char *actor, const c
         yyjson_mut_val *tools = yyjson_mut_arr(doc), *roots = yyjson_mut_arr(doc), *versions = yyjson_mut_arr(doc);
         for (size_t i = 0; i < tool_count(); ++i)
             if (project_tool_visible(host, definitions[i].name)) yyjson_mut_arr_add_str(doc, tools, definitions[i].name);
-        for (size_t i=SB_DESKTOP_TOOL_FIRST;i<SB_DESKTOP_TOOL_END;++i)
-            if (sb_desktop_tool_visible(host,sb_project_tool_name(i))) yyjson_mut_arr_add_str(doc,tools,sb_project_tool_name(i));
+        for (size_t i=SB_DESKTOP_TOOL_FIRST;i<SB_PROJECT_TOOL_COUNT;++i)
+            if (sb_desktop_tool(sb_project_tool_name(i)) && sb_desktop_tool_visible(host,sb_project_tool_name(i))) yyjson_mut_arr_add_str(doc,tools,sb_project_tool_name(i));
         for (size_t i = 0; i < host->config.workspace_count; ++i) {
             yyjson_mut_val *root = yyjson_mut_obj(doc);
             yyjson_mut_obj_add_strcpy(doc, root, "workspace_id", host->config.workspaces[i].id);
@@ -516,7 +525,7 @@ static yyjson_mut_val *tool_call_inner(sb_host *host, const char *actor, const c
         const char *mode = sb_string(yyjson_obj_get(args, "mode"));
         yyjson_val *recursive = yyjson_obj_get(args, "recursive");
         uint64_t maximum, per_file, total_bytes;
-        if (!query || !*query || strlen(query) > 512 || (recursive && !yyjson_is_bool(recursive)) ||
+        if (!query || !*query || strlen(query) > 16384 || (recursive && !yyjson_is_bool(recursive)) ||
             (!mode && yyjson_obj_get(args, "mode")) || (mode && strcmp(mode, "filename") && strcmp(mode, "content")) ||
             !number(args, "max_results", 50, 1, SB_SEARCH_RESULTS, &maximum) ||
             !number(args, "max_file_bytes", 262144, 4, SB_SEARCH_FILE_LIMIT, &per_file) ||
@@ -527,8 +536,11 @@ static yyjson_mut_val *tool_call_inner(sb_host *host, const char *actor, const c
         if (!sb_decode((const unsigned char *)query, strlen(query), true, "utf-8", true,
                        &decoded, &decoded_length, &consumed, &detected, &error)) return failure(doc, error.text);
         free(decoded);
-        yyjson_mut_val *found = sb_search(workspace, path, query, yyjson_get_bool(recursive), content,
-                                        (size_t)maximum, (size_t)per_file, (size_t)total_bytes, doc, &error);
+        #ifdef SB_POSIX
+        yyjson_mut_val *found=sb_search(workspace,path,query,yyjson_get_bool(recursive),content,(size_t)maximum,(size_t)per_file,(size_t)total_bytes,doc,&error);
+#else
+        yyjson_mut_val *found=sb_search_ex(workspace,path,query,yyjson_get_bool(recursive),content,(size_t)maximum,(size_t)per_file,(size_t)total_bytes,args,doc,&error);
+#endif
         return found ? content_result(doc, found, false) : failure(doc, error.text);
     }
     bool directory = !strcmp(name, "fs_list");

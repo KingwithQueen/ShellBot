@@ -1,6 +1,7 @@
 #ifndef SB_TASK_PROCESS_H
 #define SB_TASK_PROCESS_H
 #include <windows.h>
+bool sb_win_tasks_terminal_available(void);
 #include "sb.h"
 typedef struct sb_win_tasks sb_win_tasks;
 typedef struct sb_win_sandbox sb_win_sandbox;

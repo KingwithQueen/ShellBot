@@ -7,7 +7,7 @@ static const char *const tool_names[SB_PROJECT_TOOL_COUNT] = {
     "desktop_lease", "desktop_state", "desktop_capture", "window_list", "window_focus",
     "desktop_click", "desktop_drag", "desktop_scroll", "desktop_type", "desktop_key", "clipboard_read", "clipboard_write",
     "document_info", "document_read", "document_preview", "artifact_download", "artifact_upload",
-    "fs_stat", "fs_mkdir", "fs_copy", "fs_move", "fs_delete", "task_list", "task_archive"
+    "fs_stat", "fs_mkdir", "fs_copy", "fs_move", "fs_delete", "task_list", "task_archive", "uia_tree", "uia_action"
 };
 
 const char *sb_project_tool_name(size_t index) {
@@ -36,13 +36,13 @@ sb_policy_result sb_project_evaluate(const sb_request_context *context, const sb
     int tool = sb_project_tool_index(operation->tool);
     if (tool < 0) return result(SB_DECISION_DENY, "unknown_tool");
     if (tool==13 || tool==14) return result(operation->owned_request ? SB_DECISION_ALLOW : SB_DECISION_DENY,operation->owned_request ? "owned_request" : "request_not_owned");
-    if (tool >= 15 && tool < 27) {
+    if ((tool >= 15 && tool < 27) || tool==39 || tool==40) {
         if (project->legacy_compatibility || operation->identity != SB_ID_CURRENT_USER)
             return result(SB_DECISION_DENY, "desktop_requires_ordinary_project");
         if (tool == 15 && operation->desktop_cleanup) return result(SB_DECISION_ALLOW, "desktop_lease_cleanup");
         if (!project->enabled || !project->policy.desktop.enabled) return result(SB_DECISION_DENY, "desktop_disabled");
         if (!(project->policy.tools & (UINT64_C(1) << tool))) return result(SB_DECISION_DENY, "tool_disabled");
-        if (tool >= 19 && tool <= 24 && !project->policy.desktop.control)
+        if (((tool >= 19 && tool <= 24) || tool==40) && !project->policy.desktop.control)
             return result(SB_DECISION_DENY, "desktop_control_disabled");
         if (tool == 25 && !project->policy.desktop.clipboard_read) return result(SB_DECISION_DENY, "clipboard_read_disabled");
         if (tool == 26 && !project->policy.desktop.clipboard_write) return result(SB_DECISION_DENY, "clipboard_write_disabled");

@@ -459,6 +459,9 @@ yyjson_mut_val *sb_execution_status(sb_execution *execution, yyjson_mut_doc *doc
     bool available=execution->configured && (execution->tasks || (execution->profile==SB_EXEC_ADMINISTRATOR && execution->agent_healthy));
     yyjson_mut_obj_add_bool(doc, result, "command_execution_available", available);
     yyjson_mut_obj_add_bool(doc, result, "task_tools_available", available);
+    yyjson_mut_obj_add_bool(doc,result,"terminal_available",available && execution->profile==SB_EXEC_USER && !execution->sandbox && sb_win_tasks_terminal_available());
+    yyjson_mut_obj_add_uint(doc,result,"max_terminal_columns",1000);yyjson_mut_obj_add_uint(doc,result,"max_terminal_rows",1000);
+    yyjson_mut_obj_add_str(doc,result,"terminal_protocol","ConPTY: merged UTF-8 VT stdout, task_input UTF-8/control sequences and queued resize; managed task lifetime, no pipe EOF");
     yyjson_mut_obj_add_bool(doc, result, "remote_approval_available", false);
     yyjson_mut_obj_add_bool(doc, result, "controlled_isolation_verified", execution->sandbox != NULL);
     if(*execution->sandbox_error)yyjson_mut_obj_add_strcpy(doc,result,"restricted_unavailable_reason",execution->sandbox_error);

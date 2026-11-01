@@ -43,6 +43,7 @@ struct sb_desktop {
     char lease_id[33],actor[64]; uint64_t deadline;
     unsigned next_observation,emergency_stops; observation observations[OBSERVATIONS];
     wchar_t sid[192]; DWORD integrity;
+    yyjson_doc *uia_snapshot;char uia_screen[33],uia_window[33];bool uia_busy;
 };
 static sb_desktop *hook_context;
 struct sb_win_desktop_session { HANDLE mutex,pause,mapping; volatile LONG *epoch; };
@@ -188,7 +189,7 @@ static bool layout(topology *list, char hash[65]) {
     }
     sb_error error={0}; return sb_platform_sha256(list,sizeof(*list),hash,&error);
 }
-static void invalidate(sb_desktop *desktop) { for(unsigned i=0;i<OBSERVATIONS;++i)desktop->observations[i].invalidated=true; }
+static void invalidate(sb_desktop *desktop) { for(unsigned i=0;i<OBSERVATIONS;++i)desktop->observations[i].invalidated=true;if(desktop->uia_snapshot){yyjson_doc_free(desktop->uia_snapshot);desktop->uia_snapshot=NULL;} }
 static void release_lease(sb_desktop *desktop) {
     if (desktop->hotkey) { UnregisterHotKey(desktop->window,1); desktop->hotkey=false; }
     if (desktop->keyboard) UnhookWindowsHookEx(desktop->keyboard); if (desktop->mouse) UnhookWindowsHookEx(desktop->mouse);
@@ -270,11 +271,14 @@ static void key_name(WORD key,char name[16]) {
     if(key>=VK_F1 && key<=VK_F12)snprintf(name,16,"F%u",(unsigned)(key-VK_F1+1));else {name[0]=(char)key;name[1]=0;}
 }
 static bool arguments(sb_desktop *desktop,const char *name,yyjson_val *args) {
-    int tool=sb_project_tool_index(name),n; if (tool<SB_DESKTOP_TOOL_FIRST || tool>=SB_DESKTOP_TOOL_END || !yyjson_is_obj(args)) return false;
+    int tool=sb_project_tool_index(name),n; if (!((tool>=SB_DESKTOP_TOOL_FIRST && tool<SB_DESKTOP_TOOL_END) || tool==39 || tool==40) || !yyjson_is_obj(args)) return false;
     const char *allowed[20]={"lease_id","request_key","approval_id"}; size_t count=3;
     if (tool==15) { allowed[count++]="action"; allowed[count++]="duration_seconds";allowed[count++]="access"; }
     if (tool>=19 && tool<=24) allowed[count++]="screen_id";
     if (tool==17) { const char *fields[]={"monitor_id","max_dimension","x","y","width","height"}; for (unsigned i=0;i<6;++i) allowed[count++]=fields[i]; }
+    if(tool==39 || tool==40){allowed[count++]="screen_id";allowed[count++]="window_id";
+        if(tool==39){allowed[count++]="max_nodes";allowed[count++]="max_depth";allowed[count++]="include_text";}
+        else{allowed[count++]="element_id";allowed[count++]="action";allowed[count++]="value";}}
     if (tool==19) {allowed[count++]="window_id";allowed[count++]="restore";allowed[count++]="wait_ms";}
     if (tool>=20 && tool<=22) { allowed[count++]="x"; allowed[count++]="y"; }
     if (tool==20 || tool==21) allowed[count++]="button";
@@ -285,6 +289,14 @@ static bool arguments(sb_desktop *desktop,const char *name,yyjson_val *args) {
     if (tool==24) {allowed[count++]="keys";allowed[count++]="key";allowed[count++]="modifiers";}
     if (tool==25 || tool==26) allowed[count++]="expected_sequence";
     if (!sb_config_keys(args,allowed,count)) return false;
+    if(tool==39 || tool==40){
+        if(!hex(sb_string(yyjson_obj_get(args,"screen_id"))) || !hex(sb_string(yyjson_obj_get(args,"window_id"))))return false;
+        if(tool==39){yyjson_val *text=yyjson_obj_get(args,"include_text");if((text && !yyjson_is_bool(text)) || !integer(args,"max_nodes",500,1,1000,&n) || !integer(args,"max_depth",16,0,32,&n))return false;}
+        else{const char *action=sb_string(yyjson_obj_get(args,"action")),*value=sb_string(yyjson_obj_get(args,"value"));
+            if(!hex(sb_string(yyjson_obj_get(args,"element_id"))) || !action || (strcmp(action,"invoke") && strcmp(action,"set_value") && strcmp(action,"toggle") && strcmp(action,"select") && strcmp(action,"expand") && strcmp(action,"collapse")))return false;
+            if(!strcmp(action,"set_value")){if(!value || strlen(value)>16384)return false;}else if(yyjson_obj_get(args,"value"))return false;
+        }
+    }
     if(tool==19){yyjson_val *restore=yyjson_obj_get(args,"restore");if((restore && !yyjson_is_bool(restore)) || !integer(args,"wait_ms",1500,0,3000,&n))return false;}
     const char *action=sb_string(yyjson_obj_get(args,"action")),*lease=sb_string(yyjson_obj_get(args,"lease_id")),*key=sb_string(yyjson_obj_get(args,"request_key"));
     bool cleanup=tool==15 && action && (!strcmp(action,"status") || !strcmp(action,"release"));
@@ -770,6 +782,7 @@ static const char *clipboard_action(sb_desktop *desktop,const char *name,yyjson_
 done:
     if (output) GlobalFree(output); CloseClipboard(); yyjson_mut_obj_add_uint(doc,data,"clipboard_sequence",GetClipboardSequenceNumber()); return error;
 }
+#include "uia_desktop.h"
 static char *execute(sb_desktop *desktop,desktop_job *job,yyjson_val *args) {
     yyjson_mut_doc *doc=yyjson_mut_doc_new(NULL); if (!doc) return NULL; yyjson_mut_val *data=object(doc);
     const char *error=NULL,*action=sb_string(yyjson_obj_get(args,"action")),*lease=sb_string(yyjson_obj_get(args,"lease_id"));
@@ -824,6 +837,7 @@ static char *execute(sb_desktop *desktop,desktop_job *job,yyjson_val *args) {
         yyjson_mut_obj_add_bool(doc,data,"paused",WaitForSingleObject(desktop->pause,0)==WAIT_OBJECT_0);
     } else if (!owns(desktop,job->actor,lease)) error="desktop_lease_not_owned_or_expired";
     else if (!interactive(desktop)) error="no_desktop_session: locked, disconnected or secure desktop";
+    else if (!strcmp(job->name,"uia_tree") || !strcmp(job->name,"uia_action")) error=uia_operation(desktop,job,args,doc,data);
     else if (!strcmp(job->name,"desktop_state") || !strcmp(job->name,"window_list") || !strcmp(job->name,"desktop_capture")) {
         observation *view=NULL;
         if (!observe(desktop,doc,data,&view)) error="desktop_observation_unavailable";
@@ -889,6 +903,7 @@ static char *capabilities(sb_desktop *desktop) {
     yyjson_mut_obj_add_uint(doc,data,"max_png_bytes",PNG_LIMIT); yyjson_mut_obj_add_uint(doc,data,"max_image_dimension",SB_IMAGE_DIMENSION);
     yyjson_mut_obj_add_uint(doc,data,"max_type_utf16_units",512); yyjson_mut_obj_add_uint(doc,data,"max_clipboard_bytes",CLIPBOARD_BYTES);
     yyjson_mut_obj_add_bool(doc,data,"minimized_windows_listed",true);yyjson_mut_obj_add_bool(doc,data,"window_restore_supported",true);yyjson_mut_obj_add_uint(doc,data,"max_focus_wait_ms",3000);
+    yyjson_mut_obj_add_bool(doc,data,"uia_tree_supported",true);yyjson_mut_obj_add_bool(doc,data,"uia_patterns_supported",true);yyjson_mut_obj_add_uint(doc,data,"max_uia_nodes",1000);yyjson_mut_obj_add_uint(doc,data,"max_uia_provider_ms",4000);
     yyjson_mut_obj_add_bool(doc,data,"explicit_key_chords",true);yyjson_mut_obj_add_uint(doc,data,"max_key_modifiers",3);
     yyjson_mut_obj_add_bool(doc,data,"key_hold_supported",false);
     char key[24]; snprintf(key,sizeof(key),"Ctrl+Alt+F%u",desktop->policy.emergency_function_key); yyjson_mut_obj_add_strcpy(doc,data,"emergency_hotkey",key);
@@ -906,7 +921,9 @@ static void process_job(sb_desktop *desktop,desktop_job *job) {
     else {
         yyjson_doc *input=yyjson_read(job->arguments,strlen(job->arguments),0); yyjson_val *args=yyjson_doc_get_root(input);
         key_chord chord;const char *key_error=!strcmp(job->name,"desktop_key") && yyjson_is_obj(args)?chord_parse(args,desktop->policy.emergency_function_key,&chord):NULL;
-        if(key_error)job->reply=failed(key_error);
+        const char *lease_action=sb_string(yyjson_obj_get(args,"action"));bool cleanup=!strcmp(job->name,"desktop_lease") && lease_action && (!strcmp(lease_action,"status") || !strcmp(lease_action,"release"));
+        if(desktop->uia_busy && !cleanup)job->reply=failed("desktop_busy_uia: no concurrent desktop operation was attempted or queued; refresh after completion");
+        else if(key_error)job->reply=failed(key_error);
         else if (!arguments(desktop,job->name,args)) job->reply=failed("invalid_desktop_arguments");
         else if (job->prepare) {
             /* Binding uses the immutable worker/session and caller lease nonce.

@@ -173,7 +173,7 @@ bool sb_desktop_draft_load(sb_desktop_app *app,const char *id,sb_desktop_draft *
     yyjson_mut_obj_add_str(doc,root,"default_workspace_id","workspace");yyjson_mut_obj_add_uint(doc,root,"policy_revision",1);
     yyjson_mut_obj_add_str(doc,directory,"id","workspace");yyjson_mut_obj_add_str(doc,directory,"path",work);yyjson_mut_obj_add_bool(doc,directory,"read_only",false);
     yyjson_mut_arr_add_val(array,directory);yyjson_mut_obj_add_val(doc,root,"workspaces",array);yyjson_mut_obj_add_str(doc,policy,"approval_mode","workspace_auto");
-    for (size_t i=0;i<SB_PROJECT_TOOL_COUNT;++i) { const char *name=sb_project_tool_name(i);if (strncmp(name,"task_",5) && (i<SB_DESKTOP_TOOL_FIRST || i>=SB_DESKTOP_TOOL_END)) yyjson_mut_arr_add_str(doc,tools,name); }
+    for (size_t i=0;i<SB_PROJECT_TOOL_COUNT;++i) { const char *name=sb_project_tool_name(i);if (strncmp(name,"task_",5) && !sb_desktop_tool(name)) yyjson_mut_arr_add_str(doc,tools,name); }
     yyjson_mut_obj_add_val(doc,policy,"tools",tools);yyjson_mut_obj_add_val(doc,root,"policy",policy);draft->definition=yyjson_mut_write(doc,0,NULL);yyjson_mut_doc_free(doc);free(data);free(work);
     return draft->definition && draft->name && draft->directory;
 }

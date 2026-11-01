@@ -172,3 +172,7 @@ next_offset 仍为本页原始字节终点；text_next_offset 为成功解码的
 Windows 普通 current_user 的 task_start 可选 `launch_mode:"gui"`。后台模式仍默认；GUI 模式在当前活动用户会话的 WinSta0/Default 请求正常显示，不需要截图成功，也不会自动切换到控制台、管理员或其他用户。它仍受相同审批、请求键、Job 和超时管理，**默认 5 分钟超时仍有效**，并非永久脱离任务的启动器。
 
 成功只表示进程已创建。使用 window_list 找到窗口；已有单实例应用可能由旧进程响应，不能只看入口 PID。window_focus 可以恢复最小化窗口并核实前台，截图另行验证。详见 [RDP 与 GUI 流程](REMOTE_DESKTOP.md#112-gui-启动与恢复)。GUI 与后台模式不同，不能用相同 request_key 切换；显式 background 与省略模式维持原任务摘要。
+
+## 1.1.3 ConPTY
+
+Windows 普通 current_user 的 task_start 可选 io_mode:terminal，使用原任务接口读写真实伪控制台，task_input 可排队调整行列。输出是合并 UTF-8 VT，管道模式仍默认并保留原始 stdout/stderr。参数、控制序列、EOF 和生命周期见 [交互工具](INTERACTIVE_TOOLS.md#conpty-交互终端)。

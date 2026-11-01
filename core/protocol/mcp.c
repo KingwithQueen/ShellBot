@@ -190,7 +190,7 @@ static const char *retry_guidance(const char *tool,bool invoked) {
     if(!invoked)return "retry_original_request";
     if(tool && (!strcmp(tool,"task_start") || !strcmp(tool,"task_input")))return "same_key_only";
     if(tool && (!strcmp(tool,"desktop_click") || !strcmp(tool,"desktop_drag") || !strcmp(tool,"desktop_scroll") ||
-        !strcmp(tool,"desktop_type") || !strcmp(tool,"desktop_key") || !strcmp(tool,"window_focus") || !strcmp(tool,"clipboard_write")))return "observe_before_retry_no_automatic_replay";
+        !strcmp(tool,"desktop_type") || !strcmp(tool,"desktop_key") || !strcmp(tool,"window_focus") || !strcmp(tool,"uia_action") || !strcmp(tool,"clipboard_write")))return "observe_before_retry_no_automatic_replay";
     return "inspect_state_before_retry";
 }
 static yyjson_mut_val *trace_value(yyjson_mut_doc *doc,const char *id,const char *instance,const char *stage,const char *state) {

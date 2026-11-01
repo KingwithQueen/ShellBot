@@ -1,10 +1,16 @@
 #include "sb.h"
+#ifndef SB_POSIX
+#include "sb_search_pattern.h"
+#endif
 #include <stdlib.h>
 #include <string.h>
 
 typedef struct {
     sb_workspace *workspace;
     const char *query;
+#ifndef SB_POSIX
+    sb_search_pattern *pattern;const char *base;bool glob;
+#endif
     bool recursive, content, truncated, allocation_failed;
     size_t scanned, matched, maximum, output_bytes, skipped_directories, skipped_files;
     size_t skipped_reparse_directories, files_read, partial_files, bytes_read, per_file, total_bytes;
@@ -14,7 +20,11 @@ typedef struct {
 } search_state;
 
 static bool stop(search_state *s) {
-    if (s->allocation_failed || s->scanned >= SB_SEARCH_ENTRIES || s->matched >= s->maximum ||
+    if (s->allocation_failed ||
+#ifndef SB_POSIX
+        (s->pattern && sb_search_pattern_error(s->pattern)) ||
+#endif
+        s->scanned >= SB_SEARCH_ENTRIES || s->matched >= s->maximum ||
         sb_platform_millis() >= s->deadline || (s->content && s->bytes_read >= s->total_bytes)) {
         s->truncated = true; return true;
     }
@@ -75,6 +85,9 @@ static void search_file(search_state *s, const sb_entry *entry, const char *path
         while (line_end < end && *line_end != '\r' && *line_end != '\n') ++line_end;
         char delimiter = *line_end; *line_end = 0;
         const char *found = strstr(cursor, s->query);
+#ifndef SB_POSIX
+        if(s->pattern){size_t offset=0;int match=sb_search_pattern_match(s->pattern,cursor,(size_t)(line_end-cursor),false,&offset);found=match>0?cursor+offset:NULL;if(match<0){s->truncated=true;*line_end=delimiter;break;}}
+#endif
         if (found) {
             size_t line_length = (size_t)(line_end - cursor), position = (size_t)(found - cursor);
             size_t first = position > 96 ? position - 96 : 0;
@@ -121,8 +134,16 @@ static void search_directory(search_state *s, const char *path, unsigned depth) 
         memcpy(relative, path, prefix); relative[prefix] = '/';
         strcpy(relative + prefix + 1, entries[i].name);
 #endif
-        if (s->content && !entries[i].directory) search_file(s, &entries[i], relative);
-        else if (!s->content && strstr(entries[i].name, s->query))
+        bool include=true,name_match=strstr(entries[i].name,s->query)!=NULL;
+#ifndef SB_POSIX
+        if(s->pattern){
+            const char *subject=relative+strlen(s->base);if(*subject=='/')++subject;
+            include=sb_search_pattern_include(s->pattern,subject)>0;
+            if(!s->content && include)name_match=sb_search_pattern_match(s->pattern,s->glob?subject:entries[i].name,strlen(s->glob?subject:entries[i].name),s->glob,NULL)>0;
+        }
+#endif
+        if (include && s->content && !entries[i].directory) search_file(s, &entries[i], relative);
+        else if (include && !s->content && name_match)
             add_match(s, &entries[i], relative, 0, 0, NULL, 0, false, false, NULL);
         if (s->recursive && entries[i].directory) {
             if (entries[i].reparse) ++s->skipped_reparse_directories;
@@ -134,9 +155,9 @@ static void search_directory(search_state *s, const char *path, unsigned depth) 
     sb_platform_entries_free(entries, count);
 }
 
-yyjson_mut_val *sb_search(sb_workspace *workspace, const char *path, const char *query,
+static yyjson_mut_val *search_run(sb_workspace *workspace, const char *path, const char *query,
                          bool recursive, bool content, size_t maximum, size_t per_file,
-                         size_t total_bytes, yyjson_mut_doc *doc, sb_error *error) {
+                         size_t total_bytes, yyjson_val *options,yyjson_mut_doc *doc, sb_error *error) {
     sb_file *start = sb_platform_open(workspace->root, path, true, error);
     if (!start) return NULL;
     sb_platform_close(start);
@@ -145,6 +166,13 @@ yyjson_mut_val *sb_search(sb_workspace *workspace, const char *path, const char 
     state.maximum = maximum; state.per_file = per_file; state.total_bytes = total_bytes;
     state.deadline = sb_platform_millis() + 2000; state.doc = doc; state.matches = yyjson_mut_arr(doc);
     if (!state.matches) { sb_fail(error, "Cannot allocate search results."); return NULL; }
+    #ifndef SB_POSIX
+    state.base=path;const char *type=sb_string(yyjson_obj_get(options,"pattern_type"));state.glob=type && !strcmp(type,"glob");
+    if(content && state.glob){sb_fail(error,"pattern_type glob is for filename mode; use file_glob with content regex searches.");return NULL;}
+    state.pattern=sb_search_pattern_new(query,options,state.deadline,error);if(!state.pattern)return NULL;
+#else
+    (void)options;
+#endif
     search_directory(&state, path, 0);
     yyjson_mut_val *data = yyjson_mut_obj(doc);
     bool ok = !state.allocation_failed && data && yyjson_mut_obj_add_val(doc, data, "matches", state.matches) &&
@@ -157,6 +185,21 @@ yyjson_mut_val *sb_search(sb_workspace *workspace, const char *path, const char 
         yyjson_mut_obj_add_uint(doc, data, "bytes_read", state.bytes_read) &&
         yyjson_mut_obj_add_uint(doc, data, "partial_files", state.partial_files) &&
         yyjson_mut_obj_add_uint(doc, data, "skipped_files", state.skipped_files);
+    #ifndef SB_POSIX
+    const char *reason=sb_search_pattern_error(state.pattern);
+    if(reason){yyjson_mut_obj_remove_str(data,"truncated");yyjson_mut_obj_add_bool(doc,data,"truncated",true);yyjson_mut_obj_add_str(doc,data,"truncation_reason",reason);}
+    yyjson_mut_obj_add_str(doc,data,"pattern_type",type?type:"literal");yyjson_mut_obj_add_bool(doc,data,"ignore_case",yyjson_get_bool(yyjson_obj_get(options,"ignore_case")));yyjson_mut_obj_add_str(doc,data,"pattern_engine","PCRE2 10.49 UTF-8/UCP; glob paths relative to search directory");
+    sb_search_pattern_free(state.pattern);
+#endif
     if (!ok) { sb_fail(error, "Cannot allocate search results."); return NULL; }
     return data;
 }
+
+yyjson_mut_val *sb_search(sb_workspace *workspace,const char *path,const char *query,bool recursive,bool content,size_t maximum,size_t per_file,size_t total_bytes,yyjson_mut_doc *doc,sb_error *error){
+    return search_run(workspace,path,query,recursive,content,maximum,per_file,total_bytes,NULL,doc,error);
+}
+#ifndef SB_POSIX
+yyjson_mut_val *sb_search_ex(sb_workspace *workspace,const char *path,const char *query,bool recursive,bool content,size_t maximum,size_t per_file,size_t total_bytes,yyjson_val *options,yyjson_mut_doc *doc,sb_error *error){
+    return search_run(workspace,path,query,recursive,content,maximum,per_file,total_bytes,options,doc,error);
+}
+#endif

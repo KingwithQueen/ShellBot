@@ -7,6 +7,7 @@
 #include "../platform/startup.h"
 #include "../platform/desktop_app.h"
 #include "../platform/desktop.h"
+#include "../platform/uia.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -227,6 +228,7 @@ bad_args:
 }
 
 int wmain(int argc, wchar_t **wide_argv) {
+    if(argc==2 && !wcscmp(wide_argv[1],L"--uia-worker"))return sb_win_uia_worker();
     if (argc >= 2 && !wcscmp(wide_argv[1], L"--project-worker")) return sb_project_worker(argc, wide_argv);
     if (argc >= 2 && !wcscmp(wide_argv[1], L"--execution-agent")) return sb_win_execution_agent(argc, wide_argv);
     if (argc >= 2 && !wcscmp(wide_argv[1], L"--shared-administrator-agent")) return sb_win_execution_agent(argc, wide_argv);

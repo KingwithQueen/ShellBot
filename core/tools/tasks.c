@@ -22,6 +22,11 @@ yyjson_mut_val *sb_tasks_call(sb_host *host,const char *actor,const char *name,y
         yyjson_val *mode_value=yyjson_obj_get(args,"launch_mode");const char *mode=sb_string(mode_value);
         if(mode_value && (!mode || (strcmp(mode,"background") && strcmp(mode,"gui")))){sb_fail(&error,"launch_mode must be background or gui.");goto done;}
         bool gui=mode && !strcmp(mode,"gui");
+        const char *io=sb_string(yyjson_obj_get(args,"io_mode"));bool terminal=io && !strcmp(io,"terminal");
+        uint64_t columns=120,rows=30;yyjson_val *cv=yyjson_obj_get(args,"terminal_columns"),*rv=yyjson_obj_get(args,"terminal_rows");
+        if((yyjson_obj_get(args,"io_mode") && (!io || (strcmp(io,"pipe") && !terminal))) ||
+            (cv && (!sb_integer(cv,&columns) || !columns || columns>1000)) || (rv && (!sb_integer(rv,&rows) || !rows || rows>1000)) ||
+            (!terminal && (cv || rv)) || (terminal && (gui || host->config.execution_profile!=SB_EXEC_USER))){sb_fail(&error,"Invalid terminal options: io_mode terminal requires ordinary current_user, background launch and terminal_columns/terminal_rows in 1..1000 cells.");goto done;}
         if(gui && host->config.execution_profile!=SB_EXEC_USER){sb_fail(&error,"GUI launch requires ordinary current_user execution; no elevated or restricted fallback.");goto done;}
 #endif
         workspace_id=sb_string(yyjson_obj_get(args,"workspace_id"));
@@ -55,6 +60,7 @@ yyjson_mut_val *sb_tasks_call(sb_host *host,const char *actor,const char *name,y
 #ifndef SB_POSIX
         /* Omitted/background keep the existing digest. GUI is a different operation. */
         if(gui)yyjson_mut_obj_add_str(request,parameters,"launch_mode","gui");
+        if(terminal){yyjson_mut_obj_add_str(request,parameters,"io_mode","terminal");yyjson_mut_obj_add_uint(request,parameters,"terminal_columns",columns);yyjson_mut_obj_add_uint(request,parameters,"terminal_rows",rows);}
 #endif
         canonical=yyjson_mut_val_write(parameters,0,NULL);
         if(!canonical || !sb_platform_sha256(canonical,strlen(canonical),request_hash,&error)) goto done;
@@ -98,6 +104,10 @@ yyjson_mut_val *sb_tasks_call(sb_host *host,const char *actor,const char *name,y
             if(!task_key_valid(key) || !text || strlen(text)>SB_TASK_INPUT_LIMIT || (eof && !yyjson_is_bool(eof))) { sb_fail(&error,"Invalid stdin key, text or EOF.");goto done; }
             yyjson_mut_obj_add_strcpy(request,parameters,"input_key",key); yyjson_mut_obj_add_strcpy(request,parameters,"text",text);
             yyjson_mut_obj_add_bool(request,parameters,"eof",yyjson_get_bool(eof));
+#ifndef SB_POSIX
+            yyjson_val *cv=yyjson_obj_get(args,"terminal_columns"),*rv=yyjson_obj_get(args,"terminal_rows");uint64_t columns=0,rows=0;
+            if(cv || rv){if(!sb_integer(cv,&columns) || !columns || columns>1000 || !sb_integer(rv,&rows) || !rows || rows>1000){sb_fail(&error,"Resize requires terminal_columns and terminal_rows, each 1..1000 cells.");goto done;}yyjson_mut_obj_add_uint(request,parameters,"terminal_columns",columns);yyjson_mut_obj_add_uint(request,parameters,"terminal_rows",rows);}
+#endif
             if(!sb_platform_sha256(text,strlen(text),request_hash,&error)) goto done;
         }
     }

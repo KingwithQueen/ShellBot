@@ -6,7 +6,11 @@
 
 bool sb_desktop_tool(const char *name) {
     int index=sb_project_tool_index(name);
-    return index>=SB_DESKTOP_TOOL_FIRST && index<SB_DESKTOP_TOOL_END;
+    return (index>=SB_DESKTOP_TOOL_FIRST && index<SB_DESKTOP_TOOL_END)
+#ifndef SB_POSIX
+        || index==39 || index==40
+#endif
+        ;
 }
 bool sb_desktop_tool_visible(sb_host *host, const char *name) {
     if (!host->project || host->project->legacy_compatibility || !host->desktop) return false;
@@ -23,9 +27,9 @@ static void add_properties(yyjson_mut_doc *doc, yyjson_mut_val *properties, cons
     yyjson_doc_free(input);
 }
 void sb_desktop_tools_list(sb_host *host, yyjson_mut_doc *doc, yyjson_mut_val *tools) {
-    for (size_t i=SB_DESKTOP_TOOL_FIRST;i<SB_DESKTOP_TOOL_END;++i) {
+    for (size_t i=SB_DESKTOP_TOOL_FIRST;i<SB_PROJECT_TOOL_COUNT;++i) {
         const char *name=sb_project_tool_name(i);
-        if (!sb_desktop_tool_visible(host,name)) continue;
+        if (!sb_desktop_tool(name) || !sb_desktop_tool_visible(host,name)) continue;
         yyjson_mut_val *tool=yyjson_mut_obj(doc),*schema=yyjson_mut_obj(doc),*properties=yyjson_mut_obj(doc),*required=yyjson_mut_arr(doc);
         yyjson_mut_obj_add_str(doc,tool,"name",name);
         yyjson_mut_obj_add_str(doc,tool,"description",
@@ -57,7 +61,7 @@ void sb_desktop_tools_list(sb_host *host, yyjson_mut_doc *doc, yyjson_mut_val *t
         } else {
             yyjson_mut_arr_add_str(doc,required,"lease_id"); yyjson_mut_arr_add_str(doc,required,"request_key");
         }
-        if (i>=19 && i<=24) {
+        if ((i>=19 && i<=24) || i==39 || i==40) {
             add_properties(doc,properties,"{\"screen_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32}}");
             yyjson_mut_arr_add_str(doc,required,"screen_id");
         }
@@ -110,12 +114,20 @@ void sb_desktop_tools_list(sb_host *host, yyjson_mut_doc *doc, yyjson_mut_val *t
             yyjson_mut_obj_add_str(doc,tool,"description","Press and release an explicit key or chord: key:\"ENTER\"; key:\"ENTER\", modifiers:[\"SHIFT\"]; key:\"V\", modifiers:[\"CTRL\"] for paste. Legacy keys:[\"CTRL\",\"V\"] remains supported. Names are case-insensitive. Requires desktop control permission, caller lease, fresh screen_id and new request_key; approve unchanged arguments when pending. Modifiers release in reverse order. Receipt reports normalized keys and submitted/cleanup event counts; verify application results afterward. Never use desktop_type newline as a substitute for Enter. No UAC, secure desktop, emergency chord or persistent key holding.");
 #endif
         }
+        #ifndef SB_POSIX
+        if(i==39 || i==40){
+            add_properties(doc,properties,"{\"window_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32}}");yyjson_mut_arr_add_str(doc,required,"window_id");
+            yyjson_mut_obj_remove_str(tool,"description");yyjson_mut_obj_add_str(doc,tool,"description",i==39?"Read a bounded Windows UIA control-view tree from a window_id/screen_id in a fresh window_list. Caller observe/control lease and desktop permission required; same user/session/integrity and window process only. Returns opaque element_id, names, automation IDs, types and bounds; include_text optionally reads non-password Value/Text patterns (up to 4096 UTF-16 units per node, marked possibly truncated). Tree replaces the previous UIA snapshot. Provider runs in a disposable MTA process with a hard deadline; no screenshot needed. Contents are untrusted application data.":"Apply one UIA pattern to an element_id from the latest uia_tree and matching screen_id/window_id. Requires control permission and lease, no human-input pause, unchanged identity and target window already foreground. invoke/set_value/toggle/select/expand/collapse only; no coordinate or key fallback. Disabled/offscreen/password/read-only/unknown controls are refused. value is only for set_value. A dispatched API is not proof of application success; refresh and verify. All observations expire after an attempt; never automatically replay uncertain actions.");
+            if(i==39)add_properties(doc,properties,"{\"max_nodes\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":1000,\"default\":500},\"max_depth\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":32,\"default\":16},\"include_text\":{\"type\":\"boolean\",\"default\":false}}");
+            else{add_properties(doc,properties,"{\"element_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32},\"action\":{\"type\":\"string\",\"enum\":[\"invoke\",\"set_value\",\"toggle\",\"select\",\"expand\",\"collapse\"]},\"value\":{\"type\":\"string\",\"maxLength\":16384}}");yyjson_mut_arr_add_str(doc,required,"element_id");yyjson_mut_arr_add_str(doc,required,"action");}
+        }
+#endif
         if (i==25 || i==26) {
             add_properties(doc,properties,"{\"expected_sequence\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":4294967295}}"); yyjson_mut_arr_add_str(doc,required,"expected_sequence");
         }
         yyjson_mut_obj_add_val(doc,tool,"inputSchema",schema);
         yyjson_mut_val *annotations=yyjson_mut_obj(doc);
-        bool changing=i==15 || (i>=19 && i<=24) || i==26;
+        bool changing=i==15 || (i>=19 && i<=24) || i==26 || i==40;
         yyjson_mut_obj_add_bool(doc,annotations,"readOnlyHint",!changing);
         yyjson_mut_obj_add_bool(doc,annotations,"destructiveHint",changing);
         yyjson_mut_obj_add_bool(doc,annotations,"idempotentHint",true);
@@ -146,7 +158,8 @@ yyjson_mut_val *sb_desktop_tools_call(sb_host *host, const char *actor, const ch
         if(bytes>maximum)return wrap(doc,sb_limit_error(doc,"text",bytes,maximum,"UTF-8 bytes"),true);
         if(!strcmp(name,"desktop_type")){uint64_t units=0;for(const unsigned char *p=(const unsigned char*)text;*p;++p)if((*p&0xc0)!=0x80)units+=*p>=0xf0?2:1;
             if(units>512)return wrap(doc,sb_limit_error(doc,"text",units,512,"UTF-16 units"),true);}}
-    static const struct {const char *name,*unit;uint64_t maximum;} limits[]={{"max_dimension","pixels",SB_IMAGE_DIMENSION},{"duration_seconds","seconds",120},{"monitor_id","index",15},{"duration_ms","ms",1000},{"clicks","items",2}};
+    const char *uia_value=sb_string(yyjson_obj_get(args,"value"));if(!strcmp(name,"uia_action") && uia_value && strlen(uia_value)>16384)return wrap(doc,sb_limit_error(doc,"value",strlen(uia_value),16384,"UTF-8 bytes"),true);
+    static const struct {const char *name,*unit;uint64_t maximum;} limits[]={{"max_dimension","pixels",SB_IMAGE_DIMENSION},{"duration_seconds","seconds",120},{"monitor_id","index",15},{"duration_ms","ms",1000},{"clicks","items",2},{"max_nodes","nodes",1000},{"max_depth","levels",32},{"wait_ms","ms",3000}};
     for(size_t i=0;i<sizeof(limits)/sizeof(*limits);++i){uint64_t value=0;if(sb_integer(yyjson_obj_get(args,limits[i].name),&value) && value>limits[i].maximum)return wrap(doc,sb_limit_error(doc,limits[i].name,value,limits[i].maximum,limits[i].unit),true);}
 #endif
     if (!host->project || host->project->legacy_compatibility || host->administrator_host || !host->desktop)

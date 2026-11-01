@@ -156,7 +156,7 @@
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
-      <AdditionalIncludeDirectories>$(MSBuildProjectDirectory)\..\core\include;$(MSBuildProjectDirectory)\..\third_party\yyjson;$(MSBuildProjectDirectory)\..\third_party\civetweb\include;$(MSBuildProjectDirectory)\..\third_party\pdfium\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(MSBuildProjectDirectory)\..\core\include;$(MSBuildProjectDirectory)\..\third_party\pcre2\src;$(MSBuildProjectDirectory)\..\third_party\yyjson;$(MSBuildProjectDirectory)\..\third_party\civetweb\include;$(MSBuildProjectDirectory)\..\third_party\pdfium\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;WINVER=0x0A00;_WIN32_WINNT=0x0A00;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <RuntimeLibrary Condition="'$(Configuration)'=='Debug'">MultiThreadedDebug</RuntimeLibrary>
       <RuntimeLibrary Condition="'$(Configuration)'=='Release'">MultiThreaded</RuntimeLibrary>
@@ -185,6 +185,8 @@
     <ClCompile Include="platform\service.c" />
     <ClInclude Include="platform\startup.h" />
     <ClCompile Include="platform\desktop.c" />
+    <ClCompile Include="platform\uia.c" />
+    <ClCompile Include="platform\uia_broker.c" />
     <ClInclude Include="platform\desktop.h" />
     <ClCompile Include="platform\manager_ui.c" />
     <ClCompile Include="platform\desktop_app.c" />
@@ -223,6 +225,7 @@
     <ClCompile Include="..\core\tools\desktop.c"><ObjectFileName>$(IntDir)desktop_tools.obj</ObjectFileName></ClCompile>
     <ClCompile Include="..\core\tools\text.c" />
     <ClCompile Include="..\core\tools\search.c" />
+    <ClCompile Include="..\core\tools\search_pattern_win.c" />
     <ClCompile Include="..\third_party\yyjson\yyjson.c">
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
@@ -252,6 +255,7 @@
     <None Include="app\external_log_access.inl" />
   </ItemGroup>
   <ItemGroup Condition="'$(Platform)'=='x64'">
+    <ProjectReference Include="..\third_party\pcre2\pcre2.vcxproj"><Project>{D08C7774-BB31-4612-B1E1-5D6B43F81F13}</Project></ProjectReference>
     <ProjectReference Include="SandboxProbe.vcxproj">
       <Project>{A674EB50-B5E5-43A1-9E24-B2BB66B185A4}</Project>
       <ReferenceOutputAssembly>false</ReferenceOutputAssembly>

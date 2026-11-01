@@ -158,3 +158,7 @@ window_focus 的已授权执行路径返回 focus_diagnostic，包含 caller、t
 window_list 现在返回最小化应用窗口及 `minimized`。window_focus 可选 restore:true（默认）、wait_ms:1500（默认，0～3000 ms），在有效控制租约和新观察下先异步恢复，再核实目标身份并请求激活。读取观察租约仍不能恢复或聚焦。恢复/激活后的旧观察失效，继续键鼠操作前必须刷新。
 
 回执中的 foreground_observed 确认实际前台，screenshot_verified:false 表示未以截图验证；focus_diagnostic 分开显示恢复请求、SetForegroundWindow 返回值、前台前后状态和经过时间。RDP 最小化导致像素不可用并不等于无法创建普通 GUI 进程；实际输入仍要求可操作的输入桌面。具体流程与已知限制见 [远程桌面说明](REMOTE_DESKTOP.md)。
+
+## 1.1.3 Windows UIA
+
+显式启用 uia_tree/uia_action 后，可读取有界控件树并提交六类语义 pattern。读取沿用观察租约；动作要求控制租约、人工未暂停、目标已处于前台和最新元素身份。独立 MTA 辅助进程可回收无响应提供者，超时效果按未知处理。见 [UIA 使用与限制](INTERACTIVE_TOOLS.md#windows-ui-automation)。

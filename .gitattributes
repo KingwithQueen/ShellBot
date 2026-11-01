@@ -3,7 +3,9 @@
 ###############################################################################
 * text=auto
 
-# Preserve the exact upstream bytes recorded in the POSIX dependency provenance.
+# Preserve the exact upstream bytes recorded in dependency provenance.
+# Keep upstream formatting and configured Windows files byte-for-byte.
+third_party/pcre2/** -text -whitespace
 third_party/stb/** -text
 third_party/pdfium/linux-x64/** -text
 third_party/pdfium/mac-x64/** -text

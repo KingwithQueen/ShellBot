@@ -1,0 +1,223 @@
+{
+  "version": "10.49",
+  "source_url": "https://github.com/PCRE2Project/pcre2/releases/download/pcre2-10.49/pcre2-10.49.tar.gz",
+  "sha256": "929f0b20e62879252a15886b06c89f1edef61a363cbd5826fb041080a5e557ae",
+  "verification": "Matches GitHub release asset digest",
+  "release_url": "https://github.com/PCRE2Project/pcre2/releases/tag/pcre2-10.49",
+  "build": "Static 8-bit Unicode C library, no JIT, no external executable or runtime DLL.",
+  "local_configuration": "config.h enables only SUPPORT_PCRE2_8 and SUPPORT_UNICODE from config.h.generic; pcre2.h and pcre2_chartables.c copied from upstream templates; pcre2.vcxproj is ShellBot build metadata.",
+  "retained_files": [
+    {
+      "path": "AUTHORS.md",
+      "sha256": "412ace3355a4d6a4d835c350a7df172903811eafda7b13500dacf58429ee757e"
+    },
+    {
+      "path": "COPYING",
+      "sha256": "99272c55f3dcfa07a8a7e15a5c1a33096e4727de74241d65fa049fccfdd59507"
+    },
+    {
+      "path": "LICENCE.md",
+      "sha256": "197d8a73ffee0d6b09adba2f9c677b5f5aede24edf89258a68e48248d010d811"
+    },
+    {
+      "path": "NON-AUTOTOOLS-BUILD",
+      "sha256": "8a6058617d31141df3339cd85b8451ea0dfb4d5551f64be276ee1e6e0e3cff36"
+    },
+    {
+      "path": "pcre2.vcxproj",
+      "sha256": "4a3f6efcc3b843025ec4470327360d04d63eaf56b2311033b2781301b22f1736"
+    },
+    {
+      "path": "README",
+      "sha256": "47319985a9919d7d6030373a33233ce0449b6459a9bce23537afadb2305e2fc2"
+    },
+    {
+      "path": "src/config.h",
+      "sha256": "35a697d4f6801829620d76d86ba81367cff3375bcb43487bda4aafd1f7936bce"
+    },
+    {
+      "path": "src/config.h.generic",
+      "sha256": "f26e11da773d88965b848536680f1452e0b29c53a5f2959f5715a9a565dcab24"
+    },
+    {
+      "path": "src/pcre2.h",
+      "sha256": "19756397bb6c402d43f74ba827c55acd26c21d078eead9ed5d49f582e4c506d8"
+    },
+    {
+      "path": "src/pcre2.h.generic",
+      "sha256": "19756397bb6c402d43f74ba827c55acd26c21d078eead9ed5d49f582e4c506d8"
+    },
+    {
+      "path": "src/pcre2_auto_possess.c",
+      "sha256": "53855156e91473a9fd905bff2c54bbe395ad479cf6a8d313a4502f85e121bcf4"
+    },
+    {
+      "path": "src/pcre2_chartables.c",
+      "sha256": "a0ceb94d96a2b438524d0cb85168e1ab5323c871865ddf9d524d45eb1ed131d1"
+    },
+    {
+      "path": "src/pcre2_chartables.c.dist",
+      "sha256": "a0ceb94d96a2b438524d0cb85168e1ab5323c871865ddf9d524d45eb1ed131d1"
+    },
+    {
+      "path": "src/pcre2_chkdint.c",
+      "sha256": "ffc49737b8303e240671ae15662cfe3f33db649bfe303607fc7d12a0f85abac8"
+    },
+    {
+      "path": "src/pcre2_compile.c",
+      "sha256": "01f7e90e6ccea23097911b35e33a1b6ea567887216d2695a24fcd27fbcf35223"
+    },
+    {
+      "path": "src/pcre2_compile.h",
+      "sha256": "a8a64450a3efea195b3cb26a91b5088bcb42f48dd751cac78688d4dda2b45c99"
+    },
+    {
+      "path": "src/pcre2_compile_cgroup.c",
+      "sha256": "48999c337a5ae7f36ceb4c5d8efb39b1b6784d265d3468ab8878f2b72a7ced6e"
+    },
+    {
+      "path": "src/pcre2_compile_class.c",
+      "sha256": "601d14f8238a54d20528cfaf16489eaf6e9c4ae45e27c582796fb56280cd3519"
+    },
+    {
+      "path": "src/pcre2_config.c",
+      "sha256": "19709c2d378830a5444b046aa4bab11f8192e8958b773814fe17b409a5d1bba8"
+    },
+    {
+      "path": "src/pcre2_context.c",
+      "sha256": "fb47ff3678401ea5d6247c24a2ccca2311bb35fddf66cf7ffa0db48de4654978"
+    },
+    {
+      "path": "src/pcre2_convert.c",
+      "sha256": "fdd5058c666eec60fe6320bd31520137db330c743ad46de7e05464ba8614516e"
+    },
+    {
+      "path": "src/pcre2_dfa_match.c",
+      "sha256": "abbe0ba7c973ede93733cafdc1168b5ac12d925370d2f3f032e8acbbe769d148"
+    },
+    {
+      "path": "src/pcre2_error.c",
+      "sha256": "b564ff9a785fa5d9d0592945dea35a668e34760f61d818daf03dea86d22bf18c"
+    },
+    {
+      "path": "src/pcre2_extuni.c",
+      "sha256": "8d1b4bd7015980101b44104ab0250f634d82be90bca0d53701731fcf9c1a70ce"
+    },
+    {
+      "path": "src/pcre2_find_bracket.c",
+      "sha256": "9fde442db9bea0a7b406ff29e65c274ae0286536f14075a62502aef69f3cf0d8"
+    },
+    {
+      "path": "src/pcre2_internal.h",
+      "sha256": "558dca4b23799024a69c25ed0a8c6f6823315c2352a07895d4bdf92d753dbc58"
+    },
+    {
+      "path": "src/pcre2_intmodedep.h",
+      "sha256": "e64e88bb04168c9b2f10ed32320a7290e050e2253f09ee9f60757c8bf375f8a3"
+    },
+    {
+      "path": "src/pcre2_jit_char_inc.h",
+      "sha256": "722a2a686383a896d1c2a6808350fcd2993f1acb1af8805ed2f0e02c736fd5c9"
+    },
+    {
+      "path": "src/pcre2_jit_compile.c",
+      "sha256": "32b4f057cc8ac9a15c9c837121112329e866c1bc1d98acce148ceeff4525c587"
+    },
+    {
+      "path": "src/pcre2_jit_match_inc.h",
+      "sha256": "fb541db739d8d63e03ec248c378bc3e352a3e191fbac2fc2336ee859850ab11b"
+    },
+    {
+      "path": "src/pcre2_jit_misc_inc.h",
+      "sha256": "c25c59789cd304fa44ca536d9719b7d4db92bec285476adbcede9d7f4a08f3db"
+    },
+    {
+      "path": "src/pcre2_jit_simd_inc.h",
+      "sha256": "cb413ff3ac7c8d85435662e6a475e28009b30b3e4c071a7dca1d8f1ba98ce978"
+    },
+    {
+      "path": "src/pcre2_maketables.c",
+      "sha256": "126bf7b41c44d61f19cb40ac25d6d50110bab9de50708bb22df645d2920f8e62"
+    },
+    {
+      "path": "src/pcre2_match.c",
+      "sha256": "aa91540f2c8e6dd203d956b0b8b5e2aea1a206be78d110a037b7105ef3fc62a9"
+    },
+    {
+      "path": "src/pcre2_match_data.c",
+      "sha256": "c9b6b970ed1e8a6d52635f6476274ff28682c55614b100799e482ecbcb1f1857"
+    },
+    {
+      "path": "src/pcre2_match_next.c",
+      "sha256": "226ef5bcd136110ec71426981df42c2f4f0710ea46e6061d2ba05d03cf6a0bc8"
+    },
+    {
+      "path": "src/pcre2_newline.c",
+      "sha256": "bbfc7e6f1d95a2986948b7d0be5c2355d1560198d403f48fa72e0c82c7c9c920"
+    },
+    {
+      "path": "src/pcre2_ord2utf.c",
+      "sha256": "6582725ebab88842fffffd348f59f7d6d58d66fe4b68384ecccad526a5203d89"
+    },
+    {
+      "path": "src/pcre2_pattern_info.c",
+      "sha256": "d63e56279b9e3b9309329cc738003fac3f89c49676d26db7fc647123ce06e50d"
+    },
+    {
+      "path": "src/pcre2_printint_inc.h",
+      "sha256": "61bcb4d8f40d9238b4ef6460df5910f81a0cc8dfa595d58e747707ba2eb340c3"
+    },
+    {
+      "path": "src/pcre2_script_run.c",
+      "sha256": "caf29e2cdc67035be5c131f2434ebe2072e08c8e6f15ca0f3e28e9795d4512f6"
+    },
+    {
+      "path": "src/pcre2_serialize.c",
+      "sha256": "873afc4748a508c520055a94743df902ef3412625a06fe569d4409d6f1f4b330"
+    },
+    {
+      "path": "src/pcre2_string_utils.c",
+      "sha256": "5ade214c7170383b97874ead541bafe1c962e9b7f61ac10e8d87e404be76968f"
+    },
+    {
+      "path": "src/pcre2_study.c",
+      "sha256": "3bfcfcce37f729252df9e23b5419a93d8542b6dfc5f47ac990d72e74ca9a2e3f"
+    },
+    {
+      "path": "src/pcre2_substitute.c",
+      "sha256": "23998ee7e5f5c2fd1c6b2b4c2ee9b48356076f7d06a678b00d5efe7c98383732"
+    },
+    {
+      "path": "src/pcre2_substring.c",
+      "sha256": "76ef81b82e3d48572da556ee063dd7602d916aa62ea8be4d1d42229936669bf4"
+    },
+    {
+      "path": "src/pcre2_tables.c",
+      "sha256": "ab96e9e615b5b43bfd601b0d3d3be67a317c362706167c024f365e8af489e65d"
+    },
+    {
+      "path": "src/pcre2_ucd.c",
+      "sha256": "cfa8bcb3ad316e09ebfdf3e4b07d708a9d4e53795cc7c0bf04ce5156d7695adc"
+    },
+    {
+      "path": "src/pcre2_ucp.h",
+      "sha256": "7029256f6212e729458759a925a624fe5d94a2be1f6425b4ae3816795bbf1f02"
+    },
+    {
+      "path": "src/pcre2_ucptables_inc.h",
+      "sha256": "5690fa727d95555afed799bdd5800f9f7b4302fd464e98d850fb9c9b4c28939f"
+    },
+    {
+      "path": "src/pcre2_util.h",
+      "sha256": "ae763c7cc12f8b770aeb632de7ed0e8ec77163baf9316f6493be599121ec58c9"
+    },
+    {
+      "path": "src/pcre2_valid_utf.c",
+      "sha256": "fc7271e737bc7828b27bf52ade1feb0e1d29e40a9ef737d102ddb0a8091ccc3f"
+    },
+    {
+      "path": "src/pcre2_xclass.c",
+      "sha256": "1e8cfe268ec0a322bd6c2dc1e66fdbf515d742760b17584c43eaa7efdcb490b6"
+    }
+  ]
+}
