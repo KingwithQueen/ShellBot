@@ -18,7 +18,7 @@ static const tool_definition definitions[] = {
     {"artifact_download", "Transfer an authorized binary file within max_transfer_bytes from host_capabilities in bounded Base64 chunks. Versioned projects only. open requires workspace_id/path and request_key; optional expected_sha256/ttl_seconds. Approval precedes all source bytes. read requires transfer_id and offset, optionally max_bytes up to max_transfer_chunk_bytes; continue at next_offset, retry only the last chunk. status/cancel require transfer_id. Bound to caller, project and backend; no anonymous URL or client attachment integration.", "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"open\",\"read\",\"status\",\"cancel\"]},\"workspace_id\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"request_key\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":64},\"transfer_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32},\"offset\":{\"type\":\"integer\",\"minimum\":0},\"expected_sha256\":{\"type\":\"string\",\"minLength\":64,\"maxLength\":64},\"ttl_seconds\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":900},\"max_bytes\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":32768}},\"required\":[\"action\"],\"additionalProperties\":false}"},
     {"artifact_upload", "Upload a binary file within max_transfer_bytes from host_capabilities to a NEW authorized destination. Versioned projects only, write permission mandatory. open requires workspace_id/path, request_key, exact size and expected_sha256 before approval/staging. write requires transfer_id, offset, canonical data_base64 up to max_transfer_chunk_bytes decoded bytes. Append at next_offset; retry only identical last bytes. commit verifies complete size/SHA-256 then creates the file, never overwrites. status/cancel require transfer_id. Expiry/revoke/restart cannot resume staging.", "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"open\",\"write\",\"commit\",\"status\",\"cancel\"]},\"workspace_id\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"request_key\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":64},\"transfer_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32},\"offset\":{\"type\":\"integer\",\"minimum\":0},\"expected_sha256\":{\"type\":\"string\",\"minLength\":64,\"maxLength\":64},\"ttl_seconds\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":900},\"size\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":67108864},\"data_base64\":{\"type\":\"string\",\"maxLength\":43692}},\"required\":[\"action\"],\"additionalProperties\":false}"},
     {"host_info", "Report ShellBot version, native OS and uptime.", "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"},
-    {"host_capabilities", "Report implemented tools, workspace permissions, limits and pending features.", "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"},
+    {"host_capabilities", "Report tools, permissions, limits and caller-isolated recent request diagnostics. request_diagnostics_limit defaults to 8 and can retrieve up to the retained 128 records; only key hashes, never argument values.", "{\"type\":\"object\",\"properties\":{\"request_diagnostics_limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":128,\"default\":8}},\"additionalProperties\":false}"},
     {"fs_write", "Create UTF-8 text by default. Existing-file overwrite requires overwrite:true and expected_sha256, a private backup and local owner approval. Inspect/approve locally, then retry identical arguments with approval_id. read_only:false is required. Overwrite is a locked in-place edit with backup, not an atomic save.",
         "{\"type\":\"object\",\"properties\":{\"workspace_id\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"text\":{\"type\":\"string\"},\"overwrite\":{\"type\":\"boolean\",\"default\":false},\"expected_sha256\":{\"type\":\"string\",\"minLength\":64,\"maxLength\":64},\"approval_id\":{\"type\":\"string\"}},\"required\":[\"workspace_id\",\"path\",\"text\"],\"additionalProperties\":false}"},
     {"fs_patch", "Replace literal UTF-8 text in an existing file after local approval. Requires expected_sha256 and exact non-overlapping expected_matches (default 1). Retains BOM/line endings and rejects conflicts. Makes a private backup before locked in-place editing; not an atomic save.",
@@ -329,6 +329,9 @@ static yyjson_mut_val *tool_call_inner(sb_host *host, const char *actor, const c
         return content_result(doc, data, false);
     }
     if (!strcmp(name, "host_capabilities")) {
+        uint64_t trace_limit=8;
+        if(!number(args,"request_diagnostics_limit",8,1,SB_TRACE_CAPACITY,&trace_limit))return failure(doc,"request_diagnostics_limit must be between 1 and 128.");
+        yyjson_mut_obj_add_val(doc,data,"request_diagnostics",sb_recent_requests(host,actor,(unsigned)trace_limit,doc));
 #ifdef SB_POSIX
         const bool media_available = true;
         const bool account_files_available = true;
@@ -792,8 +795,12 @@ static yyjson_mut_val *file_manage_call(sb_host *host, const char *actor, const 
     result=content_result(doc,data,!ok);
     if (*ticket && !sb_policy_operation_finish(host->policy,ticket,result)) yyjson_mut_obj_add_str(doc,data,"audit_warning","Result is authoritative; final persistent recording is incomplete.");
     goto done;
-failed:
-    result=failure(doc,*error.text ? error.text : "Cannot prepare the native file operation.");
+failed:;
+    yyjson_mut_val *details=yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_strcpy(doc,details,"error",*error.text?error.text:"Cannot prepare the native file operation.");
+    if(error.code){yyjson_mut_obj_add_strcpy(doc,details,"code",error.code);yyjson_mut_obj_add_str(doc,details,"field","path");}
+    if(error.native_system){yyjson_mut_obj_add_str(doc,details,"native_error_system",error.native_system);yyjson_mut_obj_add_uint(doc,details,"native_error_code",error.native_code);}
+    result=content_result(doc,details,true);
 done:
     sb_platform_fs_close(plan); free(parameters); fs_location_close(&locations[0]); fs_location_close(&locations[1]); return result;
 }

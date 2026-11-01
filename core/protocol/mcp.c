@@ -179,27 +179,93 @@ void sb_request_id(char id[33]) {
     for(size_t i=0;i<16;++i)snprintf(id+i*2,3,"%02x",bytes[i]);
 }
 
+bool sb_rpc_tool_request(yyjson_val *request) {
+    const char *version=sb_string(yyjson_obj_get(request,"jsonrpc")),*method=sb_string(yyjson_obj_get(request,"method"));
+    yyjson_val *id=yyjson_obj_get(request,"id"),*params=yyjson_obj_get(request,"params"),*args=yyjson_obj_get(params,"arguments");
+    return version && !strcmp(version,"2.0") && method && !strcmp(method,"tools/call") &&
+        (yyjson_is_int(id) || sb_string(id)) && unambiguous(request,0) &&
+        sb_string(yyjson_obj_get(params,"name")) && (!args || yyjson_is_obj(args));
+}
+static const char *retry_guidance(const char *tool,bool invoked) {
+    if(!invoked)return "retry_original_request";
+    if(tool && (!strcmp(tool,"task_start") || !strcmp(tool,"task_input")))return "same_key_only";
+    if(tool && (!strcmp(tool,"desktop_click") || !strcmp(tool,"desktop_drag") || !strcmp(tool,"desktop_scroll") ||
+        !strcmp(tool,"desktop_type") || !strcmp(tool,"desktop_key") || !strcmp(tool,"window_focus") || !strcmp(tool,"clipboard_write")))return "observe_before_retry_no_automatic_replay";
+    return "inspect_state_before_retry";
+}
+static yyjson_mut_val *trace_value(yyjson_mut_doc *doc,const char *id,const char *instance,const char *stage,const char *state) {
+    yyjson_mut_val *trace=yyjson_mut_obj(doc);
+    yyjson_mut_obj_add_strcpy(doc,trace,"request_id",id);yyjson_mut_obj_add_strcpy(doc,trace,"trace_id",id);
+    yyjson_mut_obj_add_strcpy(doc,trace,"host_instance_id",instance?instance:"");
+    yyjson_mut_obj_add_strcpy(doc,trace,"stage",stage);yyjson_mut_obj_add_strcpy(doc,trace,"execution_state",state);return trace;
+}
+char *sb_rpc_failure(yyjson_val *request,const char *request_id,const char *instance,
+    const char *stage,bool invoked,const char *code,const char *reason) {
+    yyjson_mut_doc *doc=yyjson_mut_doc_new(NULL);if(!doc)return NULL;
+    yyjson_mut_val *root=yyjson_mut_obj(doc),*data=trace_value(doc,request_id,instance,stage,invoked?"unknown":"not_started");
+    yyjson_val *id=yyjson_obj_get(request,"id");const char *tool=sb_string(yyjson_obj_get(yyjson_obj_get(request,"params"),"name"));
+    const char *guidance=!strcmp(code,"PROJECT_UNAVAILABLE")?"owner_action_required":retry_guidance(tool,invoked);
+    yyjson_mut_obj_add_strcpy(doc,data,"error_code",code);yyjson_mut_obj_add_strcpy(doc,data,"code",code);
+    if(!strcmp(code,"PROJECT_BUSY")){yyjson_mut_obj_add_bool(doc,data,"request_queued",false);yyjson_mut_obj_add_bool(doc,data,"retryable",true);yyjson_mut_obj_add_uint(doc,data,"retry_after_ms",1000);}
+    yyjson_mut_obj_add_strcpy(doc,data,"error",reason);yyjson_mut_obj_add_strcpy(doc,data,"reason",reason);
+    yyjson_mut_obj_add_str(doc,data,"retry_guidance",guidance);yyjson_mut_obj_add_bool(doc,data,"automatic_replay",false);
+    yyjson_mut_obj_add_str(doc,root,"jsonrpc","2.0");
+    yyjson_mut_obj_add_val(doc,root,"id",(yyjson_is_int(id)||sb_string(id))?yyjson_val_mut_copy(doc,id):yyjson_mut_null(doc));
+    if(sb_rpc_tool_request(request)) {
+        /* MCP clients often discard JSON-RPC error.data. Tool failures belong in CallToolResult. */
+        yyjson_mut_val *result=yyjson_mut_obj(doc),*content=yyjson_mut_arr(doc),*entry=yyjson_mut_obj(doc);char summary[256];
+        snprintf(summary,sizeof(summary),"%s: request_id=%s; stage=%s; execution_state=%s; %s.",code,request_id,stage,invoked?"unknown":"not_started",guidance);
+        yyjson_mut_obj_add_str(doc,entry,"type","text");yyjson_mut_obj_add_strcpy(doc,entry,"text",summary);yyjson_mut_arr_add_val(content,entry);
+        yyjson_mut_obj_add_bool(doc,result,"isError",true);yyjson_mut_obj_add_val(doc,result,"content",content);
+        yyjson_mut_obj_add_val(doc,result,"structuredContent",data);
+        const char *version=sb_string(yyjson_obj_get(yyjson_obj_get(yyjson_obj_get(request,"params"),"_meta"),"io.modelcontextprotocol/protocolVersion"));
+        if(version && !strcmp(version,"2026-07-28")){
+            yyjson_mut_obj_add_str(doc,result,"resultType","complete");yyjson_mut_val *meta=yyjson_mut_obj(doc);
+            yyjson_mut_obj_add_val(doc,meta,"io.modelcontextprotocol/serverInfo",server_info(doc));yyjson_mut_obj_add_strcpy(doc,meta,"shellbot/request_id",request_id);yyjson_mut_obj_add_val(doc,result,"_meta",meta);
+        }
+        yyjson_mut_obj_add_val(doc,root,"result",result);
+    }else{
+        yyjson_mut_val *error=yyjson_mut_obj(doc);yyjson_mut_obj_add_int(doc,error,"code",-32603);
+        yyjson_mut_obj_add_str(doc,error,"message","Internal error; inspect error.data and correlate the server diagnostic.");
+        yyjson_mut_obj_add_val(doc,error,"data",data);yyjson_mut_obj_add_val(doc,root,"error",error);
+    }
+    yyjson_mut_doc_set_root(doc,root);char *wire=yyjson_mut_write(doc,0,NULL);yyjson_mut_doc_free(doc);return wire;
+}
 char *sb_rpc_internal_error(sb_host *host,yyjson_val *request,const char *request_id,
     const char *instance,const char *stage,bool invoked,const char *reason) {
-    yyjson_val *id=yyjson_obj_get(request,"id"),*params=yyjson_obj_get(request,"params"),*args=yyjson_obj_get(params,"arguments");
-    const char *tool=sb_string(yyjson_obj_get(params,"name"));if(!tool || !sb_tool_exists(tool))tool="unknown";
-    sb_audit_diagnostic(host?host->audit:NULL,request_id,instance,stage,tool,args,reason);
-    yyjson_mut_doc *doc=yyjson_mut_doc_new(NULL);if(!doc)return NULL;
-    yyjson_mut_val *root=yyjson_mut_obj(doc),*error=yyjson_mut_obj(doc),*data=yyjson_mut_obj(doc);
-    const char *guidance=!invoked?"retry_original_request":"inspect_state_before_retry";
-    if(invoked && (!strcmp(tool,"task_start") || !strcmp(tool,"task_input")))guidance="same_key_only";
-    if(invoked && (!strcmp(tool,"desktop_click") || !strcmp(tool,"desktop_drag") || !strcmp(tool,"desktop_scroll") ||
-        !strcmp(tool,"desktop_type") || !strcmp(tool,"desktop_key") || !strcmp(tool,"window_focus") || !strcmp(tool,"clipboard_write")))guidance="observe_before_retry_no_automatic_replay";
-    bool ok=root && error && data && yyjson_mut_obj_add_str(doc,root,"jsonrpc","2.0") &&
-        yyjson_mut_obj_add_val(doc,root,"id",(yyjson_is_int(id) || sb_string(id))?yyjson_val_mut_copy(doc,id):yyjson_mut_null(doc)) &&
-        yyjson_mut_obj_add_int(doc,error,"code",-32603) && yyjson_mut_obj_add_str(doc,error,"message","Internal error; inspect error.data and correlate the server diagnostic.") &&
-        yyjson_mut_obj_add_str(doc,data,"error_code","INTERNAL_ERROR") && yyjson_mut_obj_add_strcpy(doc,data,"request_id",request_id) &&
-        yyjson_mut_obj_add_strcpy(doc,data,"host_instance_id",instance?instance:"") && yyjson_mut_obj_add_strcpy(doc,data,"stage",stage) &&
-        yyjson_mut_obj_add_str(doc,data,"execution_state",invoked?"unknown":"not_started") &&
-        yyjson_mut_obj_add_str(doc,data,"retry_guidance",guidance) && yyjson_mut_obj_add_strcpy(doc,data,"reason",reason) &&
-        yyjson_mut_obj_add_val(doc,error,"data",data) && yyjson_mut_obj_add_val(doc,root,"error",error);
-    yyjson_mut_doc_set_root(doc,root);char *wire=ok?yyjson_mut_write(doc,0,NULL):NULL;
-    yyjson_mut_doc_free(doc);return wire;
+    yyjson_val *params=yyjson_obj_get(request,"params");const char *tool=sb_string(yyjson_obj_get(params,"name"));
+    if(!tool || !sb_tool_exists(tool))tool="unknown";
+    sb_audit_diagnostic(host?host->audit:NULL,request_id,instance,stage,tool,yyjson_obj_get(params,"arguments"),reason);
+    return sb_rpc_failure(request,request_id,instance,stage,invoked,"INTERNAL_ERROR",reason);
+}
+static sb_request_trace *trace_begin(sb_host *host,const char *actor,const char *id,const char *tool,yyjson_val *args) {
+    sb_request_trace *entry=&host->request_traces[host->request_trace_count++%SB_TRACE_CAPACITY];memset(entry,0,sizeof(*entry));sb_error error={0};
+    snprintf(entry->request_id,sizeof(entry->request_id),"%s",id);snprintf(entry->tool,sizeof(entry->tool),"%s",tool);
+    sb_platform_sha256(actor,strlen(actor),entry->actor_sha256,&error);
+    const char *key=sb_string(yyjson_obj_get(args,"request_key")),*input=sb_string(yyjson_obj_get(args,"input_key"));
+    if(key)sb_platform_sha256(key,strlen(key),entry->request_key_sha256,&error);
+    if(input)sb_platform_sha256(input,strlen(input),entry->input_key_sha256,&error);
+    entry->started_ms=sb_platform_millis();entry->started_unix_ms=sb_platform_unix_ms();entry->stage="worker_invoke";entry->execution_state="in_progress";return entry;
+}
+yyjson_mut_val *sb_recent_requests(sb_host *host,const char *actor,unsigned limit,yyjson_mut_doc *doc) {
+    yyjson_mut_val *result=yyjson_mut_obj(doc),*recent=yyjson_mut_arr(doc);char digest[65]={0};sb_error error={0};
+    bool hashed=sb_platform_sha256(actor,strlen(actor),digest,&error);unsigned matched=0;
+    uint64_t count=host->request_trace_count<SB_TRACE_CAPACITY?host->request_trace_count:SB_TRACE_CAPACITY;
+    for(uint64_t i=0;hashed && i<count;++i){
+        sb_request_trace *entry=&host->request_traces[(host->request_trace_count-1-i)%SB_TRACE_CAPACITY];
+        if(!*entry->actor_sha256 || strcmp(entry->actor_sha256,digest))continue;
+        ++matched;if(matched>limit)continue;
+        yyjson_mut_val *item=trace_value(doc,entry->request_id,sb_execution_instance(host->execution),entry->stage,entry->execution_state);
+        yyjson_mut_obj_add_strcpy(doc,item,"tool",entry->tool);yyjson_mut_obj_add_uint(doc,item,"started_unix_ms",entry->started_unix_ms);
+        yyjson_mut_obj_add_uint(doc,item,"duration_ms",entry->duration_ms);yyjson_mut_obj_add_bool(doc,item,"is_error",entry->is_error);
+        yyjson_mut_obj_add_bool(doc,item,"internal_error",entry->internal_error);
+        if(*entry->request_key_sha256)yyjson_mut_obj_add_strcpy(doc,item,"request_key_sha256",entry->request_key_sha256);
+        if(*entry->input_key_sha256)yyjson_mut_obj_add_strcpy(doc,item,"input_key_sha256",entry->input_key_sha256);
+        yyjson_mut_arr_add_val(recent,item);
+    }
+    yyjson_mut_obj_add_uint(doc,result,"capacity",SB_TRACE_CAPACITY);yyjson_mut_obj_add_uint(doc,result,"caller_retained_count",matched);
+    yyjson_mut_obj_add_bool(doc,result,"persisted",false);yyjson_mut_obj_add_str(doc,result,"scope","current project, caller and worker; newest first; hashes only, never argument values");
+    yyjson_mut_obj_add_val(doc,result,"recent",recent);return result;
 }
 
 char *sb_dispatch(sb_host *host, sb_protocol *protocol, const char *request,
@@ -207,12 +273,12 @@ char *sb_dispatch(sb_host *host, sb_protocol *protocol, const char *request,
     *response_length = 0; *http_status = 200;
     char generated_id[33];sb_request_id(generated_id);
     const char *request_id=context && context->request_id?context->request_id:generated_id;
-    const char *instance=sb_execution_instance(host->execution),*stage="parse",*internal_reason=NULL;bool invoked=false;
+    const char *instance=sb_execution_instance(host->execution),*stage="parse",*internal_reason=NULL;bool invoked=false;sb_request_trace *active_trace=NULL;
     yyjson_doc *input = length <= SB_REQUEST_LIMIT ? yyjson_read(request, length, 0) : NULL;
     yyjson_mut_doc *output = yyjson_mut_doc_new(NULL);
     if (!output) {
         char *failure=sb_rpc_internal_error(host,yyjson_doc_get_root(input),request_id,instance,stage,false,"response_allocation_failed");
-        yyjson_doc_free(input);*http_status=500;*response_length=failure?strlen(failure):0;return failure;
+        *http_status=sb_rpc_tool_request(yyjson_doc_get_root(input))?200:500;yyjson_doc_free(input);*response_length=failure?strlen(failure):0;return failure;
     }
     yyjson_mut_val *response = yyjson_mut_obj(output);
     yyjson_mut_doc_set_root(output, response);
@@ -306,6 +372,7 @@ char *sb_dispatch(sb_host *host, sb_protocol *protocol, const char *request,
         else if (!sb_tool_exists(name)) rpc_error(output,response,-32602,"Unknown tool.");
         else {
             stage="worker_invoke";invoked=true;
+            active_trace=trace_begin(host,context && context->actor?context->actor:(protocol?"stdio":"http-development"),request_id,name,yyjson_obj_get(call,"arguments"));
             yyjson_mut_val *result=sb_tool_call(host,context && context->actor ? context->actor :
                 (protocol ? "stdio" : "http-development"),name,yyjson_obj_get(call,"arguments"),output);
             stage="worker_reply";
@@ -332,6 +399,18 @@ char *sb_dispatch(sb_host *host, sb_protocol *protocol, const char *request,
             yyjson_mut_obj_add_str(output, result, "cacheScope", "private");
         }
     }
+    if(result && sb_rpc_tool_request(root)){
+        yyjson_mut_val *data=yyjson_mut_obj_get(result,"structuredContent");
+        if(yyjson_mut_is_obj(data))yyjson_mut_obj_add_val(output,data,"request_trace",trace_value(output,request_id,instance,"worker_reply","result_available"));
+        const char *mode=sb_string(yyjson_obj_get(yyjson_obj_get(params,"arguments"),"response_mode"));
+        yyjson_mut_val *entry=yyjson_mut_arr_get(yyjson_mut_obj_get(result,"content"),0);
+        const char *text=yyjson_mut_get_str(yyjson_mut_obj_get(entry,"text"));
+        if(mode && !strcmp(mode,"compact") && text){
+            size_t capacity=strlen(text)+48;char *summary=malloc(capacity);
+            if(summary){snprintf(summary,capacity,"%s request_id=%s",text,request_id);yyjson_mut_obj_remove_str(entry,"text");yyjson_mut_obj_add_strcpy(output,entry,"text",summary);free(summary);}
+            else internal_reason="response_allocation_failed";
+        }
+    }
     if(result){
         yyjson_mut_val *trace=yyjson_mut_obj_get(result,"_meta");
         if(!trace){trace=yyjson_mut_obj(output);yyjson_mut_obj_add_val(output,result,"_meta",trace);}
@@ -351,7 +430,9 @@ char *sb_dispatch(sb_host *host, sb_protocol *protocol, const char *request,
     }
     if(internal_reason){
         free(serialized);serialized=sb_rpc_internal_error(host,root,request_id,instance,stage,invoked,internal_reason);
-        *response_length=serialized?strlen(serialized):0;*http_status=500;
+        *response_length=serialized?strlen(serialized):0;*http_status=sb_rpc_tool_request(root)?200:500;
     }
+    if(active_trace){active_trace->stage=stage;active_trace->execution_state=internal_reason?"unknown":"result_available";
+        active_trace->is_error=internal_reason!=NULL || yyjson_mut_get_bool(yyjson_mut_obj_get(result,"isError"));active_trace->internal_error=internal_reason!=NULL;active_trace->duration_ms=sb_platform_millis()-active_trace->started_ms;}
     yyjson_doc_free(input);yyjson_mut_doc_free(output);return serialized;
 }

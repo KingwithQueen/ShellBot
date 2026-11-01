@@ -53,3 +53,7 @@ task_operation_requested 在 start/input/cancel 的后端操作前记录意图�
 ## 1.1.0 内部错误诊断
 
 `internal_error` 按服务端 request_id 关联主机实例、失败阶段、工具及参数类型计数，记录诊断边界栈地址；不写完整参数或认证。详见 [内部错误](INTERNAL_ERRORS.md)。进程崩溃后的管理器栈不代表工作进程崩溃现场。
+
+## 1.1.1 请求记录
+
+最近请求窗口仅在内存中保留工具、编号、时间、状态及键哈希，按项目/调用方过滤，不将正常每次轮询写进 8 MiB 审计预算。内部失败仍沿用受保护 internal_error 事件。见 [内部错误](INTERNAL_ERRORS.md)。

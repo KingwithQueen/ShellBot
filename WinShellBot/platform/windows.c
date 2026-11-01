@@ -183,8 +183,13 @@ sb_file *sb_platform_open(sb_root *root, const char *relative, bool directory, s
     free(suffix);
     HANDLE handle = CreateFileW(path, directory ? FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES : GENERIC_READ,
         FILE_SHARE_READ | (directory ? FILE_SHARE_WRITE : 0), NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    DWORD open_error=handle==INVALID_HANDLE_VALUE?GetLastError():ERROR_SUCCESS;
     free(path);
-    if (handle == INVALID_HANDLE_VALUE) { sb_fail(error, "Cannot open path for reading."); return NULL; }
+    if (handle == INVALID_HANDLE_VALUE) {
+        DWORD code=open_error;sb_fail(error,"Cannot open path for reading.");
+        error->code=(code==ERROR_FILE_NOT_FOUND || code==ERROR_PATH_NOT_FOUND)?"NOT_FOUND":code==ERROR_ACCESS_DENIED?"ACCESS_DENIED":code==ERROR_SHARING_VIOLATION?"SHARING_VIOLATION":"NATIVE_OPEN_FAILED";
+        error->native_system="Win32";error->native_code=code;return NULL;
+    }
     wchar_t *actual = final_path(handle);
     BY_HANDLE_FILE_INFORMATION info = {0};
     bool valid = actual && wcslen(actual) >= prefix &&
@@ -966,14 +971,19 @@ sb_fs_plan *sb_platform_fs_prepare(const char *operation, sb_root *source, const
         ACCESS_MASK access=FILE_READ_ATTRIBUTES;
         if (plan->operation==2 || (plan->operation==4 && !directory)) access|=GENERIC_READ;
         if (plan->operation>=3) access|=DELETE;
-        if (!plan->source || fs_open_relative(plan->source->parent->handle,plan->source->leaf,access,1,
-            directory ? 0x1 : 0x40,&plan->file.handle)<0) goto failed;
+        if (!plan->source)goto failed;
+        NTSTATUS status=fs_open_relative(plan->source->parent->handle,plan->source->leaf,access,1,directory ? 0x1 : 0x40,&plan->file.handle);
+        if(status<0){
+            uint32_t code=(uint32_t)status;sb_fail(error,"Cannot open the authorized source object.");
+            error->code=(code==0xc0000034u || code==0xc000003au || code==0xc000000fu)?"NOT_FOUND":code==0xc0000022u?"ACCESS_DENIED":code==0xc0000043u?"SHARING_VIOLATION":(code==0xc00000bau || code==0xc0000103u)?"TYPE_MISMATCH":"NATIVE_OPEN_FAILED";
+            error->native_system="NTSTATUS";error->native_code=code;goto failed;
+        }
         plan->file.path=final_path(plan->file.handle);
         wchar_t *expected=wide(plan->source->target); BY_HANDLE_FILE_INFORMATION basic={0};
         bool valid=expected && plan->file.path && !wcscmp(expected,plan->file.path) &&
             GetFileType(plan->file.handle)==FILE_TYPE_DISK && GetFileInformationByHandle(plan->file.handle,&basic) &&
             !(basic.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT) && (directory || basic.nNumberOfLinks==1);
-        free(expected); if (!valid) goto failed;
+        free(expected); if (!valid) {sb_fail(error,"Source type, link count or resolved identity is unsupported.");error->code="UNSUPPORTED_FILE_TYPE_OR_LINK";goto failed;}
         plan->info.size=plan->file.size=((uint64_t)basic.nFileSizeHigh<<32)|basic.nFileSizeLow;
         if ((plan->operation==2 || plan->operation==4) && !directory && plan->file.size>SB_TRANSFER_LIMIT) {
             sb_fail(error,"Copy/deletion backup exceeds max_transfer_bytes from host_capabilities."); goto failed;

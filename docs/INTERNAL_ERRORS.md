@@ -1,3 +1,17 @@
+# 1.1.1 可见诊断与返回链路
+
+有效的 tools/call 内部故障使用 HTTP 200 和标准 MCP result：isError:true、简短 content、structuredContent 中的 error_code/request_id/trace_id/host_instance_id/stage/execution_state/retry_guidance。不再只依赖 JSON-RPC error.data；部分客户端会把它转换为泛化的 -32603 并丢弃诊断。2026 协议的工具失败仍有 resultType:complete 和 serverInfo。无效协议、解析和认证请求仍按原有 HTTP/JSON-RPC 错误返回。
+
+request_trace 属于每次调用的诊断，不进入审批摘要或持久幂等回执；重试时关联编号不同，任务 ID、文件版本和原操作结果仍按原规则复用。
+
+普通工具结果在 structuredContent.request_trace 中携带关联信息，compact 文本也含 request_id。每个 HTTP 请求由服务端生成独立 X-ShellBot-Request-ID，贯穿管理器、工作进程和响应；忽略客户端伪造的同名头。早期 HTTP 拒绝也含关联编号、阶段和 not_started。已认证的项目忙/停止工具请求返回 PROJECT_BUSY/PROJECT_UNAVAILABLE 标准工具错误；忙请求 request_queued:false 且 retry_after_ms:1000，停止项目必须由所有者明确启动。
+
+execution_state 的 result_available 只说明工作进程已生成工具回执，不证明客户端收到、文件修改一定成功或后台任务已退出；应继续检查工具本身的 isError、文件回执及 entry_process/job。not_started 表示请求未调用；unknown 表示副作用不能确认，服务端不会自动重放。有效截图或新观察凭据也不保证 Windows 授予前台权限。
+
+调用方如果只收到客户端 Internal error，可调用 host_capabilities（现有参数即可）检查 request_diagnostics。默认显示最近 8 条；刷新工具定义后可指定 request_diagnostics_limit:128。工作进程共享的 128 条内存窗口仅向当前项目、当前传输调用方返回匹配记录，满后淘汰旧诊断，不占任务预算。记录时间、阶段、工具、耗时、结果状态与键的 SHA256，不存正文或认证。通过 request_key/input_key 的 SHA256 可关联反馈记录；没有键的文件调用可按时间和工具名定位。重启后内存记录消失，内部错误继续记录受保护审计日志。记录显示 result_available 而客户端报错，可作为检查回执之后链路的线索，不能单凭此断言网络原因。
+
+原反馈机器的具体间歇原因尚未复现。升级后若仍发生，请保留可见关联编号、host_capabilities 的最近诊断和原始时间；它们不会授权重放桌面输入。此前 1.1.0 的接口说明与历史 JSON-RPC 错误形式如下。
+
 # 内部错误与请求关联
 
 Windows 1.1.0 为工具响应增加 `_meta["shellbot/request_id"]`。这是服务端生成的单次调用关联编号；即使调用方重复使用同一 JSON-RPC `id`，关联编号也不同。它不参与审批、任务幂等或权限判断。`response_mode:"compact"` 仍只在 `content` 中返回一句摘要，诊断字段不会复制整个结果。

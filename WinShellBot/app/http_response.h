@@ -1,5 +1,8 @@
 #ifndef SHELLBOT_HTTP_RESPONSE_H
 #define SHELLBOT_HTTP_RESPONSE_H
+#ifndef SB_HTTP_TRACE_HEADERS
+#define SB_HTTP_TRACE_HEADERS ""
+#endif
 
 static bool close_requested(struct mg_connection *connection) {
     const struct mg_request_info *info=mg_get_request_info(connection);
@@ -35,10 +38,10 @@ static int reply_typed(struct mg_connection *connection, int status, const char 
         status == 405 ? "Method Not Allowed" : status == 406 ? "Not Acceptable" :
         status == 411 ? "Length Required" : status == 413 ? "Content Too Large" : status == 415 ? "Unsupported Media Type" :
         status == 429 ? "Too Many Requests" : status == 503 ? "Service Unavailable" : "Internal Server Error";
-    char header[1024];
+    char header[4096];
     int header_size = snprintf(header, sizeof(header), "HTTP/1.1 %d %s\r\nContent-Type: %s; charset=utf-8\r\nContent-Length: %zu\r\n"
-        "Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n%s%s\r\n", status, reason, type, size,
-        closing ? "Connection: close\r\n" : "",extra ? extra : "");
+        "Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n%s%s%s\r\n", status, reason, type, size,
+        closing ? "Connection: close\r\n" : "",extra ? extra : "",SB_HTTP_TRACE_HEADERS);
     if (header_size < 0 || (size_t)header_size >= sizeof(header) || size > SB_RESPONSE_LIMIT || (!body && size)) { mg_disable_keep_alive(connection); return 500; }
     char *frame = malloc((size_t)header_size + size);
     if (!frame) { mg_disable_keep_alive(connection); return 500; }
@@ -59,7 +62,12 @@ static int reply(struct mg_connection *connection, int status, const char *body,
 }
 
 static int reject(struct mg_connection *connection, int status, const char *message, const char *extra) {
+#ifdef SB_HTTP_DECORATE_REJECTION
+    char *decorated=SB_HTTP_DECORATE_REJECTION(message,status);
+    int result=reply(connection,status,decorated?decorated:message,strlen(decorated?decorated:message),extra);free(decorated);return result;
+#else
     return reply(connection, status, message, strlen(message), extra);
+#endif
 }
 
 

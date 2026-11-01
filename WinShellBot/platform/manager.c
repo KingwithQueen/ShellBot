@@ -545,6 +545,7 @@ static void *gateway_open_unlocked(void *context, const char *path, const char *
     if (!w->project->enabled) { *http_status = 503; return NULL; }
     sb_oauth_project oauth_binding=oauth_project(w);
     if (!token_matches(w, authorization) && !sb_oauth_authorized(m->oauth,&oauth_binding,authorization)) { *http_status = 401; return NULL; }
+    *health=true; /* On failure this marks an authenticated refusal, never a granted binding. */
     if (WaitForSingleObject(m->stop, 0) == WAIT_OBJECT_0) { *http_status = 503; return NULL; }
     uint64_t wait_end=sb_platform_millis()+1000;
     while(!TryEnterCriticalSection(&w->lock)){
@@ -666,7 +667,9 @@ static char *gateway_call(void *context, void *binding, const char *request, siz
         char *failure = sb_strdup("{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32700,\"message\":\"Parse error.\"}}");
         *response_length = failure ? strlen(failure) : 0; return failure;
     }
-    char request_id[33],failure_reason[96];sb_request_id(request_id);bool invoked=false;const char *stage="worker_invoke",*reason="envelope_allocation_failed";
+    char request_id[33],failure_reason[96];
+    if(transport && transport->request_id)snprintf(request_id,sizeof(request_id),"%s",transport->request_id);else sb_request_id(request_id);
+    bool invoked=false;const char *stage="worker_invoke",*reason="envelope_allocation_failed";
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL); char *wire = NULL, *response = NULL;
     const char *headers[] = {transport->version, transport->method, transport->name};
     const char *names[] = {"version", "method", "name"};
@@ -705,6 +708,7 @@ done:
     if(!response && *http_status!=202){
         sb_host diagnostic_host={0};diagnostic_host.audit=m->audit;
         response=sb_rpc_internal_error(&diagnostic_host,yyjson_doc_get_root(input),request_id,w->instance,stage,invoked,reason);
+        if(sb_rpc_tool_request(yyjson_doc_get_root(input)))*http_status=200;
     }
     yyjson_doc_free(input); yyjson_mut_doc_free(doc); free(wire);
     *response_length = response ? strlen(response) : 0; return response;

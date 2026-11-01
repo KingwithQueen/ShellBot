@@ -26,6 +26,20 @@ static BOOL WINAPI stop_handler(DWORD event) {
     return FALSE;
 }
 
+static _Thread_local char http_request_id[33],http_trace_header[96];
+static _Thread_local const char *http_stage;
+static char *decorate_rejection(const char *message,int status) {
+    yyjson_doc *input=yyjson_read(message,strlen(message),0);yyjson_mut_doc *doc=input?yyjson_doc_mut_copy(input,NULL):NULL;
+    yyjson_mut_val *root=yyjson_mut_doc_get_root(doc);
+    if(yyjson_mut_is_obj(root)){
+        yyjson_mut_obj_add_strcpy(doc,root,"request_id",http_request_id);yyjson_mut_obj_add_strcpy(doc,root,"trace_id",http_request_id);
+        yyjson_mut_obj_add_str(doc,root,"stage",http_stage?http_stage:"parse");yyjson_mut_obj_add_str(doc,root,"execution_state","not_started");
+        yyjson_mut_obj_add_str(doc,root,"retry_guidance",status==429?"retry_original_request":status==503?"owner_action_required":"correct_request_before_retry");
+    }
+    char *wire=doc?yyjson_mut_write(doc,0,NULL):NULL;yyjson_mut_doc_free(doc);yyjson_doc_free(input);return wire;
+}
+#define SB_HTTP_TRACE_HEADERS http_trace_header
+#define SB_HTTP_DECORATE_REJECTION decorate_rejection
 #include "http_response.h"
 
 static bool authorized(struct mg_connection *connection, const http_state *state) {
@@ -103,7 +117,7 @@ static int handle_owner(struct mg_connection *connection, http_state *state) {
     int result=reply(connection,status,response,response ? strlen(response) : 0,security); free(response); return result;
 }
 
-static int handle_bound(struct mg_connection *connection, http_state *state, void *binding, bool health) {
+static int handle_bound(struct mg_connection *connection, http_state *state, void *binding, bool health, int refusal) {
     const struct mg_request_info *info = mg_get_request_info(connection);
     if (info->query_string) return reject(connection, 400, "{\"error\":\"Query parameters are not supported.\"}", NULL);
     if (health && !strcmp(info->request_method, "GET")) {
@@ -136,9 +150,15 @@ static int handle_bound(struct mg_connection *connection, http_state *state, voi
         read += (size_t)got;
     }
     if (read != length) { free(request); return reject(connection, 400, "{\"error\":\"Incomplete request.\"}", NULL); }
-    size_t response_length;
-    int status;
-    const sb_request_context context = {.actor = "http-development", .version = version,
+    size_t response_length=0;
+    int status=500;
+    if(refusal){
+        yyjson_doc *input=yyjson_read(request,length,0);yyjson_val *root=yyjson_doc_get_root(input);
+        char *failure=sb_rpc_failure(root,http_request_id,NULL,"authorize",false,refusal==429?"PROJECT_BUSY":"PROJECT_UNAVAILABLE",refusal==429?"Project has an in-flight request; this request was not queued. Retry unchanged after one second.":"Project is unavailable; this request was not executed. Explicit owner action is required.");
+        bool tool=sb_rpc_tool_request(root);yyjson_doc_free(input);free(request);
+        int result=reply(connection,tool?200:refusal,failure,failure?strlen(failure):0,refusal==429?"Retry-After: 1\r\n":NULL);free(failure);return result;
+    }
+    const sb_request_context context = {.request_id=http_request_id,.actor = "http-development", .version = version,
         .method = mg_get_header(connection, "Mcp-Method"), .name = mg_get_header(connection, "Mcp-Name")};
     char *response = state->routes.call ? state->routes.call(state->user, binding, request, length, &context, &response_length, &status) :
         sb_dispatch(state->host, NULL, request, length, &context, &response_length, &status);
@@ -148,7 +168,7 @@ static int handle_bound(struct mg_connection *connection, http_state *state, voi
     return result;
 }
 
-static int handle(struct mg_connection *connection) {
+static int handle_inner(struct mg_connection *connection) {
     const struct mg_request_info *info = mg_get_request_info(connection);
     http_state *state = info->user_data;
     const sb_config *config = state->config;
@@ -187,6 +207,7 @@ static int handle(struct mg_connection *connection) {
         int result=reply_typed(connection,response.status?response.status:503,response.body,response.body?strlen(response.body):0,extra,response.content_type?response.content_type:"application/json");
         if(response.body){SecureZeroMemory(response.body,strlen(response.body));free(response.body);}free(response.headers);SecureZeroMemory(body,sizeof(body));return result;
     }
+    http_stage="authorize";
     void *binding = NULL; bool health = false;
     if (state->routes.open) {
         /* decode_url=no preserves percent escapes; reject rewritten/absolute
@@ -199,6 +220,7 @@ static int handle(struct mg_connection *connection) {
         int status = 500;
         binding = state->routes.open(state->user, info->local_uri, mg_get_header(connection, "Authorization"), &health, &status);
         if (!binding) {
+            if((status==429 || (status==503 && health)) && !strcmp(info->request_method,"POST"))return handle_bound(connection,state,NULL,false,status);
             const char *body = status == 401 ? "{\"error\":\"Project bearer token required.\"}" :
                 status == 404 ? "{\"error\":\"Project route not found.\"}" :
                 status == 429 ? "{\"error\":\"Project has an in-flight request. No request was queued; retry after one second or use task_archive task_ids for a sequential batch.\",\"code\":\"project_busy\",\"request_queued\":false,\"retry_after_ms\":1000}" :
@@ -211,9 +233,14 @@ static int handle(struct mg_connection *connection) {
         health = info->local_uri && !strcmp(info->local_uri, "/healthz");
         if (!health && (!info->local_uri || strcmp(info->local_uri, "/mcp"))) return reject(connection, 404, "{\"error\":\"Not found.\"}", NULL);
     }
-    int result = handle_bound(connection, state, binding, health);
+    int result = handle_bound(connection, state, binding, health,0);
     if (binding) state->routes.close(state->user, binding);
     return result;
+}
+
+static int handle(struct mg_connection *connection) {
+    sb_request_id(http_request_id);snprintf(http_trace_header,sizeof(http_trace_header),"X-ShellBot-Request-ID: %s\r\n",http_request_id);
+    http_stage="parse";return handle_inner(connection);
 }
 
 static int quiet_log(const struct mg_connection *connection, const char *message) {

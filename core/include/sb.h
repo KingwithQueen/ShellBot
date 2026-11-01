@@ -13,7 +13,7 @@
 #define SB_PATH_CAP 32768
 #define SB_AUDIT_LIMIT (8u * 1024u * 1024u)
 
-typedef struct { char text[256]; } sb_error;
+typedef struct { char text[256]; const char *code, *native_system; uint32_t native_code; } sb_error;
 typedef struct sb_root sb_root;
 typedef struct sb_file sb_file;
 typedef struct sb_lease sb_lease;
@@ -60,7 +60,16 @@ typedef struct {
     sb_execution_approval execution_approval;
     sb_resource_limits limits;
 } sb_config;
+#define SB_TRACE_CAPACITY 128
 typedef struct {
+    char request_id[33], actor_sha256[65], tool[48], request_key_sha256[65], input_key_sha256[65];
+    uint64_t started_ms, started_unix_ms, duration_ms;
+    const char *stage, *execution_state;
+    bool is_error, internal_error;
+} sb_request_trace;
+typedef struct {
+    sb_request_trace request_traces[SB_TRACE_CAPACITY];
+    uint64_t request_trace_count;
     sb_config config;
     const sb_project *project; /* Immutable worker binding, never selected by tool parameters. */
     sb_lease *lease;
@@ -364,6 +373,10 @@ void sb_http_stop(sb_http_server *server);
 
 /* Internal failures never imply that a side effect did not happen. */
 void sb_request_id(char id[33]);
+bool sb_rpc_tool_request(yyjson_val *request);
+char *sb_rpc_failure(yyjson_val *request,const char *request_id,const char *instance,
+    const char *stage,bool invoked,const char *code,const char *reason);
+yyjson_mut_val *sb_recent_requests(sb_host *host,const char *actor,unsigned limit,yyjson_mut_doc *doc);
 bool sb_rpc_reply_valid(yyjson_val *reply, yyjson_val *request);
 char *sb_rpc_internal_error(sb_host *host, yyjson_val *request, const char *request_id,
     const char *instance, const char *stage, bool invoked, const char *reason);

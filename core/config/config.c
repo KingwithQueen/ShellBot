@@ -4,11 +4,11 @@
 #include <string.h>
 
 void sb_fail(sb_error *error, const char *message) {
-    if (error) snprintf(error->text, sizeof(error->text), "%s", message);
+    if (error) {snprintf(error->text, sizeof(error->text), "%s", message);error->code=NULL;error->native_system=NULL;error->native_code=0;}
 }
 
 void sb_fail_limit(sb_error *error,const char *field,uint64_t actual,uint64_t maximum,const char *unit) {
-    if(error)snprintf(error->text,sizeof(error->text),"%s: actual=%llu %s, maximum=%llu %s.",field,(unsigned long long)actual,unit,(unsigned long long)maximum,unit);
+    if(error){snprintf(error->text,sizeof(error->text),"%s: actual=%llu %s, maximum=%llu %s.",field,(unsigned long long)actual,unit,(unsigned long long)maximum,unit);error->code=NULL;error->native_system=NULL;error->native_code=0;}
 }
 /* 超限回执带可读说明及机器字段；不回显参数正文。 */
 yyjson_mut_val *sb_limit_error(yyjson_mut_doc *doc,const char *field,uint64_t actual,uint64_t maximum,const char *unit) {
