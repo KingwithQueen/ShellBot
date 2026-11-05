@@ -1,4 +1,4 @@
-# Windows 交互终端、模式搜索与 UIA（1.1.3）
+# Windows 交互终端、模式搜索与 UIA（1.1.4）
 
 这些能力在 Windows x64 实现。升级后重新连接 MCP 客户端刷新工具定义；既有项目的工具许可不自动增加。ConPTY 使用原任务工具；UIA 需要显式启用 `uia_tree`、`uia_action` 和相应桌面权限。
 
@@ -66,16 +66,28 @@ glob 查询只用于 filename 模式，匹配相对路径；literal/regex 的 fi
 
 默认最多 500 节点、深度 16，可分别提高到 1000/32；还有总输出和时间预算。树可能截断，不能根据缺失节点断言控件不存在。仅接入同一普通账户、会话、权限级别内的可见顶层窗口及其同进程元素；跨进程的嵌入控件可能缺失。没有可访问性提供者的画布/游戏界面可能只有很少节点。
 
-`uia_action` 支持 invoke、set_value、toggle、select、expand、collapse。先用控制租约将目标窗口聚焦，再刷新 window_list、uia_tree，使用同一观察中的元素：
+`uia_action` 支持 invoke、set_value、toggle、select、expand、collapse。默认 `focus_mode:"foreground"`，先用控制租约将目标窗口聚焦，再刷新 window_list、uia_tree，使用同一观察中的元素：
 
 ```json
 {"name":"uia_action","arguments":{"lease_id":"当前控制租约","screen_id":"对应观察编号","window_id":"对应窗口编号","element_id":"最近树中的控件编号","request_key":"set-value-1","action":"set_value","value":"新的文本"}}
 ```
 
-value 只用于 set_value，最高 16384 个 UTF-8 字节。动作要求目标窗口已经是前台；会再次核实窗口/进程创建身份、元素运行身份及名称/类型/标识、人工暂停、租约和权限。拒绝密码、禁用、离屏、只读或状态未知的相应控件，不用键鼠或坐标偷偷回退。观察租约不能执行动作。树缓存仅保留最近一次并绑定当前窗口和观察；任何动作尝试后都要重新观察。
+value 只用于 set_value，最高 16384 个 UTF-8 字节。动作会再次核实窗口/进程创建身份、元素运行身份及名称/类型/标识、人工暂停、租约和权限。拒绝密码、禁用、离屏、只读或状态未知的相应控件，不用键鼠或坐标回退。观察租约不能执行动作。树缓存仅保留最近一次并绑定当前窗口和观察；任何动作尝试后都要重新观察。
+
+1.1.4 新增显式 `focus_mode:"background"`。它直接调用观察到的目标控件 pattern，不要求窗口已经前台，也不请求聚焦或发送键鼠。适用于未锁定、同用户的可用输入桌面，包括 mstsc 最小化后像素不可获取但 UIA 提供者仍可用的情况：
+
+```json
+{"name":"uia_action","arguments":{"lease_id":"当前控制租约","screen_id":"对应观察编号","window_id":"对应窗口编号","element_id":"最近树中的编辑框编号","request_key":"background-value-1","action":"set_value","value":"中文内容","focus_mode":"background"}}
+```
+
+后台模式仍需控制许可/租约、所有者未暂停、未锁定的 Default 输入桌面、稳定的窗口/进程/控件身份，且目标应用窗口不能最小化，控件必须启用且在屏幕范围内。它不解除人工暂停，不操作锁屏/UAC，不放宽跨用户/会话/权限边界；应用自身的提供者可能仍要求前台，或在调用时主动显示自己的界面。无相应 pattern 的画布/游戏不能据此后台交互。按键、组合键、坐标点击、拖动和真实前台聚焦仍使用原来的桌面工具。
+
+`uia_tree` 和显式后台动作以目标窗口/元素为准，不因无关窗口的前台或矩形变化判定过期；人工输入 epoch、观察期限、显示布局和目标窗口身份变化仍会阻止调用。默认前台动作保留原来的前台观察检查。回执报告 focus_mode、foreground_required、foreground_observed，后台派发成功不等于已聚焦。
+
+UIA 辅助线程采用 Per Monitor V2 DPI 感知，树的 `coordinate_space:"physical_desktop_pixels"` 与 window_list 一致，避免 RDP 150% 等缩放下混用逻辑像素。
 
 UIA 在一次性独立 MTA 进程中运行，提供者连接/事务等待各设为 500 ms，整次请求最多约 4 秒；无响应可回收辅助进程。动作超时或失败可能已有部分效果，回执标记 unknown，禁止自动重放。dispatched 只说明 pattern API 返回成功，`application_result_verified:false` 明确要求调用方刷新核实。UIA 不证明截图可用，不自动取得 Windows 前台资格，不绕过 UAC、锁屏或人工暂停。
 
 UIA 请求进行中不会并行执行其他桌面工具，状态查询和租约释放仍可处理；人工暂停继续立即生效。不要把并发请求返回的 busy 当作已经执行。
 
-依据：[UIA 线程模型](https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-threading)、[IUIAutomation2](https://learn.microsoft.com/en-us/windows/win32/api/uiautomationclient/nn-uiautomationclient-iuiautomation2)。真实 RDP 最小化及不同实际应用的界面行为仍需在相应环境验收。
+依据：[UIA 线程模型](https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-threading)、[IUIAutomation2](https://learn.microsoft.com/en-us/windows/win32/api/uiautomationclient/nn-uiautomationclient-iuiautomation2)。本机真实 mstsc 最小化下的自建 Win32 窗口已验证后台中文写入/读回和按钮单次调用；其他实际应用、提供者和系统仍需分别验收，见 [RDP 记录](REMOTE_DESKTOP.md#114-实机对照与后台语义操作)。

@@ -15,7 +15,7 @@ typedef struct {
     IUIAutomation2 *automation;IUIAutomationTreeWalker *walker;
     yyjson_mut_doc *doc;yyjson_mut_val *nodes;yyjson_val *request,*wanted;
     IUIAutomationElement *found;DWORD pid;HWND window;FILETIME created;LONG epoch;
-    unsigned count,maximum,depth;size_t bytes;uint64_t deadline;bool truncated,include_text;
+    unsigned count,maximum,depth;size_t bytes;uint64_t deadline;bool truncated,include_text,require_foreground;
     HRESULT failure;
 } uia_query;
 static char *encode(BSTR value,size_t limit){
@@ -106,7 +106,7 @@ static const char *act(uia_query *q,HRESULT *api,bool *attempted){
     else return "uia_action_unsupported";
     *api=IUIAutomationElement_GetCurrentPatternAs(e,id,&iid,&pattern);if(FAILED(*api) || !pattern)return "uia_pattern_unavailable";
     BOOL readonly=FALSE;if(id==UIA_ValuePatternId){*api=IUIAutomationValuePattern_get_CurrentIsReadOnly((IUIAutomationValuePattern*)pattern,&readonly);if(FAILED(*api) || readonly){IUnknown_Release((IUnknown*)pattern);return "uia_value_read_only_or_unknown";}}
-    if(!sb_win_uia_guard(q->window,q->pid,q->created,q->epoch,q->deadline,true)){IUnknown_Release((IUnknown*)pattern);return "uia_input_guard_changed";}
+    if(!sb_win_uia_guard(q->window,q->pid,q->created,q->epoch,q->deadline,true,q->require_foreground)){IUnknown_Release((IUnknown*)pattern);return "uia_input_guard_changed";}
     *attempted=true;
     if(id==UIA_InvokePatternId)*api=IUIAutomationInvokePattern_Invoke((IUIAutomationInvokePattern*)pattern);
     else if(id==UIA_ValuePatternId){wchar_t *value=request_value(q->request);if(!value){*attempted=false;*api=E_INVALIDARG;}else{*api=IUIAutomationValuePattern_SetValue((IUIAutomationValuePattern*)pattern,value);free(value);}}
@@ -117,9 +117,10 @@ static const char *act(uia_query *q,HRESULT *api,bool *attempted){
 }
 static char *query(yyjson_val *request){
     uia_query q={0};q.request=request;q.wanted=yyjson_obj_get(request,"element");q.maximum=(unsigned)yyjson_get_uint(yyjson_obj_get(request,"max_nodes"));q.depth=(unsigned)yyjson_get_uint(yyjson_obj_get(request,"max_depth"));q.pid=(DWORD)yyjson_get_uint(yyjson_obj_get(request,"pid"));q.window=(HWND)(uintptr_t)yyjson_get_uint(yyjson_obj_get(request,"hwnd"));q.created.dwLowDateTime=(DWORD)yyjson_get_uint(yyjson_obj_get(request,"created_low"));q.created.dwHighDateTime=(DWORD)yyjson_get_uint(yyjson_obj_get(request,"created_high"));q.epoch=(LONG)yyjson_get_sint(yyjson_obj_get(request,"epoch"));q.deadline=yyjson_get_uint(yyjson_obj_get(request,"deadline"));q.include_text=yyjson_get_bool(yyjson_obj_get(request,"include_text"));
+    q.require_foreground=!yyjson_is_false(yyjson_obj_get(request,"require_foreground"));
     q.doc=yyjson_mut_doc_new(NULL);if(!q.doc)return NULL;yyjson_mut_val *result=yyjson_mut_obj(q.doc);q.nodes=yyjson_mut_arr(q.doc);yyjson_mut_obj_add_val(q.doc,result,"nodes",q.nodes);
     const char *error=NULL;HRESULT hr=E_FAIL;bool attempted=false;IUIAutomationElement *root=NULL;
-    if(!q.maximum || q.maximum>1000 || q.depth>32 || !q.deadline || sb_platform_millis()>=q.deadline || !sb_win_uia_guard(q.window,q.pid,q.created,q.epoch,q.deadline,q.wanted!=NULL)){error="uia_window_or_input_guard_unavailable";goto done;}
+    if(!q.maximum || q.maximum>1000 || q.depth>32 || !q.deadline || sb_platform_millis()>=q.deadline || !sb_win_uia_guard(q.window,q.pid,q.created,q.epoch,q.deadline,q.wanted!=NULL,q.require_foreground)){error="uia_window_or_input_guard_unavailable";goto done;}
     hr=CoCreateInstance(&CLSID_CUIAutomation8,NULL,CLSCTX_INPROC_SERVER,&IID_IUIAutomation2,(void**)&q.automation);if(FAILED(hr)){error="uia_provider_unavailable";goto done;}
     hr=IUIAutomation2_put_ConnectionTimeout(q.automation,500);if(SUCCEEDED(hr))hr=IUIAutomation2_put_TransactionTimeout(q.automation,500);if(SUCCEEDED(hr))hr=IUIAutomation2_put_AutoSetFocus(q.automation,FALSE);
     if(FAILED(hr)){error="uia_provider_configuration_failed";goto done;}
@@ -129,12 +130,15 @@ static char *query(yyjson_val *request){
 done:
     if(error)yyjson_mut_obj_add_str(q.doc,result,"error",error);
     yyjson_mut_obj_add_bool(q.doc,result,"truncated",q.truncated);yyjson_mut_obj_add_uint(q.doc,result,"visited_nodes",q.count);yyjson_mut_obj_add_uint(q.doc,result,"hresult",(uint32_t)hr);
+    yyjson_mut_obj_add_str(q.doc,result,"coordinate_space","physical_desktop_pixels");
     if(q.wanted){yyjson_mut_obj_add_bool(q.doc,result,"api_attempted",attempted);yyjson_mut_obj_add_str(q.doc,result,"action_state",attempted?SUCCEEDED(hr)?"dispatched":"unknown":"not_attempted");yyjson_mut_obj_add_bool(q.doc,result,"application_result_verified",false);}
     if(FAILED(q.failure))yyjson_mut_obj_add_uint(q.doc,result,"provider_hresult",(uint32_t)q.failure);
     if(q.found)IUIAutomationElement_Release(q.found);if(q.walker)IUIAutomationTreeWalker_Release(q.walker);if(root)IUIAutomationElement_Release(root);if(q.automation)IUIAutomation2_Release(q.automation);
     char *wire=yyjson_mut_val_write(result,0,NULL);yyjson_mut_doc_free(q.doc);return wire;
 }
 int sb_win_uia_worker(void){
+    /* UIA 与桌面线程统一物理像素，防止 RDP/DPI 缩放导致控件边界被虚拟化。 */
+    DPI_AWARENESS_CONTEXT previous=SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);if(!previous)return 2;
     char input[65536];DWORD got=0;size_t used=0;HANDLE in=GetStdHandle(STD_INPUT_HANDLE);
     while(used<sizeof(input)-1 && ReadFile(in,input+used,(DWORD)(sizeof(input)-1-used),&got,NULL) && got)used+=got;
     if(!used || used>=sizeof(input)-1)return 2;input[used]=0;yyjson_doc *doc=yyjson_read(input,used,0);if(!doc)return 2;

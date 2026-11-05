@@ -85,4 +85,25 @@ RDP 客户端最小化不会一律阻止 GUI 进程创建。是否启动、目�
 
 ## 1.1.3 元素操作
 
-UIA 提供独立于像素坐标的元素树和 pattern 动作，使用说明见 [交互工具](INTERACTIVE_TOOLS.md#windows-ui-automation)。它仍要求可用的同用户交互桌面；动作要求目标窗口已经前台，保留人工暂停和观察规则。UIA 不能替代真实 RDP 最小化验收，也不保证应用提供完整可访问性信息。
+UIA 提供独立于像素坐标的元素树和 pattern 动作，使用说明见 [交互工具](INTERACTIVE_TOOLS.md#windows-ui-automation)。1.1.3 动作要求目标窗口已经前台；1.1.4 增加下面的显式后台模式。它仍要求可用的同用户交互桌面，保留人工暂停和目标身份检查，不保证所有应用提供完整可访问性信息。
+
+## 1.1.4 实机对照与后台语义操作
+
+2026-11-05 在用户正在使用的 mstsc 会话进行隔离测试：普通未提升账户，ShellBot 在 RDP session 1 的 WinSta0/Default，控制台 session 2 仅作为诊断，未用于控制。只对自建测试窗口操作，没有更改真实 RDP 客户端设置、切换会话或部署现有安装。
+
+| 实际状态 | 窗口/控件 | 后台 set_value / invoke | window_focus | GDI 抓屏 |
+| --- | --- | --- | --- | --- |
+| RDP 展开且解锁 | 可读取 | 中文写入读回、按钮触发一次 | 成功，确认真实前台 | 成功 |
+| RDP 最小化且解锁 | 可读取，窗口本身未最小化 | 中文写入读回、按钮触发一次 | 失败，GetForegroundWindow 仍为空 | StretchBlt / fallback.BitBlt 错误 5 |
+
+最小化期间 WTS 保持 active，锁定标志为 unlocked，OpenInputDesktop 仍返回 Default，但 GetCursorPos 返回错误 5。这证明“窗口可创建/控件可用”与“物理前台/像素可用”需要分开判断。测试首次切换时人工输入触发暂停，后续动作被正确拒绝；用户明确允许仅本次恢复控制后完成后台测试，结束即恢复暂停，没有自动绕过人工接管。
+
+此前还观察到 WTS active 但 session 已锁定、输入桌面被拒绝的状态。1.1.4 增加 WTSSessionInfoEx 的 lock_state/session_flags/lock_query_win32_error；已知锁定时直接拒绝桌面操作，即使 WTSActive 或输入桌面名称看似正常。查询未知仍保留原来的输入桌面检查，不把未知当作解锁证明。独立诊断命令、能力报告及操作失败中的 session 同时返回光标查询结果和前台是否存在；raster_capture_available:null 表示没有在状态查询中试抓屏，实际结果查看 desktop_capture.capture_diagnostic。
+
+要在该最小化状态操作支持 UIA 的应用，取得控制租约，通过 window_list、uia_tree 选定目标后显式调用 uia_action 的 focus_mode:background。无需先 window_focus 或截图；后台动作不会因为无关窗口的前台变化过期，但继续检查观察期限、人工输入、布局和目标身份。默认 foreground 行为不变，仍需真实前台。控件 pattern 派发与应用结果分开报告，完成后刷新验证。
+
+本机在 150% 缩放下还复现了旧版 UIA 返回 660×390 而窗口列表返回 990×585 的单位差异，现已让 UIA 辅助线程采用 Per Monitor V2，并在真实测试中确认两者均为物理像素。
+
+如需最小化时继续真实像素抓屏、按键/坐标或取得前台，仍需在**发起连接的电脑**应用本文件前述 mstsc 渲染设置，退出 mstsc 后重新连接再验证；本次没有修改客户端设置或声称此配置已经验收。后台 UIA 也不能让锁屏/UAC 或不提供可访问性接口的程序变为可操作。
+
+依据：[WTSSessionInfoEx 锁定标志](https://learn.microsoft.com/en-us/windows/win32/api/wtsapi32/ns-wtsapi32-wtsinfoex_level1_w)、[微软关于最小化 RDP 的 UI 自动化限制](https://learn.microsoft.com/en-us/troubleshoot/power-platform/power-automate/desktop-flows/ui-automation/uipi-issues)、[UIA control patterns](https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-controlpatternsoverview)。上表为本机自建 Win32 测试窗口的真实结果，不扩展为其他应用或机器的完整验收。

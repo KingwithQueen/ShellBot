@@ -125,10 +125,21 @@ sb_win_desktop_session *sb_win_desktop_session_new(void) {
 void sb_win_desktop_session_free(sb_win_desktop_session *state) {
     if (state) { UnmapViewOfFile((const void *)state->epoch); CloseHandle(state->mapping); CloseHandle(state->mutex); CloseHandle(state->pause); free(state); }
 }
+/* WTSActive 仅表示连接；锁定的 RDP 会话也可能保持此状态。 */
+static int session_lock(DWORD session,DWORD *error,LONG *flags) {
+    LPWSTR buffer=NULL;DWORD bytes=0;BOOL ok=WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE,session,WTSSessionInfoEx,&buffer,&bytes);
+    *error=ok?ERROR_INVALID_DATA:GetLastError();*flags=-1;int locked=-1;
+    if(ok && bytes>=sizeof(WTSINFOEXW) && ((WTSINFOEXW*)buffer)->Level==1){
+        *error=0;*flags=((WTSINFOEXW*)buffer)->Data.WTSInfoExLevel1.SessionFlags;
+        if(*flags==WTS_SESSIONSTATE_LOCK)locked=1;else if(*flags==WTS_SESSIONSTATE_UNLOCK)locked=0;
+    }
+    WTSFreeMemory(buffer);return locked;
+}
 static bool interactive(sb_desktop *desktop) {
     LPWSTR value=NULL; DWORD bytes=0; bool active=WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE,desktop->session,WTSConnectState,&value,&bytes) &&
         bytes>=sizeof(WTS_CONNECTSTATE_CLASS) && *(WTS_CONNECTSTATE_CLASS *)value==WTSActive;
     WTSFreeMemory(value); if (!active) return false;
+    DWORD lock_error=0;LONG flags=0;if(session_lock(desktop->session,&lock_error,&flags)==1)return false;
     wchar_t station[64]={0},current[64]={0},input[64]={0};
     if (!GetUserObjectInformationW(GetProcessWindowStation(),UOI_NAME,station,sizeof(station),&bytes) || _wcsicmp(station,L"WinSta0") ||
         !GetUserObjectInformationW(GetThreadDesktop(GetCurrentThreadId()),UOI_NAME,current,sizeof(current),&bytes) || _wcsicmp(current,L"Default")) return false;
@@ -147,6 +158,10 @@ static void session_report(DWORD session,yyjson_mut_doc *doc,yyjson_mut_val *dat
     if(known){WTS_CONNECTSTATE_CLASS state=*(WTS_CONNECTSTATE_CLASS *)buffer;active=state==WTSActive;yyjson_mut_obj_add_str(doc,value,"connection_state",connection_name(state));}
     else yyjson_mut_obj_add_str(doc,value,"connection_state","unknown");WTSFreeMemory(buffer);buffer=NULL;bytes=0;
     yyjson_mut_obj_add_uint(doc,value,"connection_query_win32_error",error);yyjson_mut_obj_add_uint(doc,value,"process_session_id",session);
+    DWORD lock_error=0;LONG flags=0;int locked=session_lock(session,&lock_error,&flags);
+    yyjson_mut_obj_add_str(doc,value,"lock_state",locked==1?"locked":locked==0?"unlocked":"unknown");
+    yyjson_mut_obj_add_uint(doc,value,"lock_query_win32_error",lock_error);
+    if(lock_error)yyjson_mut_obj_add_null(doc,value,"session_flags");else yyjson_mut_obj_add_sint(doc,value,"session_flags",flags);
     known=WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE,session,WTSClientProtocolType,&buffer,&bytes) && bytes>=sizeof(USHORT);
     if(known){USHORT protocol=*(USHORT *)buffer;yyjson_mut_obj_add_uint(doc,value,"protocol_id",protocol);yyjson_mut_obj_add_str(doc,value,"protocol",protocol==2?"rdp":protocol==0?"console":"other");}
     else{yyjson_mut_obj_add_null(doc,value,"protocol_id");yyjson_mut_obj_add_str(doc,value,"protocol","unknown");}WTSFreeMemory(buffer);
@@ -158,8 +173,13 @@ static void session_report(DWORD session,yyjson_mut_doc *doc,yyjson_mut_val *dat
     bool input_known=handle && GetUserObjectInformationW(handle,UOI_NAME,input,sizeof(input),&bytes)!=0;if(handle && !input_known)input_error=GetLastError();if(handle)CloseDesktop(handle);
     const wchar_t *names[]={station,current,input};const bool available[]={station_known,current_known,input_known};const char *fields[]={"window_station","thread_desktop","input_desktop"};
     for(unsigned i=0;i<3;++i){char *name=available[i]?utf8(names[i]):NULL;if(name)yyjson_mut_obj_add_strcpy(doc,value,fields[i],name);else yyjson_mut_obj_add_null(doc,value,fields[i]);free(name);}
-    bool compatible=active && station_known && current_known && input_known && !_wcsicmp(station,L"WinSta0") && !_wcsicmp(current,L"Default") && !_wcsicmp(current,input);
+    bool compatible=active && locked!=1 && station_known && current_known && input_known && !_wcsicmp(station,L"WinSta0") && !_wcsicmp(current,L"Default") && !_wcsicmp(current,input);
     yyjson_mut_obj_add_uint(doc,value,"input_desktop_query_win32_error",input_error);yyjson_mut_obj_add_bool(doc,value,"interactive_desktop_available",compatible);
+    POINT point={0};SetLastError(ERROR_SUCCESS);BOOL cursor=GetCursorPos(&point);DWORD cursor_error=cursor?0:GetLastError();
+    yyjson_mut_obj_add_bool(doc,value,"cursor_query_available",cursor!=0);yyjson_mut_obj_add_uint(doc,value,"cursor_query_win32_error",cursor_error);
+    yyjson_mut_obj_add_bool(doc,value,"foreground_present",GetForegroundWindow()!=NULL);
+    yyjson_mut_obj_add_null(doc,value,"raster_capture_available");
+    yyjson_mut_obj_add_str(doc,value,"raster_capture_status","not_probed; desktop_capture reports actual pixel acquisition separately");
     yyjson_mut_obj_add_str(doc,value,"binding","process_session; console_session_id is diagnostic only, never a target selector");
     yyjson_mut_obj_add_bool(doc,value,"cross_session_control",false);yyjson_mut_obj_add_val(doc,data,"session",value);
 }
@@ -278,7 +298,7 @@ static bool arguments(sb_desktop *desktop,const char *name,yyjson_val *args) {
     if (tool==17) { const char *fields[]={"monitor_id","max_dimension","x","y","width","height"}; for (unsigned i=0;i<6;++i) allowed[count++]=fields[i]; }
     if(tool==39 || tool==40){allowed[count++]="screen_id";allowed[count++]="window_id";
         if(tool==39){allowed[count++]="max_nodes";allowed[count++]="max_depth";allowed[count++]="include_text";}
-        else{allowed[count++]="element_id";allowed[count++]="action";allowed[count++]="value";}}
+        else{allowed[count++]="element_id";allowed[count++]="action";allowed[count++]="value";allowed[count++]="focus_mode";}}
     if (tool==19) {allowed[count++]="window_id";allowed[count++]="restore";allowed[count++]="wait_ms";}
     if (tool>=20 && tool<=22) { allowed[count++]="x"; allowed[count++]="y"; }
     if (tool==20 || tool==21) allowed[count++]="button";
@@ -293,6 +313,7 @@ static bool arguments(sb_desktop *desktop,const char *name,yyjson_val *args) {
         if(!hex(sb_string(yyjson_obj_get(args,"screen_id"))) || !hex(sb_string(yyjson_obj_get(args,"window_id"))))return false;
         if(tool==39){yyjson_val *text=yyjson_obj_get(args,"include_text");if((text && !yyjson_is_bool(text)) || !integer(args,"max_nodes",500,1,1000,&n) || !integer(args,"max_depth",16,0,32,&n))return false;}
         else{const char *action=sb_string(yyjson_obj_get(args,"action")),*value=sb_string(yyjson_obj_get(args,"value"));
+            yyjson_val *focus=yyjson_obj_get(args,"focus_mode");const char *focus_setting=sb_string(focus);if(focus && (!focus_setting || (strcmp(focus_setting,"foreground") && strcmp(focus_setting,"background"))))return false;
             if(!hex(sb_string(yyjson_obj_get(args,"element_id"))) || !action || (strcmp(action,"invoke") && strcmp(action,"set_value") && strcmp(action,"toggle") && strcmp(action,"select") && strcmp(action,"expand") && strcmp(action,"collapse")))return false;
             if(!strcmp(action,"set_value")){if(!value || strlen(value)>16384)return false;}else if(yyjson_obj_get(args,"value"))return false;
         }
@@ -372,7 +393,7 @@ static void change_uint(yyjson_mut_doc *doc,yyjson_mut_val *changes,const char *
 static void change_rect(yyjson_mut_doc *doc,yyjson_mut_val *changes,const char *field,const RECT *before,const RECT *after,window_ref *window) {
     if(EqualRect(before,after))return;yyjson_mut_val *v=change(doc,changes,field,window);rect_json(doc,v,"expected",before);rect_json(doc,v,"actual",after);
 }
-static const char *observe_guard(sb_desktop *desktop,observation *view,bool input,bool require_foreground,yyjson_mut_doc *doc,yyjson_mut_val *data) {
+static const char *observe_guard_mode(sb_desktop *desktop,observation *view,bool input,bool require_foreground,bool track_foreground,yyjson_mut_doc *doc,yyjson_mut_val *data) {
     if (!desktop->leased || sb_platform_millis()>=desktop->deadline) return "lease_expired";
     if (!interactive(desktop)) return "no_desktop_session: locked, disconnected or secure desktop";
     if (input && WaitForSingleObject(desktop->pause,0)==WAIT_OBJECT_0) return "desktop_paused: local owner must resume";
@@ -387,14 +408,14 @@ static const char *observe_guard(sb_desktop *desktop,observation *view,bool inpu
         topology monitors;char hash[65]={0};RECT rect={0};DWORD pid=0;HWND foreground=GetForegroundWindow();GetWindowThreadProcessId(foreground,&pid);
         bool known=layout(&monitors,hash);
         if(!known || strcmp(hash,view->layout)){yyjson_mut_val *v=change(doc,changes,"monitor_layout",NULL);yyjson_mut_obj_add_strcpy(doc,v,"expected",view->layout);if(known)yyjson_mut_obj_add_strcpy(doc,v,"actual",hash);else yyjson_mut_obj_add_null(doc,v,"actual");}
-        window_ref *previous=NULL;for(unsigned i=0;i<view->window_count;++i)if(view->windows[i].hwnd==view->foreground)previous=&view->windows[i];
+        if(track_foreground){window_ref *previous=NULL;for(unsigned i=0;i<view->window_count;++i)if(view->windows[i].hwnd==view->foreground)previous=&view->windows[i];
         change_uint(doc,changes,"foreground.hwnd",(uintptr_t)view->foreground,(uintptr_t)foreground,previous);
         change_uint(doc,changes,"foreground.pid",view->foreground_pid,pid,previous);
         bool got=foreground && GetWindowRect(foreground,&rect)!=0;
         if(view->foreground_rect_known!=got){yyjson_mut_val *v=change(doc,changes,"foreground.bounds",previous);
             if(view->foreground_rect_known)rect_json(doc,v,"expected",&view->foreground_rect);else yyjson_mut_obj_add_null(doc,v,"expected");
             if(got)rect_json(doc,v,"actual",&rect);else yyjson_mut_obj_add_null(doc,v,"actual");}
-        else if(got && foreground==view->foreground)change_rect(doc,changes,"foreground.bounds",&view->foreground_rect,&rect,previous);
+        else if(got && foreground==view->foreground)change_rect(doc,changes,"foreground.bounds",&view->foreground_rect,&rect,previous);}
     }
     if(yyjson_mut_arr_size(changes)){
         yyjson_mut_obj_add_str(doc,data,"code","stale_observation");yyjson_mut_obj_add_val(doc,data,"changes",changes);
@@ -403,6 +424,9 @@ static const char *observe_guard(sb_desktop *desktop,observation *view,bool inpu
     HWND foreground=GetForegroundWindow();
     if (input && require_foreground && !input_permitted(desktop,foreground)) return "input_not_permitted: unknown owner or higher integrity target";
     return NULL;
+}
+static const char *observe_guard(sb_desktop *desktop,observation *view,bool input,bool require_foreground,yyjson_mut_doc *doc,yyjson_mut_val *data) {
+    return observe_guard_mode(desktop,view,input,require_foreground,true,doc,data);
 }
 static observation *find_observation(sb_desktop *desktop,const char *id) {
     for (unsigned i=0;id && i<OBSERVATIONS;++i) if (!strcmp(desktop->observations[i].id,id)) return &desktop->observations[i]; return NULL;
@@ -904,6 +928,7 @@ static char *capabilities(sb_desktop *desktop) {
     yyjson_mut_obj_add_uint(doc,data,"max_type_utf16_units",512); yyjson_mut_obj_add_uint(doc,data,"max_clipboard_bytes",CLIPBOARD_BYTES);
     yyjson_mut_obj_add_bool(doc,data,"minimized_windows_listed",true);yyjson_mut_obj_add_bool(doc,data,"window_restore_supported",true);yyjson_mut_obj_add_uint(doc,data,"max_focus_wait_ms",3000);
     yyjson_mut_obj_add_bool(doc,data,"uia_tree_supported",true);yyjson_mut_obj_add_bool(doc,data,"uia_patterns_supported",true);yyjson_mut_obj_add_uint(doc,data,"max_uia_nodes",1000);yyjson_mut_obj_add_uint(doc,data,"max_uia_provider_ms",4000);
+    yyjson_mut_obj_add_bool(doc,data,"uia_background_patterns_supported",true);
     yyjson_mut_obj_add_bool(doc,data,"explicit_key_chords",true);yyjson_mut_obj_add_uint(doc,data,"max_key_modifiers",3);
     yyjson_mut_obj_add_bool(doc,data,"key_hold_supported",false);
     char key[24]; snprintf(key,sizeof(key),"Ctrl+Alt+F%u",desktop->policy.emergency_function_key); yyjson_mut_obj_add_strcpy(doc,data,"emergency_hotkey",key);
