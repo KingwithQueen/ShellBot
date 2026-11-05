@@ -26,6 +26,10 @@
     <ClCompile Include="platform\service.c"><Filter>源文件</Filter></ClCompile>
     <ClInclude Include="platform\startup.h"><Filter>头文件</Filter></ClInclude>
     <ClCompile Include="platform\desktop.c"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="platform\window_capture.c"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="platform\window_capture_broker.c"><Filter>源文件</Filter></ClCompile>
+    <ClInclude Include="platform\window_capture.h"><Filter>头文件</Filter></ClInclude>
+    <ClInclude Include="platform\window_capture_desktop.h"><Filter>头文件</Filter></ClInclude>
     <ClInclude Include="platform\desktop.h"><Filter>头文件</Filter></ClInclude>
     <ClCompile Include="platform\manager_ui.c"><Filter>源文件</Filter></ClCompile>
     <ClCompile Include="platform\desktop_app.c"><Filter>源文件</Filter></ClCompile>

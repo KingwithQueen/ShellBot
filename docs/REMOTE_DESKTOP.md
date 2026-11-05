@@ -2,6 +2,8 @@
 
 适用于 Windows 1.0.10 及以后版本和经典“远程桌面连接” mstsc。连接在线、连接最小化、连接断开和用户锁屏是不同状态。需分开判断会话是否交互、客户端是否继续渲染，以及 ShellBot 输入是否暂停。网络在线不能证明这些条件都满足。
 
+Windows 1.1.5 已提供无需聚焦的 WGC/PrintWindow 窗口截图；本机真实 mstsc 最小化下的看图和后台 UIA 操作已通过，见文末。本文件较早版本的屏幕 DC 限制不等于窗口捕获也不可用；客户端渲染设置仍可用于需要完整桌面/物理输入的情况。
+
 ## 发起连接的电脑：避免最小化时抑制渲染
 
 Windows RDP 客户端最小化后可能停止图形渲染，即使网络仍在线，截图和界面自动化也可能失败。微软列出了该情况；SmartBear 的 TestComplete 文档给出当前用户/全部用户设置及明确的客户端位置说明。
@@ -107,3 +109,22 @@ UIA 提供独立于像素坐标的元素树和 pattern 动作，使用说明见 
 如需最小化时继续真实像素抓屏、按键/坐标或取得前台，仍需在**发起连接的电脑**应用本文件前述 mstsc 渲染设置，退出 mstsc 后重新连接再验证；本次没有修改客户端设置或声称此配置已经验收。后台 UIA 也不能让锁屏/UAC 或不提供可访问性接口的程序变为可操作。
 
 依据：[WTSSessionInfoEx 锁定标志](https://learn.microsoft.com/en-us/windows/win32/api/wtsapi32/ns-wtsapi32-wtsinfoex_level1_w)、[微软关于最小化 RDP 的 UI 自动化限制](https://learn.microsoft.com/en-us/troubleshoot/power-platform/power-automate/desktop-flows/ui-automation/uipi-issues)、[UIA control patterns](https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-controlpatternsoverview)。上表为本机自建 Win32 测试窗口的真实结果，不扩展为其他应用或机器的完整验收。
+
+## 1.1.5 最小化时的窗口截图和后台操作
+
+2026-11-05 在同一机器、同一普通用户 RDP 会话继续实测。用户明确确认将 mstsc 最小化约 90 秒后恢复；测试前后均为 active/unlocked、WinSta0/Default，GetForegroundWindow 为空且 GetCursorPos 返回错误 5。没有改客户端注册表、关闭/切换会话、安装显示驱动或部署现有安装。
+
+| 专用窗口 | 捕获后端 | 实际结果 |
+| --- | --- | --- |
+| 普通 Win32/GDI 控件 | WGC、PrintWindow、auto | 能看到完整窗口；后台中文写入读回、按钮单次调用，以及两次操作后的新画面均通过 |
+| D3D11 GPU 子画布与标准控件 | WGC、auto | GPU 色块仅由实际 D3D11 Clear/Present 绘制；同样通过后台中文写入/按钮调用及画面更新核对 |
+
+每类窗口先截图，再执行两次独立按钮操作，画布依次为橙、蓝、橙。逐后端解码 PNG，检查当前色块像素存在、旧色块像素消失，并核对应用自身的按钮计数和 UIA 中文值，排除了只返回 API 成功、旧帧或空白图的情况。测试窗口从未要求前台，两个窗口重叠时也直接捕获各自表面。最终构建的同程序副本再次完成了完整链路。
+
+首轮测试因检测到人工输入而中断，随后用户明确允许仅这轮恢复一次控制，完成后重新暂停。最终构建复核没有调用恢复暂停接口。工具继续拒绝人工暂停期间的控制，不以重放动作掩盖失败。
+
+现在可采用 `window_list → desktop_capture(window_id, screen_id, capture_backend:auto) → uia_tree → uia_action(focus_mode:background) → 刷新并重新截图`。具体字段和示例见 [交互工具](INTERACTIVE_TOOLS.md#不聚焦的窗口截图115)。相同 window_id 只对产生它的观察有效，每次新的操作用新的 request_key。
+
+这条路径已在本机解决“mstsc 最小化时看不到窗口画面”的实际问题，不再要求先成功 window_focus 或先取得屏幕截图。窗口截图不等于整个桌面可抓取，也不改变实际键鼠的前台要求。UIA 控制能力取决于应用的控件提供者；锁屏/UAC、被系统排除的捕获内容及不提供可操作控件的程序不由本模式绕过。其他应用、驱动、多屏/HDR与独立 Windows 机器仍应分别验收。
+
+实现依据：[CreateForWindow](https://learn.microsoft.com/en-us/windows/win32/api/windows.graphics.capture.interop/nf-windows-graphics-capture-interop-igraphicscaptureiteminterop-createforwindow)、[CreateFreeThreaded](https://learn.microsoft.com/en-us/uwp/api/windows.graphics.capture.direct3d11captureframepool.createfreethreaded)、[PrintWindow](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-printwindow)。WGC 无需将被遮挡窗口置前的成熟用法也见 [Microsoft winapp UI](https://learn.microsoft.com/en-us/windows/apps/dev-tools/winapp-cli/ui-automation)。

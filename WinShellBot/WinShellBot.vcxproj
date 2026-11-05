@@ -162,7 +162,7 @@
       <RuntimeLibrary Condition="'$(Configuration)'=='Release'">MultiThreaded</RuntimeLibrary>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>Ws2_32.lib;Bcrypt.lib;Crypt32.lib;Shell32.lib;Ole32.lib;OleAut32.lib;Taskschd.lib;Uuid.lib;Advapi32.lib;Userenv.lib;Comctl32.lib;Comdlg32.lib;Gdi32.lib;Windowscodecs.lib;Wtsapi32.lib;Shlwapi.lib;Xmllite.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>D3D11.lib;Dxgi.lib;Dxguid.lib;Dwmapi.lib;RuntimeObject.lib;Ws2_32.lib;Bcrypt.lib;Crypt32.lib;Shell32.lib;Ole32.lib;OleAut32.lib;Taskschd.lib;Uuid.lib;Advapi32.lib;Userenv.lib;Comctl32.lib;Comdlg32.lib;Gdi32.lib;Windowscodecs.lib;Wtsapi32.lib;Shlwapi.lib;Xmllite.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Manifest>
       <AdditionalManifestFiles>$(MSBuildProjectDirectory)\app\shellbot.manifest;%(AdditionalManifestFiles)</AdditionalManifestFiles>
@@ -187,6 +187,10 @@
     <ClCompile Include="platform\desktop.c" />
     <ClCompile Include="platform\uia.c" />
     <ClCompile Include="platform\uia_broker.c" />
+    <ClCompile Include="platform\window_capture.c" />
+    <ClCompile Include="platform\window_capture_broker.c" />
+    <ClInclude Include="platform\window_capture.h" />
+    <ClInclude Include="platform\window_capture_desktop.h" />
     <ClInclude Include="platform\desktop.h" />
     <ClCompile Include="platform\manager_ui.c" />
     <ClCompile Include="platform\desktop_app.c" />

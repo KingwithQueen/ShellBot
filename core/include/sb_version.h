@@ -2,8 +2,8 @@
 #define SB_VERSION_H
 
 /* Shared by C code and the Windows resource compiler. */
-#define SB_VERSION "1.1.4"
-#define SB_VERSION_RESOURCE 1,1,4,0
+#define SB_VERSION "1.1.5"
+#define SB_VERSION_RESOURCE 1,1,5,0
 #define SB_COPYRIGHT "Copyright (c) 2026 姬敬"
 
 #endif

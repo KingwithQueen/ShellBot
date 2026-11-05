@@ -1,4 +1,4 @@
-# Windows 交互终端、模式搜索与 UIA（1.1.4）
+# Windows 交互终端、模式搜索与窗口交互（1.1.5）
 
 这些能力在 Windows x64 实现。升级后重新连接 MCP 客户端刷新工具定义；既有项目的工具许可不自动增加。ConPTY 使用原任务工具；UIA 需要显式启用 `uia_tree`、`uia_action` 和相应桌面权限。
 
@@ -91,3 +91,26 @@ UIA 在一次性独立 MTA 进程中运行，提供者连接/事务等待各设�
 UIA 请求进行中不会并行执行其他桌面工具，状态查询和租约释放仍可处理；人工暂停继续立即生效。不要把并发请求返回的 busy 当作已经执行。
 
 依据：[UIA 线程模型](https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-threading)、[IUIAutomation2](https://learn.microsoft.com/en-us/windows/win32/api/uiautomationclient/nn-uiautomationclient-iuiautomation2)。本机真实 mstsc 最小化下的自建 Win32 窗口已验证后台中文写入/读回和按钮单次调用；其他实际应用、提供者和系统仍需分别验收，见 [RDP 记录](REMOTE_DESKTOP.md#114-实机对照与后台语义操作)。
+
+## 不聚焦的窗口截图（1.1.5）
+
+复用 `desktop_capture`，指定 window_id 和 screen_id 后进入窗口模式。先取得 observe 或 control 租约，通过 window_list 选择目标；窗口截图不要求前台，不激活或恢复窗口，也不会回退为屏幕 DC 截图：
+
+```json
+{"name":"desktop_capture","arguments":{"lease_id":"当前租约","screen_id":"最近 window_list 的观察编号","window_id":"该观察中的目标窗口编号","request_key":"window-image-1","capture_backend":"auto","max_dimension":1600,"response_mode":"compact"}}
+```
+
+- capture_backend 默认 auto，先使用 WGC；无帧、失败或疑似全黑时尝试 PrintWindow。可明确指定 wgc 或 printwindow 诊断，指定后只运行该后端。它仅用于窗口模式。
+- 同一请求不能混用窗口模式和 monitor_id、x/y/width/height；省略 window_id 时原来的桌面/区域截图契约保持不变。窗口模式必须提供 screen_id。
+- 继续要求同用户、同会话、权限范围内的可见非最小化窗口和稳定进程创建身份；锁屏/UAC、身份/布局/epoch 变化、过期观察或租约会拒绝。观察租约允许在所有者暂停时截图，但不能输入。
+- max_dimension 与现有 PNG 容量上限保持不变。像素捕获/编码使用独立普通用户进程，应用绘图或驱动卡住可单独回收；每次窗口捕获总预算约四秒，受剩余租约和原请求期限约束。大 PNG 用独立线程持续排空私有管道，同时检查取消和目标，避免逐块等待限速。
+
+回执的 capture_diagnostic 包含各后端的阶段、HRESULT、Win32 错误、像素/编码状态、输出字节数和图像验证结果，以及最终 selected_backend。PrintWindow 依赖应用配合，API 成功并不证明所有控件或 GPU 区域都正确绘制；全黑图仍可作为有效 PNG 返回，但 content_may_be_blank:true 会明确提示。application_paint_verified:false 要求调用方结合文字状态和后续图像确认效果，不能把时间戳不同等同于应用画面更新。
+
+图片使用 `coordinate_space:"window_image_pixels"`，`coordinate_input_source:false`。WGC 通常不含不可见窗口边框，PrintWindow 使用完整窗口；有可靠映射时返回 physical_region 与 physical_pixels_per_image_x/y，否则 physical_mapping_known:false、physical_region:null。PrintWindow 匹配目标应用的 DPI 上下文，避免 150% 等缩放时只在左上角绘制、其余留黑。
+
+窗口截图本身不赋予全局坐标输入许可。后台操作使用 UIA：截图后刷新 window_list/uia_tree，再用 `uia_action focus_mode:background` 选择观察到的控件。执行后重新截图并核对。真实按键、坐标点击/拖动和 window_focus 仍沿用原来的前台与输入保护条件。
+
+同一项目有窗口捕获进行时，其他桌面操作返回 desktop_busy_capture；状态/能力查询及租约释放仍可处理，所有者暂停不受阻塞。窗口像素不保存到持久历史，compact 回执保留一份图片而不重复完整 JSON。
+
+本机真实 mstsc 最小化期间，普通 Win32 窗口的 WGC、PrintWindow、auto，以及 D3D11 画布的 WGC、auto，均完成后台中文写入/读回、单次按钮调用、橙/蓝/橙两次真实画面变化的验证。两类窗口均未取得前台。详细范围见 [RDP 实机结果](REMOTE_DESKTOP.md#115-最小化时的窗口截图和后台操作)。

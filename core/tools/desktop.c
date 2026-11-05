@@ -70,6 +70,9 @@ void sb_desktop_tools_list(sb_host *host, yyjson_mut_doc *doc, yyjson_mut_val *t
 #ifndef SB_POSIX
             yyjson_mut_val *dimension=yyjson_mut_obj_get(properties,"max_dimension");
             yyjson_mut_obj_remove_str(dimension,"maximum"); yyjson_mut_obj_add_uint(doc,dimension,"maximum",SB_IMAGE_DIMENSION);
+            add_properties(doc,properties,"{\"window_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32},\"screen_id\":{\"type\":\"string\",\"minLength\":32,\"maxLength\":32},\"capture_backend\":{\"type\":\"string\",\"enum\":[\"auto\",\"wgc\",\"printwindow\"],\"default\":\"auto\"}}");
+            add_properties(doc,schema,"{\"allOf\":[{\"if\":{\"required\":[\"window_id\"]},\"then\":{\"required\":[\"screen_id\"],\"not\":{\"anyOf\":[{\"required\":[\"monitor_id\"]},{\"required\":[\"x\"]},{\"required\":[\"y\"]},{\"required\":[\"width\"]},{\"required\":[\"height\"]}]}},\"else\":{\"not\":{\"anyOf\":[{\"required\":[\"screen_id\"]},{\"required\":[\"capture_backend\"]}]}}}]}");
+            yyjson_mut_obj_remove_str(tool,"description");yyjson_mut_obj_add_str(doc,tool,"description","Capture desktop monitor/region as before, or specify window_id plus screen_id from a fresh window_list for an unfocused per-window image. Window mode defaults capture_backend auto: WGC first, then PrintWindow on failure/no frame/suspected black output; can explicitly select a backend. Window mode never focuses/restores or falls back to the screen DC. Observe/control lease, same user/session/integrity and stable target required. Minimized app windows are refused. RDP minimized capture depends on provider; inspect per-backend diagnostics and verify changing content. Pixels are window image coordinates and do not authorize coordinate input. max_dimension scales the result; PNG budget unchanged.");
 #endif
         }
         if (i==19) {
