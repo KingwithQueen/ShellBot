@@ -442,6 +442,7 @@ static yyjson_mut_val *tool_call_inner(sb_host *host, const char *actor, const c
             yyjson_mut_obj_add_uint(doc, data, "max_output_bytes", host->config.limits.output_bytes);
             yyjson_mut_obj_add_uint(doc, data, "max_timeout_ms", host->config.limits.task_timeout_ms);
             yyjson_mut_obj_add_uint(doc, data, "max_approval_records", host->config.limits.approval_records);
+            yyjson_mut_obj_add_val(doc,data,"operation_budget",sb_policy_capacity(host->policy,doc));
             yyjson_mut_obj_add_uint(doc, data, "worker_memory_mb", host->config.limits.worker_memory_mb);
         }
         yyjson_mut_obj_add_bool(doc, data, "durable_approvals", host->store!=NULL);

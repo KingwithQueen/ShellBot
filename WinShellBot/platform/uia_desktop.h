@@ -1,18 +1,21 @@
 /* Included by desktop.c on the lease-owning thread. No provider COM calls on that thread. */
 #include "uia.h"
-bool sb_win_uia_guard(HWND window,DWORD pid,FILETIME created,LONG epoch,uint64_t deadline,bool input,bool require_foreground){
+bool sb_win_application_guard(HWND window,DWORD pid,FILETIME created,LONG epoch,uint64_t deadline,bool input,bool require_foreground,bool background,DWORD signature){
     sb_desktop context={0};HANDLE mutex=NULL,pause=NULL,mapping=NULL;volatile LONG *current=NULL;
     if(!shared_objects(&mutex,&pause,&mapping,&current,&context.session,context.sid,&context.integrity,false))return false;
     DWORD actual=0;GetWindowThreadProcessId(window,&actual);HANDLE process=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,actual);FILETIME start={0},exit,kernel,user;
+    DWORD current_signature=0;bool desktop_ok=background?application_desktop(&context,&current_signature) && current_signature==signature && !require_foreground:interactive(&context);
     bool ok=process && GetProcessTimes(process,&start,&exit,&kernel,&user) && !memcmp(&start,&created,sizeof(start)) && actual==pid && IsWindowVisible(window) &&
-        interactive(&context) && input_permitted(&context,window) && sb_platform_millis()<deadline;
+        desktop_ok && input_permitted(&context,window) && sb_platform_millis()<deadline;
     if(input)ok=ok && (!require_foreground || GetForegroundWindow()==window) && !IsIconic(window) && WaitForSingleObject(pause,0)!=WAIT_OBJECT_0 && epoch==InterlockedCompareExchange(current,0,0);
     if(process)CloseHandle(process);UnmapViewOfFile((const void*)current);CloseHandle(mapping);CloseHandle(pause);CloseHandle(mutex);return ok;
 }
+bool sb_win_uia_guard(HWND window,DWORD pid,FILETIME created,LONG epoch,uint64_t deadline,bool input,bool require_foreground){return sb_win_application_guard(window,pid,created,epoch,deadline,input,require_foreground,false,0);}
+
 typedef struct {sb_desktop *desktop;desktop_job *job;observation *view;window_ref window;char screen[33],lease[33];bool changing,require_foreground;} uia_binding;
 static bool uia_guard(void *parameter){
     uia_binding *b=parameter;sb_desktop *d=b->desktop;pump();
-    if(b->job->cancelled || sb_platform_millis()>=b->job->deadline || !owns(d,b->job->actor,b->lease) || !interactive(d) || b->view->invalidated || strcmp(b->screen,b->view->id) ||
+    if(b->job->cancelled || sb_platform_millis()>=b->job->deadline || !owns(d,b->job->actor,b->lease) || !lease_available(d) || b->view->invalidated || strcmp(b->screen,b->view->id) ||
         sb_platform_millis()-b->view->at>OBSERVATION_MS || b->view->input_epoch!=InterlockedCompareExchange(d->epoch,0,0) || !window_identity(&b->window) || !input_permitted(d,b->window.hwnd))return false;
     if(b->changing && (d->observation_lease || WaitForSingleObject(d->pause,0)==WAIT_OBJECT_0 || (b->require_foreground && GetForegroundWindow()!=b->window.hwnd) || IsIconic(b->window.hwnd)))return false;
     topology monitors;char hash[65];if(!layout(&monitors,hash) || strcmp(hash,b->view->layout))return false;
@@ -21,6 +24,7 @@ static bool uia_guard(void *parameter){
 static const char *uia_operation(sb_desktop *desktop,desktop_job *job,yyjson_val *args,yyjson_mut_doc *doc,yyjson_mut_val *data){
     bool changing=!strcmp(job->name,"uia_action");if(desktop->uia_busy)return "uia_busy: another provider request is in progress";
     const char *focus_setting=sb_string(yyjson_obj_get(args,"focus_mode"));bool require_foreground=changing && (!focus_setting || strcmp(focus_setting,"background"));
+    if(changing && desktop->background_lease && require_foreground)return "application_background_requires_explicit_background_focus_mode";
     if(changing && desktop->observation_lease)return "desktop_observation_lease_cannot_control_uia";
     observation *view=find_observation(desktop,sb_string(yyjson_obj_get(args,"screen_id")));
     /* 定向语义操作绑定窗口与控件身份，不依赖其他窗口的前台/矩形变化。 */
@@ -47,7 +51,7 @@ static const char *uia_operation(sb_desktop *desktop,desktop_job *job,yyjson_val
     yyjson_mut_obj_add_sint(request,body,"epoch",view->input_epoch);yyjson_mut_obj_add_uint(request,body,"deadline",deadline);
     yyjson_mut_obj_add_uint(request,body,"max_nodes",changing?1000:(unsigned)maximum);yyjson_mut_obj_add_uint(request,body,"max_depth",changing?32:(unsigned)depth);
     yyjson_mut_obj_add_bool(request,body,"include_text",yyjson_get_bool(yyjson_obj_get(args,"include_text")));
-    yyjson_mut_obj_add_bool(request,body,"require_foreground",require_foreground);
+    yyjson_mut_obj_add_bool(request,body,"require_foreground",require_foreground);yyjson_mut_obj_add_bool(request,body,"application_background",desktop->background_lease);yyjson_mut_obj_add_uint(request,body,"session_signature",desktop->background_signature);
     if(element){
         yyjson_mut_val *identity=object(request);const char *fields[]={"runtime_id","control_type","name","automation_id","class_name"};
         for(unsigned i=0;i<5;++i)yyjson_mut_obj_add_val(request,identity,fields[i],yyjson_val_mut_copy(request,yyjson_obj_get(element,fields[i])));

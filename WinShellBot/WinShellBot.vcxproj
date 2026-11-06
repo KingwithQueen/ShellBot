@@ -215,6 +215,7 @@
     <ClInclude Include="platform\sandbox.h" />
     <ClCompile Include="..\core\tools\tasks.c" />
     <ClCompile Include="..\core\policy\approval.c" />
+    <ClInclude Include="..\core\policy\receipts.h" />
     <ClCompile Include="..\core\policy\audit.c" />
     <ClCompile Include="..\core\policy\state.c" />
     <ClCompile Include="..\core\config\config.c" />

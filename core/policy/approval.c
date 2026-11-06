@@ -5,6 +5,8 @@
 #include <string.h>
 
 #define RECORD_LIMIT 64
+#define REPLAY_GUARD_LIMIT 65536u
+#define RECEIPT_CACHE_BYTES (64u * 1024u * 1024u)
 typedef enum { PENDING, APPROVED, RUNNING, COMPLETED, DENIED, EXPIRED, FAILED, CANCELLED, INTERRUPTED } state;
 typedef struct {
     char id[33], digest[65], hash[65], actor[64], workspace[64];
@@ -20,7 +22,10 @@ typedef struct {
     uint64_t revision, next_offset, last_offset, budget, used, charge;
     bool logical, pageable;
 } record;
-struct sb_policy { sb_mutex *mutex; sb_audit *audit; sb_store *store; unsigned ttl, record_limit; record records[RECORD_LIMIT]; };
+typedef struct {char id[33],actor[64],tool[32],digest[65],target[65],key[65];state status;unsigned domain;bool reading;} replay_guard;
+struct sb_policy { sb_mutex *mutex; sb_audit *audit; sb_store *store; unsigned ttl, record_limit; record records[RECORD_LIMIT]; replay_guard *guards;size_t guard_count,guard_capacity;uint64_t reclaimed,cache_reclaimed; };
+static bool logical_read(const record *r);
+static bool receipt_reclaimable(const record *r);
 
 static const char *state_name(state status) {
     static const char *const names[] = {"pending", "approved", "running", "completed", "denied", "expired", "failed", "cancelled", "interrupted"};
@@ -29,13 +34,18 @@ static const char *state_name(state status) {
 static void clear(record *r) { free(r->target); free(r->identity); free(r->text); free(r->original); free(r->cached); memset(r, 0, sizeof(*r)); }
 static yyjson_mut_val *capacity(sb_policy *policy,yyjson_mut_doc *doc) {
     yyjson_mut_val *value=yyjson_mut_obj(doc);yyjson_mut_obj_add_bool(doc,value,"enabled",policy!=NULL);if(!policy)return value;
-    unsigned count=0,running=0,task_receipts=0;
+    unsigned count=0,running=0,task_receipts=0,pending=0,permits=0,reclaimable=0;uint64_t cache_bytes=0;
     for(size_t i=0;i<policy->record_limit;++i){record *r=&policy->records[i];if(!*r->id)continue;++count;
         if(r->status==RUNNING)++running;
+        if(r->status==PENDING)++pending;if(r->status==APPROVED)++permits;if(receipt_reclaimable(r))++reclaimable;if(r->cached)cache_bytes+=strlen(r->cached);
         if(r->logical && (!strcmp(r->tool,"task_start") || !strcmp(r->tool,"task_input")) && (r->status==COMPLETED || r->status==FAILED))++task_receipts;
     }
     yyjson_mut_obj_add_uint(doc,value,"record_count",count);yyjson_mut_obj_add_uint(doc,value,"record_limit",policy->record_limit);
-    yyjson_mut_obj_add_uint(doc,value,"running_count",running);yyjson_mut_obj_add_uint(doc,value,"cached_task_receipt_count",task_receipts);return value;
+    yyjson_mut_obj_add_uint(doc,value,"running_count",running);yyjson_mut_obj_add_uint(doc,value,"cached_task_receipt_count",task_receipts);
+    yyjson_mut_obj_add_uint(doc,value,"pending_count",pending);yyjson_mut_obj_add_uint(doc,value,"live_permit_count",permits);yyjson_mut_obj_add_uint(doc,value,"reclaimable_count",reclaimable);yyjson_mut_obj_add_uint(doc,value,"protected_count",count-reclaimable);
+    yyjson_mut_obj_add_uint(doc,value,"available_count",policy->record_limit-count+reclaimable);
+    yyjson_mut_obj_add_uint(doc,value,"reclaimed_count",policy->reclaimed);yyjson_mut_obj_add_uint(doc,value,"replay_guard_count",policy->guard_count);yyjson_mut_obj_add_uint(doc,value,"replay_guard_limit",REPLAY_GUARD_LIMIT);
+    yyjson_mut_obj_add_uint(doc,value,"cached_bytes",cache_bytes);yyjson_mut_obj_add_uint(doc,value,"cached_bytes_limit",RECEIPT_CACHE_BYTES);yyjson_mut_obj_add_bool(doc,value,"automatic_reclamation",true);return value;
 }
 yyjson_mut_val *sb_policy_capacity(sb_policy *policy,yyjson_mut_doc *doc) {
     if(!policy)return capacity(NULL,doc);sb_platform_mutex_lock(policy->mutex);yyjson_mut_val *value=capacity(policy,doc);sb_platform_mutex_unlock(policy->mutex);return value;
@@ -79,6 +89,7 @@ static bool audit_record(sb_policy *policy, record *r, const char *event, const 
     yyjson_mut_doc *doc=policy->store ? yyjson_mut_doc_new(NULL) : NULL;
     bool desktop=sb_desktop_tool(r->tool);
     yyjson_mut_val *body=doc ? describe(doc,r,!desktop) : NULL;
+    if(body)yyjson_mut_obj_add_bool(doc,body,"reclaimable_read_snapshot",logical_read(r) && !sb_transfer_tool(r->tool) && r->status!=PENDING && r->status!=APPROVED && r->status!=RUNNING);
 #ifndef SB_POSIX
     if (body) { history_preview(doc,body,"text"); history_preview(doc,body,"original_text"); }
 #endif
@@ -141,6 +152,7 @@ static yyjson_mut_val *error_data(yyjson_mut_doc *doc, const char *message) {
     yyjson_mut_obj_add_strcpy(doc, data, "error", message);
     return data;
 }
+#include "receipts.h"
 static yyjson_mut_val *describe(yyjson_mut_doc *doc, record *r, bool full) {
     yyjson_mut_val *data = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_strcpy(doc, data, "approval_id", r->id);
@@ -204,7 +216,7 @@ void sb_policy_free(sb_policy *policy) {
             }
             clear(r);
         }
-        sb_platform_mutex_free(policy->mutex); free(policy);
+        free(policy->guards);sb_platform_mutex_free(policy->mutex); free(policy);
     }
 }
 
@@ -220,6 +232,8 @@ bool sb_policy_operation_begin(sb_host *host, const char *actor, const char *too
         *reply = error_data(doc, "Logical operation arguments exceed the approval budget."); return false;
     }
     sb_platform_mutex_lock(policy->mutex);
+    *reply=receipt_retired(policy,actor,tool,digest,target,parameters,approval_id,doc);
+    if(*reply)goto blocked;
     if (approval_id) {
         r = find(policy, approval_id);
         if (!r || !r->logical || strcmp(r->actor, actor) || strcmp(r->project, host->project->id) ||
@@ -288,9 +302,9 @@ bool sb_policy_operation_begin(sb_host *host, const char *actor, const char *too
         }
     } else {
         if (!sb_audit_healthy(policy->audit)) { *reply = error_data(doc, "Audit unavailable; operation was not started."); goto blocked; }
-        for (size_t i = 0; i < policy->record_limit; ++i) if (!*policy->records[i].id) { r = &policy->records[i]; break; }
+        r=receipt_reserve(policy);
         if (!r) {
-            *reply=error_data(doc,"Operation record budget reached; archive ended tasks to release their task receipts. Other approvals and operation receipts remain reserved for review.");
+            *reply=error_data(doc,"Operation slots are occupied by pending approvals, running operations or live permits, or replay protection cannot be retained. Completed receipts are reclaimed automatically. Cancel your pending approvals/permits or wait for running operations; task_archive releases only the selected tasks' receipts.");
             yyjson_mut_obj_add_str(doc,*reply,"code","operation_record_budget_exceeded");yyjson_mut_obj_add_val(doc,*reply,"operation_budget",capacity(policy,doc));goto blocked;
         }
         unsigned char nonce[16];
@@ -326,6 +340,8 @@ yyjson_mut_val *sb_policy_operation_receipt(sb_host *host, const char *actor, co
     char digest[65]; sb_error error={0}; yyjson_mut_val *result=NULL;
     if (!parameters || !sb_platform_sha256(parameters,strlen(parameters),digest,&error)) return NULL;
     sb_policy *policy=host->policy; sb_platform_mutex_lock(policy->mutex);
+    result=receipt_retired(policy,actor,tool,digest,target,parameters,approval_id,doc);
+    if(result){yyjson_mut_val *wrapped=yyjson_mut_obj(doc);yyjson_mut_obj_add_bool(doc,wrapped,"isError",true);yyjson_mut_obj_add_val(doc,wrapped,"structuredContent",result);sb_platform_mutex_unlock(policy->mutex);return wrapped;}
     for (size_t i=0;i<policy->record_limit;++i) {
         record *r=&policy->records[i];
         if (!r->logical || !r->cached || (r->status!=COMPLETED && r->status!=FAILED) ||
@@ -354,7 +370,9 @@ bool sb_policy_operation_finish(sb_policy *policy, const char *ticket, yyjson_mu
         else if (!failed) r->used += r->charge;
         r->status = failed ? FAILED : r->pageable && more && r->used < r->budget ? APPROVED : COMPLETED;
         size_t size = 0; char *cached = result ? yyjson_mut_val_write(result,0,&size) : NULL;
-        free(r->cached); r->cached = size <= (!strcmp(r->tool,"desktop_capture") ? SB_RESPONSE_LIMIT : SB_POLICY_CACHE_LIMIT) ? cached : NULL;
+        free(r->cached);r->cached=NULL;
+        receipt_trim_cache(policy,size,r);
+        r->cached = size <= (!strcmp(r->tool,"desktop_capture") ? SB_RESPONSE_LIMIT : SB_POLICY_CACHE_LIMIT) && size<=RECEIPT_CACHE_BYTES-receipt_cached_bytes(policy) ? cached : NULL;
         if (!r->cached) free(cached);
         recorded=audit_record(policy,r,failed ? "operation_failed" : "operation_completed",r->actor);
     }
@@ -414,6 +432,7 @@ yyjson_mut_val *sb_policy_write(sb_host *host, const char *actor, sb_workspace *
     sb_platform_mutex_lock(policy->mutex);
     record *r = approval_id ? find(policy, approval_id) : NULL;
     yyjson_mut_val *data;
+    data=receipt_retired(policy,actor,"fs_write",digest,target,NULL,approval_id,doc);if(data)goto done;
     if (approval_id) {
         if (!r || strcmp(r->actor, actor) || strcmp(r->digest, digest)) {
             data = error_data(doc, "Approval does not match this caller, target, parent directory, or content."); goto done;
@@ -444,12 +463,7 @@ yyjson_mut_val *sb_policy_write(sb_host *host, const char *actor, sb_workspace *
         }
         if (!r) {
             if (!sb_audit_healthy(policy->audit)) { data = error_data(doc, "Audit recording unavailable; new approvals are blocked."); goto done; }
-            for (size_t i = 0; i < policy->record_limit; ++i) {
-                record *candidate = &policy->records[i];
-                if (!*candidate->id || (candidate->status != RUNNING && sb_platform_millis() >= candidate->deadline)) {
-                    r = candidate; clear(r); break;
-                }
-            }
+            r=receipt_reserve(policy);
             if (!r) { data = error_data(doc, "Approval queue is full. Wait for records to expire."); goto done; }
             unsigned char random[16];
             r->target = sb_strdup(target); r->identity = sb_strdup(identity); r->text = sb_strdup(text);
@@ -560,6 +574,7 @@ yyjson_mut_val *sb_policy_modify(sb_host *host, const char *actor, sb_workspace 
     sb_policy *policy = host->policy; sb_modify *plan = NULL; char *output = NULL;
     yyjson_mut_val *data; record *r = NULL;
     sb_platform_mutex_lock(policy->mutex);
+    data=receipt_retired(policy,actor,request->tool,digest,NULL,NULL,request->approval_id,doc);if(data)goto finish;
     if (request->approval_id) {
         r = find(policy, request->approval_id);
         if (!r || strcmp(r->actor, actor) || strcmp(r->digest, digest) || strcmp(r->tool, request->tool)) {
@@ -620,12 +635,7 @@ yyjson_mut_val *sb_policy_modify(sb_host *host, const char *actor, sb_workspace 
     }
     if (!r) {
         if (!sb_audit_healthy(policy->audit)) { data = error_data(doc, "Audit recording unavailable; new approvals are blocked."); goto finish; }
-        for (size_t i = 0; i < policy->record_limit; ++i) {
-            record *candidate = &policy->records[i];
-            if (!*candidate->id || (candidate->status != RUNNING && sb_platform_millis() >= candidate->deadline)) {
-                r = candidate; clear(r); break;
-            }
-        }
+        r=receipt_reserve(policy);
         if (!r) { data = error_data(doc, "Approval queue is full. Wait for records to expire."); goto finish; }
         r->target = sb_strdup(sb_platform_modify_target(plan)); r->identity = sb_strdup(sb_platform_modify_parent(plan));
         r->text = sb_strdup(output); r->original = sb_strdup(original);
@@ -729,7 +739,10 @@ char *sb_policy_owner_request(sb_policy *policy, const char *request, size_t len
 char *sb_policy_caller_request(sb_policy *policy, const char *actor, const char *command, const char *id) {
     yyjson_mut_doc *doc=yyjson_mut_doc_new(NULL); if (!doc) return NULL;
     sb_platform_mutex_lock(policy->mutex); record *r=id ? find(policy,id) : NULL; yyjson_mut_val *body=NULL;
-    if (!r || strcmp(r->actor,actor)) body=error_data(doc,"Unknown approval id for this caller and running instance.");
+    if (!r || strcmp(r->actor,actor)) {
+        for(size_t i=0;id && i<policy->guard_count;++i)if(!strcmp(policy->guards[i].actor,actor) && !strcmp(policy->guards[i].id,id)){body=receipt_archived(doc,&policy->guards[i],false);break;}
+        if(!body)body=error_data(doc,"Unknown approval id for this caller and running instance.");
+    }
     else {
         expire(policy,r);
         if (!strcmp(command,"cancel")) {

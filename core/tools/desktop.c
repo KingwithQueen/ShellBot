@@ -56,6 +56,7 @@ void sb_desktop_tools_list(sb_host *host, yyjson_mut_doc *doc, yyjson_mut_val *t
             add_properties(doc,properties,"{\"action\":{\"type\":\"string\",\"enum\":[\"acquire\",\"renew\",\"release\",\"status\"]},\"duration_seconds\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":120}}");
 #ifndef SB_POSIX
             add_properties(doc,properties,"{\"access\":{\"type\":\"string\",\"enum\":[\"observe\",\"control\"],\"default\":\"control\",\"description\":\"Acquire only: observe permits screenshots/window lists/authorized clipboard reads even while input is paused, without input hooks. It never permits focus, keys, mouse or clipboard writes. control preserves legacy behavior and requires the local owner to resume input. Release before changing access; renew retains access. Works within the worker session including active RDP, never across sessions or a secure desktop.\"}}");
+            add_properties(doc,properties,"{\"session_mode\":{\"type\":\"string\",\"enum\":[\"interactive\",\"application_background\"],\"default\":\"interactive\",\"description\":\"Acquire only. application_background explicitly permits same-user/session Default application windows when locked/disconnected. Only window_list, desktop_state, per-window capture, uia_tree and uia_action with focus_mode background. No unlock, input/secure desktop, foreground, physical keys/mouse, clipboard or whole-screen capture. Observe/control distinction and owner pause remain. Lease is invalidated on session lock/connection transitions. Capture/provider success must be verified.\"}}");
 #endif
             yyjson_mut_arr_add_str(doc,required,"action");
         } else {
@@ -203,6 +204,7 @@ yyjson_mut_val *sb_desktop_tools_call(sb_host *host, const char *actor, const ch
     yyjson_doc *response=wire ? yyjson_read(wire,strlen(wire),0) : NULL;
     reply=response ? yyjson_val_mut_copy(doc,yyjson_doc_get_root(response)) : error_result(doc,"Desktop operation did not return a receipt. Review possible effects before any new request.");
     yyjson_doc_free(response); free(wire);
+    yyjson_mut_val *receipt_data=yyjson_mut_obj_get(reply,"structuredContent");if(receipt_data)yyjson_mut_obj_add_val(doc,receipt_data,"operation_budget",sb_policy_capacity(host->policy,doc));
     if (*ticket && !sb_policy_operation_finish(host->policy,ticket,reply)) {
         yyjson_mut_val *data=yyjson_mut_obj_get(reply,"structuredContent");
         yyjson_mut_obj_add_str(doc,data,"audit_warning","Operation receipt could not be flushed. Do not replay input; inspect the result.");

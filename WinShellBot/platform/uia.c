@@ -15,7 +15,7 @@ typedef struct {
     IUIAutomation2 *automation;IUIAutomationTreeWalker *walker;
     yyjson_mut_doc *doc;yyjson_mut_val *nodes;yyjson_val *request,*wanted;
     IUIAutomationElement *found;DWORD pid;HWND window;FILETIME created;LONG epoch;
-    unsigned count,maximum,depth;size_t bytes;uint64_t deadline;bool truncated,include_text,require_foreground;
+    unsigned count,maximum,depth;size_t bytes;uint64_t deadline;bool truncated,include_text,require_foreground,background;DWORD signature;
     HRESULT failure;
 } uia_query;
 static char *encode(BSTR value,size_t limit){
@@ -106,7 +106,7 @@ static const char *act(uia_query *q,HRESULT *api,bool *attempted){
     else return "uia_action_unsupported";
     *api=IUIAutomationElement_GetCurrentPatternAs(e,id,&iid,&pattern);if(FAILED(*api) || !pattern)return "uia_pattern_unavailable";
     BOOL readonly=FALSE;if(id==UIA_ValuePatternId){*api=IUIAutomationValuePattern_get_CurrentIsReadOnly((IUIAutomationValuePattern*)pattern,&readonly);if(FAILED(*api) || readonly){IUnknown_Release((IUnknown*)pattern);return "uia_value_read_only_or_unknown";}}
-    if(!sb_win_uia_guard(q->window,q->pid,q->created,q->epoch,q->deadline,true,q->require_foreground)){IUnknown_Release((IUnknown*)pattern);return "uia_input_guard_changed";}
+    if(!sb_win_application_guard(q->window,q->pid,q->created,q->epoch,q->deadline,true,q->require_foreground,q->background,q->signature)){IUnknown_Release((IUnknown*)pattern);return "uia_input_guard_changed";}
     *attempted=true;
     if(id==UIA_InvokePatternId)*api=IUIAutomationInvokePattern_Invoke((IUIAutomationInvokePattern*)pattern);
     else if(id==UIA_ValuePatternId){wchar_t *value=request_value(q->request);if(!value){*attempted=false;*api=E_INVALIDARG;}else{*api=IUIAutomationValuePattern_SetValue((IUIAutomationValuePattern*)pattern,value);free(value);}}
@@ -117,10 +117,10 @@ static const char *act(uia_query *q,HRESULT *api,bool *attempted){
 }
 static char *query(yyjson_val *request){
     uia_query q={0};q.request=request;q.wanted=yyjson_obj_get(request,"element");q.maximum=(unsigned)yyjson_get_uint(yyjson_obj_get(request,"max_nodes"));q.depth=(unsigned)yyjson_get_uint(yyjson_obj_get(request,"max_depth"));q.pid=(DWORD)yyjson_get_uint(yyjson_obj_get(request,"pid"));q.window=(HWND)(uintptr_t)yyjson_get_uint(yyjson_obj_get(request,"hwnd"));q.created.dwLowDateTime=(DWORD)yyjson_get_uint(yyjson_obj_get(request,"created_low"));q.created.dwHighDateTime=(DWORD)yyjson_get_uint(yyjson_obj_get(request,"created_high"));q.epoch=(LONG)yyjson_get_sint(yyjson_obj_get(request,"epoch"));q.deadline=yyjson_get_uint(yyjson_obj_get(request,"deadline"));q.include_text=yyjson_get_bool(yyjson_obj_get(request,"include_text"));
-    q.require_foreground=!yyjson_is_false(yyjson_obj_get(request,"require_foreground"));
+    q.background=yyjson_get_bool(yyjson_obj_get(request,"application_background"));q.signature=(DWORD)yyjson_get_uint(yyjson_obj_get(request,"session_signature"));q.require_foreground=!yyjson_is_false(yyjson_obj_get(request,"require_foreground"));
     q.doc=yyjson_mut_doc_new(NULL);if(!q.doc)return NULL;yyjson_mut_val *result=yyjson_mut_obj(q.doc);q.nodes=yyjson_mut_arr(q.doc);yyjson_mut_obj_add_val(q.doc,result,"nodes",q.nodes);
     const char *error=NULL;HRESULT hr=E_FAIL;bool attempted=false;IUIAutomationElement *root=NULL;
-    if(!q.maximum || q.maximum>1000 || q.depth>32 || !q.deadline || sb_platform_millis()>=q.deadline || !sb_win_uia_guard(q.window,q.pid,q.created,q.epoch,q.deadline,q.wanted!=NULL,q.require_foreground)){error="uia_window_or_input_guard_unavailable";goto done;}
+    if(!q.maximum || q.maximum>1000 || q.depth>32 || !q.deadline || sb_platform_millis()>=q.deadline || !sb_win_application_guard(q.window,q.pid,q.created,q.epoch,q.deadline,q.wanted!=NULL,q.require_foreground,q.background,q.signature)){error="uia_window_or_input_guard_unavailable";goto done;}
     hr=CoCreateInstance(&CLSID_CUIAutomation8,NULL,CLSCTX_INPROC_SERVER,&IID_IUIAutomation2,(void**)&q.automation);if(FAILED(hr)){error="uia_provider_unavailable";goto done;}
     hr=IUIAutomation2_put_ConnectionTimeout(q.automation,500);if(SUCCEEDED(hr))hr=IUIAutomation2_put_TransactionTimeout(q.automation,500);if(SUCCEEDED(hr))hr=IUIAutomation2_put_AutoSetFocus(q.automation,FALSE);
     if(FAILED(hr)){error="uia_provider_configuration_failed";goto done;}

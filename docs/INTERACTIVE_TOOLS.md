@@ -1,4 +1,4 @@
-# Windows 交互终端、模式搜索与窗口交互（1.1.5）
+# Windows 交互终端、模式搜索与窗口交互（1.1.6）
 
 这些能力在 Windows x64 实现。升级后重新连接 MCP 客户端刷新工具定义；既有项目的工具许可不自动增加。ConPTY 使用原任务工具；UIA 需要显式启用 `uia_tree`、`uia_action` 和相应桌面权限。
 
@@ -114,3 +114,21 @@ UIA 请求进行中不会并行执行其他桌面工具，状态查询和租约�
 同一项目有窗口捕获进行时，其他桌面操作返回 desktop_busy_capture；状态/能力查询及租约释放仍可处理，所有者暂停不受阻塞。窗口像素不保存到持久历史，compact 回执保留一份图片而不重复完整 JSON。
 
 本机真实 mstsc 最小化期间，普通 Win32 窗口的 WGC、PrintWindow、auto，以及 D3D11 画布的 WGC、auto，均完成后台中文写入/读回、单次按钮调用、橙/蓝/橙两次真实画面变化的验证。两类窗口均未取得前台。详细范围见 [RDP 实机结果](REMOTE_DESKTOP.md#115-最小化时的窗口截图和后台操作)。
+
+## 锁屏时的应用后台模式（1.1.6）
+
+常规租约仍默认 `session_mode:"interactive"`，保留锁屏/断开/UAC 拒绝规则。需要访问已登录用户在 Default 桌面上的普通应用时，显式申请：
+
+```json
+{"name":"desktop_lease","arguments":{"action":"acquire","access":"control","session_mode":"application_background","duration_seconds":30,"request_key":"background-app-1","response_mode":"compact"}}
+```
+
+仅查看可用 `access:"observe"`，它允许在人工暂停时读取窗口、UIA 树及窗口截图，始终禁止控制。control 仍受项目控制许可和所有者暂停约束。用 host_capabilities.desktop_status.application_background_available 判断应用后台上下文，不能用常规 desktop_control:false 推断它也不可用。
+
+后台租约只允许 window_list、desktop_state、desktop_capture 的窗口模式、uia_tree，以及显式 `focus_mode:"background"` 的 uia_action。普通桌面整体抓屏、聚焦、真实按键/鼠标、剪贴板、前台 UIA 操作均被拒绝。续期保留模式，不能把观察租约或普通租约升级为后台控制。
+
+保持原用户/会话/权限、窗口进程创建身份、观察期限、布局、人工暂停及输入 epoch 检查；锁定或连接状态发生变化时旧后台租约失效，应重新观察并申请。工具不解锁、不登录、不切换输入桌面、不接触登录/UAC 界面；已连接且未锁定、但输入桌面不可访问的 UAC 状态仍被拒绝。
+
+流程为：申请后台租约 → window_list → 窗口截图/读取 UIA → 后台语义操作 → 刷新并核对结果 → 释放租约。每个新请求使用新 request_key。截图优先 WGC；断开且锁屏时 WGC 可能无帧，auto 会兼容回退 PrintWindow。PrintWindow 的 GPU 内容可能是旧画面，即使返回 PNG 成功，也不能当作操作结果证明。实际锁屏结果与 GPU 应用方案见 [远程桌面说明](REMOTE_DESKTOP.md#116-断开并锁屏时的应用后台模式)。
+
+1.1.6 自动回收已结束的操作回执缓存，数十次连续观察不再占死 64 个槽；已回收输入/写入的旧请求键返回 operation_receipt_reclaimed，绝不重新执行。容量含义见 [回执回收](CAPACITY_LIMITS.md#116-操作回执回收)。

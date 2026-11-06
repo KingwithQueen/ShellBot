@@ -163,6 +163,8 @@ pending 只表示调度预算结束前尚未尝试；它们只出现在 pending_
 
 next_offset 仍为本页原始字节终点；text_next_offset 为成功解码的完整字符前缀终点。文本分页应从 text_next_offset 继续，避免丢掉跨页尾字节。解码失败不伪造文本，保留 decode_status/decode_error，仍可改选 bytes 读取同一 offset。原始输出始终保留在任务中，直到显式归档释放。
 
+1.1.6 将其他已结束操作回执的缓存回收与任务归档分开：完成的窗口观察、截图和输入等回执按槽位/字节压力自动回收，旧输入/写入请求键仍保留精简防重放摘要。task_archive 继续只处理所选任务，不能取消其他活跃审批或分页许可。看 operation_budget.available_count 判断新调用容量，不能仅以 record_count 达到 64 判定已耗尽；详情见 [回执回收](CAPACITY_LIMITS.md#116-操作回执回收)。
+
 任务 status 仍表示整个 Job 和输出读取是否结束，旧 exit_code 只在任务完成后出现。新增 entry_process（pid、state、exit_code、query_win32_error）、job（state、active_process_count、query_win32_error）、entry_exited_job_running 和 output_drained。入口可能已 exited:7，但 Job 仍 running、active_process_count:1，此时 status 仍 running，表示辅助进程还在运行。Job empty 且输出排空后才完成；真实退出码 259 通过进程句柄等待状态识别，不当作仍在运行。
 
 查询依据 [GetExitCodeProcess](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getexitcodeprocess) 与 [QueryInformationJobObject](https://learn.microsoft.com/en-us/windows/win32/api/jobapi2/nf-jobapi2-queryinformationjobobject)。此处 Job 活动数包含仍运行的入口进程，状态为查询时的快照。

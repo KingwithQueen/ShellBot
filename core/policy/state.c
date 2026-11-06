@@ -11,13 +11,13 @@
 #define STATE_RECORDS 8192
 #endif
 #define STATE_LINE (2u * 1024u * 1024u)
-typedef struct { char id[33], instance[33], actor[64], kind[16]; char *json; } saved_record;
+typedef struct { char id[33], instance[33], actor[64], kind[16]; char *json;bool reclaimable_read; } saved_record;
 struct sb_store {
     sb_mutex *mutex;
     sb_journal *journal;
     char project[64], instance[33], writer[33], backend[24];
     uint64_t revision, sequence, bytes;
-    size_t count;
+    size_t count;uint64_t read_snapshots_reclaimed;
     bool healthy;
     saved_record records[STATE_RECORDS];
 };
@@ -32,16 +32,19 @@ static saved_record *find(sb_store *store, const char *kind, const char *id, con
     }
     return NULL;
 }
+static saved_record *reclaimable_snapshot(sb_store *store){for(size_t i=0;i<store->count;++i)if(store->records[i].reclaimable_read)return &store->records[i];return NULL;}
 static bool cache(sb_store *store, const char *kind, const char *id, const char *actor, yyjson_mut_val *body) {
     if (strcmp(kind,"approval") && strcmp(kind,"task")) return true;
     const char *instance=yyjson_mut_get_str(yyjson_mut_obj_get(body,"state_instance_id"));
     if (!hex_id(id) || !hex_id(instance) || !actor || strlen(actor)>=64) return false;
     saved_record *r=find(store,kind,id,instance);
-    if (!r && store->count==STATE_RECORDS) return false;
+    bool replacing=!r && store->count==STATE_RECORDS;if(replacing && !(r=reclaimable_snapshot(store)))return false;
     char *json=yyjson_mut_val_write(body,0,NULL); if (!json) return false;
-    if (!r) { r=&store->records[store->count++]; strcpy(r->id,id); strcpy(r->instance,instance); strcpy(r->kind,kind); strcpy(r->actor,actor); }
+    if(replacing){free(r->json);memset(r,0,sizeof(*r));++store->read_snapshots_reclaimed;}
+    if (!r)r=&store->records[store->count++];
+    if(!*r->id){strcpy(r->id,id);strcpy(r->instance,instance);strcpy(r->kind,kind);strcpy(r->actor,actor);}
     if (strcmp(r->actor,actor)) { free(json); return false; }
-    free(r->json); r->json=json; return true;
+    free(r->json);r->json=json;r->reclaimable_read=!strcmp(kind,"approval") && !active(yyjson_mut_get_str(yyjson_mut_obj_get(body,"status"))) && yyjson_mut_get_bool(yyjson_mut_obj_get(body,"reclaimable_read_snapshot"));return true;
 }
 static bool load(void *context, const char *name, const char *bytes, size_t length, sb_error *error) {
     sb_store *store=context; uint64_t sequence=0;
@@ -103,7 +106,7 @@ bool sb_store_append(sb_store *store, const char *kind, const char *id, const ch
         yyjson_mut_obj_add_uint(doc,root,"time_unix_ms",sb_platform_unix_ms()); yyjson_mut_obj_add_str(doc,root,"kind",kind);
         yyjson_mut_obj_add_str(doc,root,"record_id",id); yyjson_mut_obj_add_str(doc,root,"actor",actor);
         yyjson_mut_obj_add_str(doc,root,"status",status); yyjson_mut_obj_add_str(doc,root,"event",event); yyjson_mut_obj_add_val(doc,root,"body",copy);
-        if ((!strcmp(kind,"approval") || !strcmp(kind,"task")) && !find(store,kind,id,store->writer) && store->count==STATE_RECORDS) ok=false;
+        if ((!strcmp(kind,"approval") || !strcmp(kind,"task")) && !find(store,kind,id,store->writer) && store->count==STATE_RECORDS && !reclaimable_snapshot(store)) ok=false;
     }
     sb_error error={0}; char hash[65], *encoded=ok ? yyjson_mut_write(doc,0,NULL) : NULL;
     ok=encoded && sb_platform_sha256(encoded,strlen(encoded),hash,&error); free(encoded);
@@ -160,6 +163,7 @@ yyjson_mut_val *sb_store_capacity(sb_store *store,yyjson_mut_doc *doc) {
     sb_platform_mutex_lock(store->mutex);
     yyjson_mut_obj_add_bool(doc,root,"healthy",store->healthy);yyjson_mut_obj_add_uint(doc,root,"bytes",store->bytes);yyjson_mut_obj_add_uint(doc,root,"bytes_limit",STATE_BYTES);
     yyjson_mut_obj_add_uint(doc,root,"record_count",store->count);yyjson_mut_obj_add_uint(doc,root,"record_limit",STATE_RECORDS);
+    yyjson_mut_obj_add_uint(doc,root,"read_snapshots_reclaimed",store->read_snapshots_reclaimed);yyjson_mut_obj_add_str(doc,root,"retention","Completed read snapshots may leave the bounded memory index; original journal lines remain on disk. Pending/live permits, effects and task keys are retained.");
     sb_platform_mutex_unlock(store->mutex);return root;
 }
 bool sb_store_task_repeated(sb_store *store, const char *actor, const char *key) {

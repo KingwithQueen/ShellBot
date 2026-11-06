@@ -128,3 +128,26 @@ UIA 提供独立于像素坐标的元素树和 pattern 动作，使用说明见 
 这条路径已在本机解决“mstsc 最小化时看不到窗口画面”的实际问题，不再要求先成功 window_focus 或先取得屏幕截图。窗口截图不等于整个桌面可抓取，也不改变实际键鼠的前台要求。UIA 控制能力取决于应用的控件提供者；锁屏/UAC、被系统排除的捕获内容及不提供可操作控件的程序不由本模式绕过。其他应用、驱动、多屏/HDR与独立 Windows 机器仍应分别验收。
 
 实现依据：[CreateForWindow](https://learn.microsoft.com/en-us/windows/win32/api/windows.graphics.capture.interop/nf-windows-graphics-capture-interop-igraphicscaptureiteminterop-createforwindow)、[CreateFreeThreaded](https://learn.microsoft.com/en-us/uwp/api/windows.graphics.capture.direct3d11captureframepool.createfreethreaded)、[PrintWindow](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-printwindow)。WGC 无需将被遮挡窗口置前的成熟用法也见 [Microsoft winapp UI](https://learn.microsoft.com/en-us/windows/apps/dev-tools/winapp-cli/ui-automation)。
+
+## 1.1.6 断开并锁屏时的应用后台模式
+
+2026-11-06 通过 Z620 任务接口，在真实 disconnected/locked、进程第 3 会话、Default 桌面、输入桌面访问错误 5 的环境运行独立候选版。现有安装未被替换，电脑始终保持锁定，没有登录、解锁、切换会话或修改客户端设置。旧版常规后台命令可运行，但桌面不可用，64 条操作回执也仍占满；新版使用显式 application_background 租约。
+
+| 实测能力 | 断开并锁屏结果 |
+| --- | --- |
+| 常规 interactive 租约 | 拒绝，保留原来规则 |
+| 应用窗口枚举、UIA 树 | 可用，仅本用户会话的普通应用 |
+| 后台中文写入/读回、按钮调用 | 两类自建窗口均通过，按钮计数 0→1→2 |
+| 普通 GDI 窗口的 PrintWindow/auto | 三个阶段均取得当前画面，橙→蓝→橙像素核对通过 |
+| WGC | 此锁屏/断开环境无可用帧，auto 回退 PrintWindow |
+| D3D11 画布 | 语义操作可用；PrintWindow 曾返回旧色块，GPU 当前画面验收不通过 |
+
+后台模式用法见 [交互工具](INTERACTIVE_TOOLS.md#锁屏时的应用后台模式116)。它访问普通应用的语义对象和绘图接口，不把锁屏/UAC 桌面变成可操作界面。默认交互模式和真实键鼠继续要求可用的输入桌面，状态变化会使后台租约失效。微软的 [winapp UI 文档](https://github.com/microsoft/winappCli/blob/main/docs/ui-automation.md)也区分锁屏友好的 pattern 操作与依赖输入桌面的注入/截图；[Windows 桌面对象说明](https://learn.microsoft.com/en-us/windows/win32/winstation/desktops)解释了 Default 与安全桌面的隔离。
+
+### 需要 GPU 当前画面或真实键鼠时
+
+推荐把自动化应用与 ShellBot 放进专用 Windows 虚拟机，保持虚拟机内有可渲染、已认证的交互会话；宿主机可以保持锁定。使用支持图形渲染的虚拟显示/GPU 配置，并在该环境单独验收截图和操作。普通 Windows 的多个任务视图桌面不能替代独立会话或虚拟机。
+
+另一条成熟路线是用具备凭据管理的无人值守会话代理，按所有者预先配置的认证创建/维护 RDP 会话，再运行 ShellBot 和目标应用。这需要专用账号、会话和相应 Windows 许可，不能省略认证。[Power Automate 的官方说明](https://learn.microsoft.com/en-us/power-automate/desktop-flows/run-unattended-desktop-flows)明确其会创建受管理的 RDP 会话；Windows 10/11 上现存的活动或锁定用户会话会妨碍其无人值守运行，因此现有 Z620 会话不能直接当作已配置完成的无人值守环境。
+
+本轮没有创建账号/虚拟机、保存登录凭据、注销用户、关闭锁屏或部署会话服务。上述方案是 GPU/物理输入需求的后续环境方案，未冒充本机已通过验收。若 PrintWindow 内容不更新，应停止依赖该图像继续点击，改用可验证的 UIA 状态，或转到已验收的独立渲染会话。

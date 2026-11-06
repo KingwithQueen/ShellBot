@@ -39,7 +39,7 @@ struct sb_desktop {
     volatile LONG *epoch;
     HWND window; HHOOK keyboard,mouse; HANDLE foreground_hook;
     volatile LONG available,input_epoch,physical_inputs,foreign_inputs,truncated_inputs; DWORD session;
-    ULONG_PTR input_tag; bool leased,observation_lease,was_paused,hotkey;
+    ULONG_PTR input_tag; bool leased,observation_lease,background_lease,was_paused,hotkey;DWORD background_signature;
     char lease_id[33],actor[64]; uint64_t deadline;
     unsigned next_observation,emergency_stops; observation observations[OBSERVATIONS];
     wchar_t sid[192]; DWORD integrity;
@@ -135,6 +135,19 @@ static int session_lock(DWORD session,DWORD *error,LONG *flags) {
     }
     WTSFreeMemory(buffer);return locked;
 }
+static bool interactive(sb_desktop *desktop);
+/* 后台模式只使用本会话 Default 上已有应用对象，不切换或访问输入/安全桌面。 */
+static bool application_desktop(sb_desktop *desktop,DWORD *signature){
+    DWORD bytes=0,lock_error=0;LONG flags=0;wchar_t station[64]={0},name[64]={0};LPWSTR value=NULL;
+    if(!GetUserObjectInformationW(GetProcessWindowStation(),UOI_NAME,station,sizeof(station),&bytes) || _wcsicmp(station,L"WinSta0") || !GetUserObjectInformationW(GetThreadDesktop(GetCurrentThreadId()),UOI_NAME,name,sizeof(name),&bytes) || _wcsicmp(name,L"Default"))return false;
+    bool queried=WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE,desktop->session,WTSConnectState,&value,&bytes)!=0;
+    WTS_CONNECTSTATE_CLASS state=queried && bytes>=sizeof(state)?*(WTS_CONNECTSTATE_CLASS*)value:WTSDown;WTSFreeMemory(value);int locked=session_lock(desktop->session,&lock_error,&flags);
+    if(locked<0 || (state!=WTSActive && state!=WTSDisconnected))return false;
+    /* 已连接、未锁定但输入桌面不可用通常是 UAC；不能用后台模式跳过它。 */
+    if(state==WTSActive && !locked){HDESK input=OpenInputDesktop(0,FALSE,DESKTOP_READOBJECTS);bool ordinary=input && GetUserObjectInformationW(input,UOI_NAME,name,sizeof(name),&bytes) && !_wcsicmp(name,L"Default");if(input)CloseDesktop(input);if(!ordinary)return false;}
+    *signature=1u+(DWORD)state*2u+(DWORD)locked;return true;
+}
+static bool lease_available(sb_desktop *desktop){DWORD signature=0;return desktop->background_lease?application_desktop(desktop,&signature) && signature==desktop->background_signature:interactive(desktop);}
 static bool interactive(sb_desktop *desktop) {
     LPWSTR value=NULL; DWORD bytes=0; bool active=WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE,desktop->session,WTSConnectState,&value,&bytes) &&
         bytes>=sizeof(WTS_CONNECTSTATE_CLASS) && *(WTS_CONNECTSTATE_CLASS *)value==WTSActive;
@@ -215,7 +228,7 @@ static void release_lease(sb_desktop *desktop) {
     if (desktop->keyboard) UnhookWindowsHookEx(desktop->keyboard); if (desktop->mouse) UnhookWindowsHookEx(desktop->mouse);
     desktop->keyboard=desktop->mouse=NULL;
     if (desktop->leased) ReleaseMutex(desktop->mutex);
-    desktop->leased=false;desktop->observation_lease=false; *desktop->lease_id=*desktop->actor=0; desktop->deadline=0; invalidate(desktop);
+    desktop->leased=false;desktop->observation_lease=false;desktop->background_lease=false;desktop->background_signature=0; *desktop->lease_id=*desktop->actor=0; desktop->deadline=0; invalidate(desktop);
 }
 static void pause_local(sb_desktop *desktop) {
     InterlockedIncrement(desktop->epoch); SetEvent(desktop->pause);
@@ -293,7 +306,7 @@ static void key_name(WORD key,char name[16]) {
 static bool arguments(sb_desktop *desktop,const char *name,yyjson_val *args) {
     int tool=sb_project_tool_index(name),n; if (!((tool>=SB_DESKTOP_TOOL_FIRST && tool<SB_DESKTOP_TOOL_END) || tool==39 || tool==40) || !yyjson_is_obj(args)) return false;
     const char *allowed[20]={"lease_id","request_key","approval_id"}; size_t count=3;
-    if (tool==15) { allowed[count++]="action"; allowed[count++]="duration_seconds";allowed[count++]="access"; }
+    if (tool==15) { allowed[count++]="action"; allowed[count++]="duration_seconds";allowed[count++]="access";allowed[count++]="session_mode"; }
     if (tool>=19 && tool<=24) allowed[count++]="screen_id";
     if (tool==17) { const char *fields[]={"monitor_id","max_dimension","x","y","width","height","screen_id","window_id","capture_backend"}; for (unsigned i=0;i<9;++i) allowed[count++]=fields[i]; }
     if(tool==39 || tool==40){allowed[count++]="screen_id";allowed[count++]="window_id";
@@ -327,6 +340,7 @@ static bool arguments(sb_desktop *desktop,const char *name,yyjson_val *args) {
     const char *action=sb_string(yyjson_obj_get(args,"action")),*lease=sb_string(yyjson_obj_get(args,"lease_id")),*key=sb_string(yyjson_obj_get(args,"request_key"));
     bool cleanup=tool==15 && action && (!strcmp(action,"status") || !strcmp(action,"release"));
     if (tool==15 && (!action || (strcmp(action,"acquire") && strcmp(action,"renew") && strcmp(action,"release") && strcmp(action,"status")))) return false;
+    const char *session_mode=sb_string(yyjson_obj_get(args,"session_mode"));if(yyjson_obj_get(args,"session_mode") && (!session_mode || tool!=15 || strcmp(action,"acquire") || (strcmp(session_mode,"interactive") && strcmp(session_mode,"application_background"))))return false;
     yyjson_val *access_value=yyjson_obj_get(args,"access");const char *access=sb_string(access_value);
     if(access_value && (!access || tool!=15 || strcmp(action,"acquire") || (strcmp(access,"observe") && strcmp(access,"control"))))return false;
     if ((!cleanup && (!key || !*key || strlen(key)>64 || strspn(key,"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.")!=strlen(key))) ||
@@ -400,7 +414,7 @@ static void change_rect(yyjson_mut_doc *doc,yyjson_mut_val *changes,const char *
 }
 static const char *observe_guard_mode(sb_desktop *desktop,observation *view,bool input,bool require_foreground,bool track_foreground,yyjson_mut_doc *doc,yyjson_mut_val *data) {
     if (!desktop->leased || sb_platform_millis()>=desktop->deadline) return "lease_expired";
-    if (!interactive(desktop)) return "no_desktop_session: locked, disconnected or secure desktop";
+    if (!lease_available(desktop)) return "no_desktop_session: session changed, locked, disconnected or secure desktop";
     if (input && WaitForSingleObject(desktop->pause,0)==WAIT_OBJECT_0) return "desktop_paused: local owner must resume";
     yyjson_mut_val *changes=yyjson_mut_arr(doc);
     if (!view || !*view->id) {
@@ -658,6 +672,7 @@ static void focus_report(yyjson_mut_doc *doc,yyjson_mut_val *data,window_ref *ta
     yyjson_mut_obj_add_val(doc,data,"focus_diagnostic",value);
 }
 static const char *input_action_inner(sb_desktop *desktop,const char *name,yyjson_val *args,observation *view,yyjson_mut_doc *doc,yyjson_mut_val *data,focus_attempt *focus) {
+    if(desktop->background_lease)return "application_background_lease_forbids_physical_input";
     if(desktop->observation_lease)return "desktop_observation_lease_cannot_control: acquire a control lease after the local owner resumes input";
     if(!strcmp(name,"window_focus"))yyjson_mut_obj_add_strcpy(doc,data,"requested_window_id",sb_string(yyjson_obj_get(args,"window_id")));
     const char *error=observe_guard(desktop,view,true,strcmp(name,"window_focus")!=0,doc,data); if (error) return error;
@@ -822,6 +837,7 @@ static char *execute(sb_desktop *desktop,desktop_job *job,yyjson_val *args) {
     if (!strcmp(job->name,"desktop_lease")) {
         if (!strcmp(action,"status")) {
             yyjson_mut_obj_add_bool(doc,data,"leased",desktop->leased);
+            yyjson_mut_obj_add_str(doc,data,"session_mode",desktop->background_lease?"application_background":"interactive");
             if(desktop->leased)yyjson_mut_obj_add_str(doc,data,"access",desktop->observation_lease?"observe":"control");else yyjson_mut_obj_add_null(doc,data,"access");
             bool owner=desktop->leased && !strcmp(job->actor,desktop->actor);
             yyjson_mut_obj_add_bool(doc,data,"owned_by_caller",owner);
@@ -833,7 +849,8 @@ static char *execute(sb_desktop *desktop,desktop_job *job,yyjson_val *args) {
         } else {
             int duration=0; integer(args,"duration_seconds",(int)desktop->policy.lease_seconds,1,(int)desktop->policy.lease_seconds,&duration);
             bool observing=!strcmp(action,"renew")?desktop->observation_lease:!strcmp(sb_string(yyjson_obj_get(args,"access"))?sb_string(yyjson_obj_get(args,"access")):"control","observe");
-            if (!interactive(desktop)) error="no_desktop_session";
+            bool background=!strcmp(action,"renew")?desktop->background_lease:sb_string(yyjson_obj_get(args,"session_mode")) && !strcmp(sb_string(yyjson_obj_get(args,"session_mode")),"application_background");DWORD signature=0;
+            if (!(background?application_desktop(desktop,&signature):interactive(desktop)) || (!strcmp(action,"renew") && background && signature!=desktop->background_signature)) error="no_desktop_session: acquire application_background for same-session app-only work when locked/disconnected";
             else if (!observing && WaitForSingleObject(desktop->pause,0)==WAIT_OBJECT_0) error="desktop_paused: only the local owner can resume; access observe still permits screenshots and window lists";
             else if (!strcmp(action,"renew")) {
                 if (!owns(desktop,job->actor,lease)) error="desktop_lease_not_owned";
@@ -843,7 +860,7 @@ static char *execute(sb_desktop *desktop,desktop_job *job,yyjson_val *args) {
                 DWORD wait=WaitForSingleObject(desktop->mutex,0);
                 if (wait!=WAIT_OBJECT_0 && wait!=WAIT_ABANDONED) error="desktop_busy: another project or manager owns this session";
                 else {
-                    desktop->leased=true;desktop->observation_lease=observing;
+                    desktop->leased=true;desktop->observation_lease=observing;desktop->background_lease=background;desktop->background_signature=signature;
                     if(!observing){
                         desktop->hotkey=RegisterHotKey(desktop->window,1,MOD_CONTROL|MOD_ALT|MOD_NOREPEAT,VK_F1+desktop->policy.emergency_function_key-1)!=0;
                         desktop->keyboard=SetWindowsHookExW(WH_KEYBOARD_LL,keyboard_hook,GetModuleHandleW(NULL),0);
@@ -861,12 +878,13 @@ static char *execute(sb_desktop *desktop,desktop_job *job,yyjson_val *args) {
                 yyjson_mut_obj_add_str(doc,data,"lease_id",desktop->lease_id); yyjson_mut_obj_add_uint(doc,data,"duration_seconds",duration);
                 yyjson_mut_obj_add_uint(doc,data,"expires_at_unix_ms",sb_platform_unix_ms()+desktop->deadline-sb_platform_millis());
                 yyjson_mut_obj_add_str(doc,data,"binding","project + authenticated caller + worker instance + Windows session");
-                yyjson_mut_obj_add_str(doc,data,"access",desktop->observation_lease?"observe":"control");
+                yyjson_mut_obj_add_str(doc,data,"access",desktop->observation_lease?"observe":"control");yyjson_mut_obj_add_str(doc,data,"session_mode",desktop->background_lease?"application_background":"interactive");
             }
         }
         yyjson_mut_obj_add_bool(doc,data,"paused",WaitForSingleObject(desktop->pause,0)==WAIT_OBJECT_0);
     } else if (!owns(desktop,job->actor,lease)) error="desktop_lease_not_owned_or_expired";
-    else if (!interactive(desktop)) error="no_desktop_session: locked, disconnected or secure desktop";
+    else if (!lease_available(desktop)) error="no_desktop_session: session changed, locked, disconnected or secure desktop";
+    else if(desktop->background_lease && strcmp(job->name,"window_list") && strcmp(job->name,"desktop_state") && strcmp(job->name,"uia_tree") && strcmp(job->name,"uia_action") && (strcmp(job->name,"desktop_capture") || !yyjson_obj_get(args,"window_id")))error="application_background_lease_forbids_physical_focus_clipboard_or_screen_capture";
     else if (!strcmp(job->name,"desktop_capture") && yyjson_obj_get(args,"window_id")){
         char *png=NULL;error=window_capture_operation(desktop,job,args,doc,data,&png);
         if(png){char *wire=result(doc,data,NULL,png);free(png);yyjson_mut_doc_free(doc);return wire;}
@@ -939,6 +957,7 @@ static char *capabilities(sb_desktop *desktop) {
     yyjson_mut_obj_add_bool(doc,data,"minimized_windows_listed",true);yyjson_mut_obj_add_bool(doc,data,"window_restore_supported",true);yyjson_mut_obj_add_uint(doc,data,"max_focus_wait_ms",3000);
     yyjson_mut_obj_add_bool(doc,data,"uia_tree_supported",true);yyjson_mut_obj_add_bool(doc,data,"uia_patterns_supported",true);yyjson_mut_obj_add_uint(doc,data,"max_uia_nodes",1000);yyjson_mut_obj_add_uint(doc,data,"max_uia_provider_ms",4000);
     yyjson_mut_obj_add_bool(doc,data,"uia_background_patterns_supported",true);
+    yyjson_mut_obj_add_bool(doc,data,"application_background_supported",true);DWORD background_signature=0;yyjson_mut_obj_add_bool(doc,data,"application_background_available",application_desktop(desktop,&background_signature));yyjson_mut_obj_add_str(doc,data,"application_background_scope","Same-user/session Default applications only; no input-desktop access, unlock, focus, physical input, clipboard or screen capture. Lease expires on lock/connection transitions.");
     yyjson_mut_obj_add_bool(doc,data,"window_capture_supported",true);yyjson_mut_val *backends=yyjson_mut_arr(doc);yyjson_mut_arr_add_str(doc,backends,"wgc");yyjson_mut_arr_add_str(doc,backends,"printwindow");yyjson_mut_obj_add_val(doc,data,"window_capture_backends",backends);
     yyjson_mut_obj_add_str(doc,data,"window_capture_default_backend","auto");yyjson_mut_obj_add_bool(doc,data,"window_capture_requests_foreground",false);
     yyjson_mut_obj_add_bool(doc,data,"explicit_key_chords",true);yyjson_mut_obj_add_uint(doc,data,"max_key_modifiers",3);
@@ -990,9 +1009,9 @@ static LRESULT CALLBACK desktop_window(HWND window,UINT message,WPARAM wparam,LP
     if (message==DESKTOP_JOB) { process_job(desktop,(desktop_job *)lparam); return 0; }
     if (message==WM_HOTKEY && wparam==1) { ++desktop->emergency_stops; pause_local(desktop); return 0; }
     if (message==WM_TIMER) {
-        bool available=interactive(desktop); InterlockedExchange(&desktop->available,available?1:0);
-        if (desktop->leased && (!available || sb_platform_millis()>=desktop->deadline)) {
-            sb_audit_operation(desktop->host->audit,available?"desktop_lease_expired":"desktop_session_unavailable",desktop->actor,
+        bool available=interactive(desktop),lease_ok=lease_available(desktop); InterlockedExchange(&desktop->available,available?1:0);
+        if (desktop->leased && (!lease_ok || sb_platform_millis()>=desktop->deadline)) {
+            sb_audit_operation(desktop->host->audit,lease_ok?"desktop_lease_expired":"desktop_session_unavailable",desktop->actor,
                 desktop->host->project->id,"ordinary","desktop_lease",NULL); release_lease(desktop);
         }
         bool paused=WaitForSingleObject(desktop->pause,0)==WAIT_OBJECT_0;
