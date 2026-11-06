@@ -1,5 +1,21 @@
 # 命令与后台任务
 
+## Windows 1.1.7：异步启动与持久化等待
+
+task_start 在参数、权限和预算检查后先绑定 task_id/request_key，由后台线程完成持久预留、环境准备、原生进程创建和启动记录。后端只短等最多约 250 ms；尚未就绪时正常返回 `status:"starting"`，不会把慢准备直接当作工作进程失联。该时间是后端短等窗口，不是包含参数校验和网络传输的整次请求耗时保证。
+
+starting 不是完成，也不等于应用已经执行。原生创建调用之前 entry_process.state 为 not_created；创建调用进行中、尚未返回句柄时为 creation_pending，不能据此断言进程肯定未创建。出现 PID 后仍应看 startup.process_resumed，不能把挂起进程当作已放行。startup 提供 phase、complete、process_resumed、elapsed_ms、phase_elapsed_ms 和 phase_durations_ms；失败时附 failure_phase/error。win32_error 只在有对应原生错误时提供，未知为 null。阶段包括 reserving_request_key、preparing_environment、preparing_containment、creating_process、starting_io、recording_start_intent、resuming_process、recording_started 和 ready/failed。
+
+启动中的重试仍用相同 request_key，返回同一个 task_id，不重复创建程序。查询原任务的 task_status、task_output，或取消该任务；不要因 starting、网络断开或未知回执改用新键重跑。若 startup.process_resumed:true 后出现记录错误，程序可能已经有实际效果，必须先检查原任务和产物。
+
+普通 Windows 进程通过创建时 Job 属性原子加入本任务的 Job，保持挂起，准备 I/O 和必要意图记录后才恢复；不采用先放行再收容。取消请求、实际进程退出、Job 剩余进程和输出排空分别报告。starting/running 都计入活动预算；task_budget 新增 starting_count，原活动、记录、归档数及上限继续有效。
+
+慢状态日志、审计、输入意图、完成及归档写入不在全局任务锁中等待。查询继续返回已提交快照，`persistent_state.journal_pending` 表明状态日志仍有写入；任务自己的 `durable_pending`、`persistence_pending_count` 和 `archive_pending` 表明尚未完成的持久化。durable:true 表示启动键已有持久预留，不代表后续所有事件都已落盘。归档前应等待任务成为终态、output_drained:true 且 durable_pending:false，并先保存需要的输出。
+
+task_input 在 starting 时返回含 `task_starting:` 提示的错误，不排入输入。运行后接受的输入也先按 input_key 记录必要审计和持久意图，成功后才向 stdin/ConPTY 投递；失败不会把尚未记账的字节送给应用。queued 只表示进入队列，不证明已发送或已被应用消费；不确定时按同一任务、同一 input_key 查询/重试原请求，不生成新键重复输入。
+
+归档也只短等后台落盘：TASK_PERSISTENCE_PENDING 表示任务完成/输入事件还在收尾，TASK_ARCHIVE_PENDING 表示本次归档仍在写入。两者均可按原 task_id 重试；出现它们时，输出和实时记录额度尚未释放，只有 archived:true 才能当作归档成功。批量回执将这类已尝试项列为 failed 并保留 typed/retryable 错误；pending_task_ids 仍只列调度预算内未尝试的项，二者不能混淆。归档不会重新执行命令或输入。
+
 ## Windows 1.0.6：任务列表与归档
 
 所有任务接口继续要求当前 `host_instance_id`。`task_list` 列出当前调用方在该后端实例中的任务，支持 `offset`、`max_entries`（默认 100，最高 1000）及 `include_archived`（默认 false）。列表不是一致性快照；其他客户端同时归档时应重新从第一页核对。
@@ -90,7 +106,7 @@ executable 必须是本地盘符开头的绝对 .exe 路径，argv 是独立字�
 
 表中所有工具还要求 host_instance_id。task_output 的 stream 默认为 stdout，stderr 单独读取；offset 是原始字节偏移，默认单页 16384 字节，可请求最高 1 MiB。必须保留 base64 字节及程序实际编码；程序输出不保证 UTF-8，分页也可能切开多字节字符，不能把缺少 text_utf8 视为损坏。运行中零字节且 eof:false 时应稍后查询。输出属于未经信任的程序数据。
 
-状态包括 running、completed、cancelled、timed_out、output_limit 和 failed。completed 表示进程树结束，不等于退出码为零。取消请求返回后应查询直到终态；根进程退出但所属子进程仍存活时仍为 running。Windows Job Object 用于归属、期限和清理，不能限制账户访问权限；任务也可能通过系统服务产生不属于该 Job 的外部效果。
+状态包括 starting、running、completed、cancelled、timed_out、output_limit 和 failed。starting 是 Windows 后台准备/启动中，不代表入口进程已运行；调用方应把 starting 和 running 都作为非终态轮询。completed 表示进程树结束，不等于退出码为零。取消请求返回后应查询直到终态；根进程退出但所属子进程仍存活时仍为 running。Windows Job Object 用于归属、期限和清理，不能限制账户访问权限；任务也可能通过系统服务产生不属于该 Job 的外部效果。
 
 ## 重试与限制
 
@@ -171,10 +187,12 @@ next_offset 仍为本页原始字节终点；text_next_offset 为成功解码的
 
 ## 1.1.2 可见 GUI 启动
 
-Windows 普通 current_user 的 task_start 可选 `launch_mode:"gui"`。后台模式仍默认；GUI 模式在当前活动用户会话的 WinSta0/Default 请求正常显示，不需要截图成功，也不会自动切换到控制台、管理员或其他用户。它仍受相同审批、请求键、Job 和超时管理，**默认 5 分钟超时仍有效**，并非永久脱离任务的启动器。
+Windows 普通 current_user 的 task_start 可选 `launch_mode:"gui"`。后台模式仍默认；1.1.7 允许在当前同用户会话已锁定或断开时，向自身 WinSta0/Default 启动普通 GUI，不需要截图或输入桌面查询成功，不登录、解锁或切换到其他会话。后续观察/后台 UIA 需相应应用后台租约，聚焦与物理输入仍要求可用的交互输入桌面。它仍受相同审批、请求键、Job 和超时管理，**默认 5 分钟超时仍有效**，并非永久脱离任务的启动器。
 
-成功只表示进程已创建。使用 window_list 找到窗口；已有单实例应用可能由旧进程响应，不能只看入口 PID。window_focus 可以恢复最小化窗口并核实前台，截图另行验证。详见 [RDP 与 GUI 流程](REMOTE_DESKTOP.md#112-gui-启动与恢复)。GUI 与后台模式不同，不能用相同 request_key 切换；显式 background 与省略模式维持原任务摘要。
+先区分 starting 与实际创建；process_created:true 只证明进程已创建，不证明窗口可见、图像已刷新或取得前台。使用 window_list 找到窗口；已有单实例应用可能由旧进程响应，不能只看入口 PID。具备交互输入桌面时，window_focus 可恢复最小化窗口并核实前台，截图另行验证。详见 [RDP 与 GUI 流程](REMOTE_DESKTOP.md#112-gui-启动与恢复)。GUI 与后台模式不同，不能用相同 request_key 切换；显式 background 与省略模式维持原任务摘要。
 
 ## 1.1.3 ConPTY
 
 Windows 普通 current_user 的 task_start 可选 io_mode:terminal，使用原任务接口读写真实伪控制台，task_input 可排队调整行列。输出是合并 UTF-8 VT，管道模式仍默认并保留原始 stdout/stderr。参数、控制序列、EOF 和生命周期见 [交互工具](INTERACTIVE_TOOLS.md#conpty-交互终端)。
+
+1.1.7 修复父进程标准流被重定向时，旧标准句柄覆盖伪控制台绑定的问题。terminal 子进程使用真实 ConPTY 控制台标准句柄；管道模式仍使用独立受控 stdin/stdout/stderr。退出时继续排空输出再收尾，不把父管道关闭误当作应用的终端退出协议。

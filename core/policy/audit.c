@@ -7,12 +7,15 @@
 #endif
 
 struct sb_audit {
-    sb_mutex *mutex;
+    sb_mutex *mutex,*view_mutex;
     sb_journal *journal;
     char instance[33];
     uint64_t sequence, bytes, maximum;
-    bool healthy;
+    bool healthy,published_healthy;
 };
+
+/* 观察只读已发布状态；写入仍按 journal 锁串行并在副作用前确认。 */
+static void audit_unlock(sb_audit *audit){sb_platform_mutex_lock(audit->view_mutex);audit->published_healthy=audit->healthy;sb_platform_mutex_unlock(audit->view_mutex);sb_platform_mutex_unlock(audit->mutex);}
 
 bool sb_audit_append(sb_audit *audit, const char *event, const char *actor, const char *id,
                      const char *workspace, const char *target, const char *hash, size_t bytes,
@@ -57,7 +60,7 @@ bool sb_audit_append(sb_audit *audit, const char *event, const char *actor, cons
         fputs("ShellBot: Audit recording failed or reached its budget; new approvals and writes are blocked.\n", stderr);
     }
     free(line); free(json); yyjson_mut_doc_free(doc);
-    sb_platform_mutex_unlock(audit->mutex);
+    audit_unlock(audit);
     return ok;
 }
 
@@ -95,15 +98,15 @@ bool sb_audit_task(sb_audit *audit, const char *event, const char *actor, const 
         audit->healthy=false;
         fputs("ShellBot: Task audit recording failed; new task starts and stdin writes are blocked.\n",stderr);
     }
-    free(line);free(json);yyjson_mut_doc_free(doc);sb_platform_mutex_unlock(audit->mutex);return ok;
+    free(line);free(json);yyjson_mut_doc_free(doc);audit_unlock(audit);return ok;
 }
 
 sb_audit *sb_audit_new(sb_lease *lease, uint64_t maximum, sb_error *error) {
     sb_audit *audit = calloc(1, sizeof(*audit));
-    if (audit) audit->mutex = sb_platform_mutex_new();
+    if (audit){audit->mutex=sb_platform_mutex_new();audit->view_mutex=sb_platform_mutex_new();}
     unsigned char random[16];
-    if (!audit || !audit->mutex || !sb_platform_random(random, sizeof(random), error)) {
-        if (audit) sb_platform_mutex_free(audit->mutex);
+    if (!audit || !audit->mutex || !audit->view_mutex || !sb_platform_random(random, sizeof(random), error)) {
+        if (audit){sb_platform_mutex_free(audit->mutex);sb_platform_mutex_free(audit->view_mutex);}
         free(audit); sb_fail(error, "Cannot initialize audit recording."); return NULL;
     }
     for (size_t i = 0; i < sizeof(random); ++i) snprintf(audit->instance + i * 2, 3, "%02x", random[i]);
@@ -111,18 +114,14 @@ sb_audit *sb_audit_new(sb_lease *lease, uint64_t maximum, sb_error *error) {
     audit->journal = sb_platform_journal_open(lease, name, error);
     audit->maximum = maximum; audit->healthy = audit->journal != NULL;
     if (!audit->healthy || !sb_audit_append(audit, "instance_opened", "host", NULL, NULL, NULL, NULL, 0, NULL, NULL, NULL, NULL)) {
-        sb_platform_journal_close(audit->journal); sb_platform_mutex_free(audit->mutex); free(audit);
+        sb_platform_journal_close(audit->journal); sb_platform_mutex_free(audit->mutex);sb_platform_mutex_free(audit->view_mutex); free(audit);
         sb_fail(error, "Cannot open and flush a protected audit journal."); return NULL;
     }
     return audit;
 }
 
 bool sb_audit_healthy(sb_audit *audit) {
-    if (!audit) return false;
-    sb_platform_mutex_lock(audit->mutex);
-    bool healthy = audit->healthy;
-    sb_platform_mutex_unlock(audit->mutex);
-    return healthy;
+    if(!audit)return false;sb_platform_mutex_lock(audit->view_mutex);bool healthy=audit->published_healthy;sb_platform_mutex_unlock(audit->view_mutex);return healthy;
 }
 
 bool sb_audit_operation(sb_audit *audit, const char *event, const char *actor, const char *project, const char *backend, const char *tool, const char *digest) {
@@ -141,7 +140,7 @@ bool sb_audit_operation(sb_audit *audit, const char *event, const char *actor, c
     if (ok) { memcpy(line,json,length); line[length]='\n'; sb_error error={0}; ok=sb_platform_journal_append(audit->journal,line,length+1,&error);
         if (ok) { audit->bytes+=length+1; ++audit->sequence; } }
     if (!ok) audit->healthy=false;
-    free(line); free(json); yyjson_mut_doc_free(doc); sb_platform_mutex_unlock(audit->mutex); return ok;
+    free(line); free(json); yyjson_mut_doc_free(doc); audit_unlock(audit); return ok;
 }
 bool sb_audit_project(sb_audit *audit, const char *event, const char *project, uint64_t revision, uint64_t pid) {
     if (!audit || !event || !project) return false;
@@ -169,7 +168,7 @@ bool sb_audit_project(sb_audit *audit, const char *event, const char *project, u
     }
     if (!ok) audit->healthy = false;
     free(line); free(json); yyjson_mut_doc_free(doc);
-    sb_platform_mutex_unlock(audit->mutex); return ok;
+    audit_unlock(audit); return ok;
 }
 
 /* Only categories/counts, never argument names/values, commands or credentials. */
@@ -177,7 +176,7 @@ bool sb_audit_diagnostic(sb_audit *audit,const char *request_id,const char *inst
     const char *stage,const char *tool,yyjson_val *args,const char *reason) {
     if(audit)sb_platform_mutex_lock(audit->mutex);
     yyjson_mut_doc *doc=yyjson_mut_doc_new(NULL);
-    if(!doc){if(audit)sb_platform_mutex_unlock(audit->mutex);fprintf(stderr,"ShellBot internal_error request_id=%s stage=%s tool=%s reason=%s\n",request_id,stage,tool,reason);return false;}
+    if(!doc){if(audit)audit_unlock(audit);fprintf(stderr,"ShellBot internal_error request_id=%s stage=%s tool=%s reason=%s\n",request_id,stage,tool,reason);return false;}
     yyjson_mut_val *root=yyjson_mut_obj(doc),*categories=yyjson_mut_obj(doc),*stack=yyjson_mut_arr(doc);
     unsigned counts[7]={0};size_t idx,max;yyjson_val *key,*val;
     yyjson_obj_foreach(args,idx,max,key,val){
@@ -208,7 +207,7 @@ bool sb_audit_diagnostic(sb_audit *audit,const char *request_id,const char *inst
         }
         if(!ok)fwrite(line,1,length+1,stderr);
     }
-    if(audit)sb_platform_mutex_unlock(audit->mutex);
+    if(audit)audit_unlock(audit);
     if(!line)fprintf(stderr,"ShellBot internal_error request_id=%s stage=%s tool=%s reason=%s\n",request_id,stage,tool,reason);
     free(line);free(json);yyjson_mut_doc_free(doc);return ok;
 }
@@ -217,5 +216,5 @@ void sb_audit_free(sb_audit *audit) {
     if (!audit) return;
     sb_audit_append(audit, "instance_closed", "host", NULL, NULL, NULL, NULL, 0, NULL, NULL, NULL, NULL);
     sb_platform_journal_close(audit->journal);
-    sb_platform_mutex_free(audit->mutex); free(audit);
+    sb_platform_mutex_free(audit->mutex);sb_platform_mutex_free(audit->view_mutex); free(audit);
 }

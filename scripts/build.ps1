@@ -22,6 +22,10 @@ if (!$msbuild) { throw 'Install Visual Studio C++ desktop tools and a recent Win
 if ($LASTEXITCODE -ne 0) { throw "Build failed ($LASTEXITCODE)." }
 & $msbuild (Join-Path $repoRoot 'ShellBotUpdate\ShellBotUpdate.vcxproj') /m /nologo /v:minimal "/p:Configuration=$Configuration" "/p:Platform=$Platform"
 if ($LASTEXITCODE -ne 0) { throw 'Updater build failed.' }
+if ($Platform -eq 'x64') {
+    & $msbuild (Join-Path $repoRoot 'ShellBotGraphics\ShellBotGraphics.vcxproj') /m /nologo /v:minimal "/p:Configuration=$Configuration" "/p:Platform=$Platform"
+    if ($LASTEXITCODE -ne 0) { throw 'Graphics companion build failed.' }
+}
 if ($WithTests) {
     & $msbuild (Join-Path $repoRoot 'tests\TaskFixture.vcxproj') /m /nologo /v:minimal "/p:Configuration=$Configuration" "/p:Platform=$Platform"
     if ($LASTEXITCODE -ne 0) { throw 'Native test fixture build failed.' }

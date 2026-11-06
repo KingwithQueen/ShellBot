@@ -13,12 +13,12 @@
 #define STATE_LINE (2u * 1024u * 1024u)
 typedef struct { char id[33], instance[33], actor[64], kind[16]; char *json;bool reclaimable_read; } saved_record;
 struct sb_store {
-    sb_mutex *mutex;
+    sb_mutex *mutex,*index_mutex;
     sb_journal *journal;
     char project[64], instance[33], writer[33], backend[24];
     uint64_t revision, sequence, bytes;
     size_t count;uint64_t read_snapshots_reclaimed;
-    bool healthy;
+    bool healthy,published_healthy,journal_pending;uint64_t published_bytes;
     saved_record records[STATE_RECORDS];
 };
 static bool hex_id(const char *id) { return id && strlen(id)==32 && strspn(id,"0123456789abcdef")==32; }
@@ -90,6 +90,7 @@ bool sb_store_append(sb_store *store, const char *kind, const char *id, const ch
                      const char *status, const char *event, yyjson_mut_val *body) {
     if (!store) return true; /* Legacy single-host operation is unchanged. */
     sb_platform_mutex_lock(store->mutex);
+    sb_platform_mutex_lock(store->index_mutex);store->journal_pending=true;sb_platform_mutex_unlock(store->index_mutex);
     yyjson_mut_doc *doc=store->healthy ? yyjson_mut_doc_new(NULL) : NULL;
     yyjson_mut_val *root=doc ? yyjson_mut_obj(doc) : NULL, *copy=doc ? yyjson_mut_val_mut_copy(doc,body) : NULL;
     bool ok=root && copy;
@@ -106,7 +107,9 @@ bool sb_store_append(sb_store *store, const char *kind, const char *id, const ch
         yyjson_mut_obj_add_uint(doc,root,"time_unix_ms",sb_platform_unix_ms()); yyjson_mut_obj_add_str(doc,root,"kind",kind);
         yyjson_mut_obj_add_str(doc,root,"record_id",id); yyjson_mut_obj_add_str(doc,root,"actor",actor);
         yyjson_mut_obj_add_str(doc,root,"status",status); yyjson_mut_obj_add_str(doc,root,"event",event); yyjson_mut_obj_add_val(doc,root,"body",copy);
+        sb_platform_mutex_lock(store->index_mutex);
         if ((!strcmp(kind,"approval") || !strcmp(kind,"task")) && !find(store,kind,id,store->writer) && store->count==STATE_RECORDS && !reclaimable_snapshot(store)) ok=false;
+        sb_platform_mutex_unlock(store->index_mutex);
     }
     sb_error error={0}; char hash[65], *encoded=ok ? yyjson_mut_write(doc,0,NULL) : NULL;
     ok=encoded && sb_platform_sha256(encoded,strlen(encoded),hash,&error); free(encoded);
@@ -116,20 +119,21 @@ bool sb_store_append(sb_store *store, const char *kind, const char *id, const ch
     if (ok) {
         memcpy(line,json,length); line[length]='\n';
         ok=sb_platform_journal_append(store->journal,line,length+1,&error);
-        if (ok) { store->bytes+=length+1; ++store->sequence; ok=cache(store,kind,id,actor,copy); }
+        if (ok) { store->bytes+=length+1; ++store->sequence; }
     }
-    if (!ok) store->healthy=false;
+    sb_platform_mutex_lock(store->index_mutex);if(ok)ok=cache(store,kind,id,actor,copy);if(!ok)store->healthy=false;
+    store->published_healthy=store->healthy;store->published_bytes=store->bytes;store->journal_pending=false;sb_platform_mutex_unlock(store->index_mutex);
     free(line); free(json); yyjson_mut_doc_free(doc); sb_platform_mutex_unlock(store->mutex); return ok;
 }
 sb_store *sb_store_new(sb_lease *lease, const char *project, uint64_t revision,
                        const char *instance, const char *backend, sb_error *error) {
     sb_store *store=calloc(1,sizeof(*store));
     if (!store || !sb_identifier(project) || !hex_id(instance) || !revision || !backend || strlen(backend)>=24) goto failed;
-    store->mutex=sb_platform_mutex_new(); strcpy(store->project,project); strcpy(store->instance,instance); strcpy(store->backend,backend); store->revision=revision;
+    store->mutex=sb_platform_mutex_new();store->index_mutex=sb_platform_mutex_new(); strcpy(store->project,project); strcpy(store->instance,instance); strcpy(store->backend,backend); store->revision=revision;
     unsigned char nonce[16];
     if (!sb_platform_random(nonce,sizeof(nonce),error)) goto failed;
     for (size_t i=0;i<sizeof(nonce);++i) snprintf(store->writer+i*2,3,"%02x",nonce[i]);
-    if (!store->mutex || !sb_platform_state_visit(lease,load,store,error)) goto failed;
+    if (!store->mutex || !store->index_mutex || !sb_platform_state_visit(lease,load,store,error)) goto failed;
     char name[64]; snprintf(name,sizeof(name),"state-%s.jsonl",store->writer);
     store->journal=sb_platform_journal_open(lease,name,error); store->healthy=store->journal!=NULL;
     yyjson_mut_doc *doc=yyjson_mut_doc_new(NULL); yyjson_mut_val *body=doc ? yyjson_mut_obj(doc) : NULL;
@@ -156,19 +160,19 @@ failed:
 }
 bool sb_store_healthy(sb_store *store) {
     if (!store) return true;
-    sb_platform_mutex_lock(store->mutex); bool ok=store->healthy; sb_platform_mutex_unlock(store->mutex); return ok;
+    sb_platform_mutex_lock(store->index_mutex); bool ok=store->published_healthy; sb_platform_mutex_unlock(store->index_mutex); return ok;
 }
 yyjson_mut_val *sb_store_capacity(sb_store *store,yyjson_mut_doc *doc) {
     yyjson_mut_val *root=yyjson_mut_obj(doc);yyjson_mut_obj_add_bool(doc,root,"enabled",store!=NULL);if(!store)return root;
-    sb_platform_mutex_lock(store->mutex);
-    yyjson_mut_obj_add_bool(doc,root,"healthy",store->healthy);yyjson_mut_obj_add_uint(doc,root,"bytes",store->bytes);yyjson_mut_obj_add_uint(doc,root,"bytes_limit",STATE_BYTES);
+    sb_platform_mutex_lock(store->index_mutex);
+    yyjson_mut_obj_add_bool(doc,root,"healthy",store->published_healthy);yyjson_mut_obj_add_bool(doc,root,"journal_pending",store->journal_pending);yyjson_mut_obj_add_uint(doc,root,"bytes",store->published_bytes);yyjson_mut_obj_add_uint(doc,root,"bytes_limit",STATE_BYTES);
     yyjson_mut_obj_add_uint(doc,root,"record_count",store->count);yyjson_mut_obj_add_uint(doc,root,"record_limit",STATE_RECORDS);
     yyjson_mut_obj_add_uint(doc,root,"read_snapshots_reclaimed",store->read_snapshots_reclaimed);yyjson_mut_obj_add_str(doc,root,"retention","Completed read snapshots may leave the bounded memory index; original journal lines remain on disk. Pending/live permits, effects and task keys are retained.");
-    sb_platform_mutex_unlock(store->mutex);return root;
+    sb_platform_mutex_unlock(store->index_mutex);return root;
 }
 bool sb_store_task_repeated(sb_store *store, const char *actor, const char *key) {
     if (!store || !actor || !key) return false;
-    bool found=false; sb_platform_mutex_lock(store->mutex);
+    bool found=false; sb_platform_mutex_lock(store->index_mutex);
     for (size_t i=0;i<store->count && !found;++i) {
         saved_record *r=&store->records[i];
         if (strcmp(r->kind,"task") || strcmp(r->actor,actor) || !strcmp(r->instance,store->writer)) continue;
@@ -176,11 +180,11 @@ bool sb_store_task_repeated(sb_store *store, const char *actor, const char *key)
         const char *old=sb_string(yyjson_obj_get(yyjson_doc_get_root(doc),"request_key"));
         found=old && !strcmp(old,key); yyjson_doc_free(doc);
     }
-    sb_platform_mutex_unlock(store->mutex); return found;
+    sb_platform_mutex_unlock(store->index_mutex); return found;
 }
 char *sb_store_history(sb_store *store, const char *actor, const char *id, bool full, unsigned offset, unsigned limit) {
     if (!store) return sb_strdup("{\"records\":[],\"durable\":false}");
-    sb_platform_mutex_lock(store->mutex); yyjson_mut_doc *doc=yyjson_mut_doc_new(NULL);
+    sb_platform_mutex_lock(store->index_mutex); yyjson_mut_doc *doc=yyjson_mut_doc_new(NULL);
     yyjson_mut_val *root=doc ? yyjson_mut_obj(doc) : NULL, *items=doc ? yyjson_mut_arr(doc) : NULL;
     unsigned matched=0,returned=0; bool more=false;
     for (size_t i=0;doc && i<store->count;++i) {
@@ -203,11 +207,11 @@ char *sb_store_history(sb_store *store, const char *actor, const char *id, bool 
         yyjson_doc_free(saved);
     }
     if (doc) { yyjson_mut_doc_set_root(doc,root); yyjson_mut_obj_add_val(doc,root,"records",items); yyjson_mut_obj_add_bool(doc,root,"durable",true);
-        yyjson_mut_obj_add_bool(doc,root,"healthy",store->healthy); yyjson_mut_obj_add_uint(doc,root,"next_offset",offset+returned); yyjson_mut_obj_add_bool(doc,root,"has_more",more); }
-    char *json=doc ? yyjson_mut_write(doc,0,NULL) : NULL; yyjson_mut_doc_free(doc); sb_platform_mutex_unlock(store->mutex); return json;
+        yyjson_mut_obj_add_bool(doc,root,"healthy",store->published_healthy);yyjson_mut_obj_add_bool(doc,root,"journal_pending",store->journal_pending); yyjson_mut_obj_add_uint(doc,root,"next_offset",offset+returned); yyjson_mut_obj_add_bool(doc,root,"has_more",more); }
+    char *json=doc ? yyjson_mut_write(doc,0,NULL) : NULL; yyjson_mut_doc_free(doc); sb_platform_mutex_unlock(store->index_mutex); return json;
 }
 void sb_store_free(sb_store *store) {
     if (!store) return;
     sb_platform_journal_close(store->journal); for (size_t i=0;i<store->count;++i) free(store->records[i].json);
-    sb_platform_mutex_free(store->mutex); free(store);
+    sb_platform_mutex_free(store->mutex);sb_platform_mutex_free(store->index_mutex); free(store);
 }

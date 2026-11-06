@@ -8,6 +8,10 @@
 
 安装位置由更新器自身目录决定。找不到相邻核心 `WinShellBot.exe` 时立即报错。本阶段仅支持本地 ZIP，不下载网址，也不删除用户提供的 ZIP。
 
+首次从 1.1.6 或更早版本升级到 1.1.7 时，请先退出旧更新任务，从可信的 1.1.7 包中单独取出 `ShellBotUpdate.exe`，备份并替换安装目录中的旧更新器，再由新版更新器安装完整 ZIP。旧版的固定运行文件白名单不认识新增的 `ShellBotGraphics.exe` / `ShellBotGraphicsCapture.dll`，会在替换任何文件前拒绝新包；不能靠改名或删改包内校验清单绕过。手动完整解压覆盖发布文件时也应先退出所有 ShellBot 程序并保留 Data 和位置设置。
+
+1.1.7 更新器接受上述两个明确命名的配套文件，并继续逐文件校验和备份。升级前也要停止 ShellBotGraphics 托管的应用，避免采集模块仍被加载而占用文件；更新器不会强杀这些应用。
+
 ZIP 可平铺或包含一个顶层安装包文件夹，必须有四个运行文件：`ShellBot.exe`、`WinShellBot.exe`、`ShellBot-SandboxProbe.exe`、`pdfium.dll`，以及发布包格式的 `SHA256SUMS.json`。逐文件摘要用于检查损坏，不是发布者签名，应使用可信安装包。
 
 更新范围仅为固定运行文件、可选的更新器、产品说明及 docs/licenses；拒绝包内的 Data、位置设置和其他未允许文件。已有 Data、`ShellBot.storage.json`、自定义配置和工作目录保留。拒绝越界路径、链接、重复文件、Windows 保留名及未列入摘要清单的文件。展开预算为单文件 4 GiB、总计 16 GiB、100000 个文件，另需完整旧文件备份空间。

@@ -1,4 +1,4 @@
-# Windows 交互终端、模式搜索与窗口交互（1.1.6）
+# Windows 交互终端、模式搜索与窗口交互（1.1.7）
 
 这些能力在 Windows x64 实现。升级后重新连接 MCP 客户端刷新工具定义；既有项目的工具许可不自动增加。ConPTY 使用原任务工具；UIA 需要显式启用 `uia_tree`、`uia_action` 和相应桌面权限。
 
@@ -11,6 +11,10 @@
 ```
 
 任务审批、调用方归属、幂等键、Job、输出容量、超时和取消规则继续有效。默认 5 分钟超时仍然有效，可在项目上限内指定更长时间。尺寸默认 120×30，列/行分别为 1～1000 个单元格；上限限制伪控制台缓冲的内存占用。启动模式和初始尺寸参与请求身份，重试不能用旧 request_key 切换模式或尺寸。
+
+1.1.7 的任务准备在后台进行，短等后可能返回 `status:"starting"`。此状态不是终态，也不证明进程已经恢复执行；查询原 task_id 的 startup.phase、complete 和 process_resumed，重试启动使用同一 request_key。启动中 task_input 返回含 `task_starting:` 提示的错误，不排队。运行后的输入须先完成必要审计和 input_key 持久意图，再投递给 ConPTY；落盘失败不会提前输入。终态还应等待 output_drained:true、durable_pending:false 后再归档，归档等待错误与安全重试见 [命令任务](COMMAND_TASKS.md#windows-117异步启动与持久化等待)。
+
+本版修复父进程标准流被重定向时错误继承父句柄的问题，确保终端子进程实际绑定 ConPTY 标准句柄；管道模式继续保留独立受控 stdin/stdout/stderr。
 
 使用 `task_input` 发送 UTF-8 文本和终端控制序列。执行命令通常以 `\r` 结束；`\u0003` 表示向这个私有终端发送 Ctrl+C，是否中断取决于应用的控制台模式。它不向物理桌面发送按键。每个新输入使用新的 input_key；同键重试不会重复入队。
 
@@ -74,19 +78,19 @@ glob 查询只用于 filename 模式，匹配相对路径；literal/regex 的 fi
 
 value 只用于 set_value，最高 16384 个 UTF-8 字节。动作会再次核实窗口/进程创建身份、元素运行身份及名称/类型/标识、人工暂停、租约和权限。拒绝密码、禁用、离屏、只读或状态未知的相应控件，不用键鼠或坐标回退。观察租约不能执行动作。树缓存仅保留最近一次并绑定当前窗口和观察；任何动作尝试后都要重新观察。
 
-1.1.4 新增显式 `focus_mode:"background"`。它直接调用观察到的目标控件 pattern，不要求窗口已经前台，也不请求聚焦或发送键鼠。适用于未锁定、同用户的可用输入桌面，包括 mstsc 最小化后像素不可获取但 UIA 提供者仍可用的情况：
+1.1.4 新增显式 `focus_mode:"background"`。它直接调用观察到的目标控件 pattern，不要求窗口已经前台，也不请求聚焦或发送键鼠。默认 interactive 租约要求未锁定、同用户的可用输入桌面，包括 mstsc 最小化后像素不可获取但 UIA 提供者仍可用的情况；同用户会话锁定/断开时，应另行申请下文的 application_background 租约：
 
 ```json
 {"name":"uia_action","arguments":{"lease_id":"当前控制租约","screen_id":"对应观察编号","window_id":"对应窗口编号","element_id":"最近树中的编辑框编号","request_key":"background-value-1","action":"set_value","value":"中文内容","focus_mode":"background"}}
 ```
 
-后台模式仍需控制许可/租约、所有者未暂停、未锁定的 Default 输入桌面、稳定的窗口/进程/控件身份，且目标应用窗口不能最小化，控件必须启用且在屏幕范围内。它不解除人工暂停，不操作锁屏/UAC，不放宽跨用户/会话/权限边界；应用自身的提供者可能仍要求前台，或在调用时主动显示自己的界面。无相应 pattern 的画布/游戏不能据此后台交互。按键、组合键、坐标点击、拖动和真实前台聚焦仍使用原来的桌面工具。
+后台模式仍需控制许可/租约、所有者未暂停及稳定的窗口/进程/控件身份，且目标应用窗口不能最小化，控件必须启用且在屏幕范围内。默认 interactive 模式还要求未锁定的 Default 输入桌面；显式 application_background 模式可访问同用户锁定/断开会话中的普通 Default 应用。它不解除人工暂停，不操作登录/UAC 界面，不放宽跨用户/会话/权限边界；应用自身的提供者可能仍要求前台，或在调用时主动显示自己的界面。无相应 pattern 的画布/游戏不能据此后台交互。按键、组合键、坐标点击、拖动和真实前台聚焦仍使用原来的桌面工具。
 
 `uia_tree` 和显式后台动作以目标窗口/元素为准，不因无关窗口的前台或矩形变化判定过期；人工输入 epoch、观察期限、显示布局和目标窗口身份变化仍会阻止调用。默认前台动作保留原来的前台观察检查。回执报告 focus_mode、foreground_required、foreground_observed，后台派发成功不等于已聚焦。
 
 UIA 辅助线程采用 Per Monitor V2 DPI 感知，树的 `coordinate_space:"physical_desktop_pixels"` 与 window_list 一致，避免 RDP 150% 等缩放下混用逻辑像素。
 
-UIA 在一次性独立 MTA 进程中运行，提供者连接/事务等待各设为 500 ms，整次请求最多约 4 秒；无响应可回收辅助进程。动作超时或失败可能已有部分效果，回执标记 unknown，禁止自动重放。dispatched 只说明 pattern API 返回成功，`application_result_verified:false` 明确要求调用方刷新核实。UIA 不证明截图可用，不自动取得 Windows 前台资格，不绕过 UAC、锁屏或人工暂停。
+UIA 在一次性独立 MTA 进程中运行，提供者连接/事务等待各设为 500 ms，整次请求最多约 4 秒；无响应可回收辅助进程。动作超时或失败可能已有部分效果，回执标记 unknown，禁止自动重放。dispatched 只说明 pattern API 返回成功，`application_result_verified:false` 明确要求调用方刷新核实。UIA 不证明截图可用，不自动取得 Windows 前台资格，不操作登录/UAC 界面，也不绕过人工暂停。
 
 UIA 请求进行中不会并行执行其他桌面工具，状态查询和租约释放仍可处理；人工暂停继续立即生效。不要把并发请求返回的 busy 当作已经执行。
 
@@ -102,10 +106,12 @@ UIA 请求进行中不会并行执行其他桌面工具，状态查询和租约�
 
 - capture_backend 默认 auto，先使用 WGC；无帧、失败或疑似全黑时尝试 PrintWindow。可明确指定 wgc 或 printwindow 诊断，指定后只运行该后端。它仅用于窗口模式。
 - 同一请求不能混用窗口模式和 monitor_id、x/y/width/height；省略 window_id 时原来的桌面/区域截图契约保持不变。窗口模式必须提供 screen_id。
-- 继续要求同用户、同会话、权限范围内的可见非最小化窗口和稳定进程创建身份；锁屏/UAC、身份/布局/epoch 变化、过期观察或租约会拒绝。观察租约允许在所有者暂停时截图，但不能输入。
+- 继续要求同用户、同会话、权限范围内的可见非最小化窗口和稳定进程创建身份。默认 interactive 租约拒绝锁屏/断开，显式 application_background 租约可捕获该用户 Default 桌面的普通应用；登录/UAC 界面不在范围内。身份/布局/epoch 变化、过期观察或租约仍会拒绝。观察租约允许在所有者暂停时截图，但不能输入。
 - max_dimension 与现有 PNG 容量上限保持不变。像素捕获/编码使用独立普通用户进程，应用绘图或驱动卡住可单独回收；每次窗口捕获总预算约四秒，受剩余租约和原请求期限约束。大 PNG 用独立线程持续排空私有管道，同时检查取消和目标，避免逐块等待限速。
 
 回执的 capture_diagnostic 包含各后端的阶段、HRESULT、Win32 错误、像素/编码状态、输出字节数和图像验证结果，以及最终 selected_backend。PrintWindow 依赖应用配合，API 成功并不证明所有控件或 GPU 区域都正确绘制；全黑图仍可作为有效 PNG 返回，但 content_may_be_blank:true 会明确提示。application_paint_verified:false 要求调用方结合文字状态和后续图像确认效果，不能把时间戳不同等同于应用画面更新。
+
+1.1.7 另返回 frame_freshness，status 固定为 unverified，application_update_verified:false。PrintWindow 的 cached_surface_possible:true 提示可能只取得旧 GPU 合成面；WGC 的 compositor_frame_age_ms 在可计算时表示合成器帧龄，否则为 null。WGC 的 cached_surface_possible:false 不代表应用已经处理本次操作：合成器时间戳不是应用完成确认。应结合 UIA 读回、应用状态与动作后的变化像素核实，不把截图 API 成功当作当前画面证明。
 
 图片使用 `coordinate_space:"window_image_pixels"`，`coordinate_input_source:false`。WGC 通常不含不可见窗口边框，PrintWindow 使用完整窗口；有可靠映射时返回 physical_region 与 physical_pixels_per_image_x/y，否则 physical_mapping_known:false、physical_region:null。PrintWindow 匹配目标应用的 DPI 上下文，避免 150% 等缩放时只在左上角绘制、其余留黑。
 
@@ -129,6 +135,12 @@ UIA 请求进行中不会并行执行其他桌面工具，状态查询和租约�
 
 保持原用户/会话/权限、窗口进程创建身份、观察期限、布局、人工暂停及输入 epoch 检查；锁定或连接状态发生变化时旧后台租约失效，应重新观察并申请。工具不解锁、不登录、不切换输入桌面、不接触登录/UAC 界面；已连接且未锁定、但输入桌面不可访问的 UAC 状态仍被拒绝。
 
-流程为：申请后台租约 → window_list → 窗口截图/读取 UIA → 后台语义操作 → 刷新并核对结果 → 释放租约。每个新请求使用新 request_key。截图优先 WGC；断开且锁屏时 WGC 可能无帧，auto 会兼容回退 PrintWindow。PrintWindow 的 GPU 内容可能是旧画面，即使返回 PNG 成功，也不能当作操作结果证明。实际锁屏结果与 GPU 应用方案见 [远程桌面说明](REMOTE_DESKTOP.md#116-断开并锁屏时的应用后台模式)。
+流程为：申请后台租约 → window_list → 窗口截图/读取 UIA → 后台语义操作 → 刷新并核对结果 → 释放租约。每个新请求使用新 request_key。截图优先 WGC；断开且锁屏时 WGC 可能无帧，auto 会兼容回退 PrintWindow。PrintWindow 的 GPU 内容可能是旧画面，即使返回 PNG 成功，也不能当作操作结果证明。[远程桌面说明](REMOTE_DESKTOP.md#116-断开并锁屏时的应用后台模式)保留 1.1.6 的旧帧失败；1.1.7 可按下节显式选择受支持的 GPU 配套路径。
 
 1.1.6 自动回收已结束的操作回执缓存，数十次连续观察不再占死 64 个槽；已回收输入/写入的旧请求键返回 operation_receipt_reclaimed，绝不重新执行。容量含义见 [回执回收](CAPACITY_LIMITS.md#116-操作回执回收)。
+
+## 显式 GPU 配套取图（1.1.7）
+
+锁屏时优先使用无需虚拟机的两条适配路径：所有者已配置本机调试端口的独立 Chromium 页面使用只读截图脚本；新启动的普通权限 x64 D3D11 应用可显式使用 ShellBotGraphics。后者只覆盖经典 D3D11CreateDeviceAndSwapChain 加 Present 的首个受支持交换链、非 MSAA、非 HDR 的 BGRA/RGBA8 后缓冲，不覆盖 Present1、Factory 创建交换链、D3D12、OpenGL、Vulkan 或跨进程 GPU 渲染。Chromium/Electron 应用也须自己提供兼容调试协议，不能据此宣称所有游戏或 Electron 均可用。
+
+配套程序通过明确的命令执行许可启动，不由观察租约自动启用；普通 desktop_capture 不附着或注入现有应用，桌面工具的默认保护保持有效。GPU 图片是应用表面，不赋予全局坐标、焦点或物理键鼠权限。用法、新鲜度参数及停止流程见 [GPU 取图说明](GRAPHICS_CAPTURE.md)，Z620 的实际 UIA 中文读回、两次按钮及 GPU 新像素核对见 [1.1.7 实测](REMOTE_DESKTOP.md#117-锁屏时的-gpu-新画面)。

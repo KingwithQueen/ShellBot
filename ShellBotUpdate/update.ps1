@@ -19,7 +19,7 @@ function Target([string]$Relative){
     AssertPlain $p;return $p
 }
 function Allowed([string]$Name){
-    return $Name -match '^(ShellBot\.exe|WinShellBot\.exe|ShellBot-SandboxProbe\.exe|ShellBotUpdate\.exe|pdfium\.dll|README\.md|LICENSE\.txt|manifest\.json|validation-summary\.json|SHA256SUMS\.json)$' -or $Name -match '^(docs|licenses)/[^/].*'
+    return $Name -match '^(ShellBot\.exe|WinShellBot\.exe|ShellBot-SandboxProbe\.exe|ShellBotUpdate\.exe|ShellBotGraphics\.exe|ShellBotGraphicsCapture\.dll|pdfium\.dll|README\.md|LICENSE\.txt|manifest\.json|validation-summary\.json|SHA256SUMS\.json)$' -or $Name -match '^(docs|licenses)/[^/].*' -or $Name -match '^validation/(acceptance|source-manifest|local-test-manifest|icon-verification)\.json$'
 }
 try{
     if(!(Test-Path -LiteralPath (Join-Path $Root 'WinShellBot.exe') -PathType Leaf)){throw '找不到核心程序 WinShellBot.exe，请将更新器放在 ShellBot 根目录。'}
@@ -71,12 +71,15 @@ try{
         if((Hash (Join-Path $payload $row.path)) -ine $row.sha256){throw "文件校验失败：$($row.path)"}
     }
     foreach($n in $files.Keys){if($n -ine 'SHA256SUMS.json' -and !$seen.Contains($n)){throw "文件未列入校验清单：$n"}}
-    foreach($n in @('ShellBot.exe','WinShellBot.exe','ShellBot-SandboxProbe.exe','pdfium.dll')){
+    if($files.ContainsKey('ShellBotGraphics.exe') -ne $files.ContainsKey('ShellBotGraphicsCapture.dll')){throw 'GPU 配套程序必须同时包含 ShellBotGraphics.exe 和 ShellBotGraphicsCapture.dll。'}
+    $runtimeChecks=@('ShellBot.exe','WinShellBot.exe','ShellBot-SandboxProbe.exe','pdfium.dll')
+    if($files.ContainsKey('ShellBotGraphics.exe')){$runtimeChecks+=@('ShellBotGraphics.exe','ShellBotGraphicsCapture.dll')}
+    foreach($n in $runtimeChecks){
         $stream=[IO.File]::OpenRead((Join-Path $payload $n));try{if($stream.ReadByte() -ne 77 -or $stream.ReadByte() -ne 90){throw "无效运行文件：$n"}}finally{$stream.Dispose()}
         if([Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $payload $n)).ProductName -notmatch 'ShellBot|PDFium'){throw "运行文件产品标识不符：$n"}
     }
     # 仅请求相邻核心正常退出，不按进程名称强杀其他安装。
-    $running=@(Get-Process -Name WinShellBot,ShellBot,ShellBot-SandboxProbe -ErrorAction SilentlyContinue|Where-Object{try{[IO.Path]::GetDirectoryName($_.MainModule.FileName) -ieq $Root}catch{$false}})
+    $running=@(Get-Process -Name WinShellBot,ShellBot,ShellBot-SandboxProbe,ShellBotGraphics -ErrorAction SilentlyContinue|Where-Object{try{[IO.Path]::GetDirectoryName($_.MainModule.FileName) -ieq $Root}catch{$false}})
     if($running.Count){
         $data=Join-Path $Root 'Data';$locator=Join-Path $Root 'ShellBot.storage.json'
         if(Test-Path -LiteralPath $locator){$location=Get-Content -LiteralPath $locator -Raw -Encoding UTF8|ConvertFrom-Json;if($location.format_version -ne 1 -or !$location.directory){throw '数据位置设置无效，请先从托盘退出 ShellBot。'};if($location.directory -ne 'Data'){$data=[IO.Path]::GetFullPath($location.directory)}}

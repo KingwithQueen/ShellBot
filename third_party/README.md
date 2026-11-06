@@ -38,3 +38,7 @@ Linux/macOS x86_64 use the separate PDFium 157.0.8086.0 no-V8/no-XFA artifacts u
 PCRE2 固定为官方 10.49，源码发布摘要和构建选择保存在 [provenance.json](pcre2/provenance.json)。下载源为 PCRE2Project 官方 GitHub release，摘要与发布资产 SHA-256 匹配。保留实际使用的 C 源、头文件、上游构建说明、[LICENCE.md](pcre2/LICENCE.md)、COPYING 与 AUTHORS.md；BSD-3-Clause WITH PCRE2-exception 等完整声明随正式包分发。
 
 Windows MSBuild 单独构建静态 8 位 Unicode 库，无 JIT、无额外运行 DLL。config.h 由上游 generic 配置启用 SUPPORT_PCRE2_8/SUPPORT_UNICODE，pcre2.h 和默认字符表由上游模板复制；pcre2.vcxproj 为本项目构建入口。查询使用 UTF-8/UCP 和有界匹配/编译，不运行 shell 或外部搜索器。Mac/Linux 暂不接入此依赖。ConPTY 与 UIA 使用 Windows 系统 API，不分发新的系统组件。
+
+## Windows D3D11 配套采集（1.1.7）
+
+Microsoft Detours 固定为官方 v4.0.1，提交及未修改源码的逐文件摘要见 [provenance.json](detours/provenance.json)。仅保留实际构建所需文件及原始 MIT 许可，Windows x64 静态链接到 ShellBotGraphics 配套程序；发布包保留许可证和来源声明。采集代码由本项目实现，没有复制 OBS 的 GPL 代码。配套程序只在显式启动新应用时加载自有采集模块，支持范围见 [图形采集说明](../docs/GRAPHICS_CAPTURE.md)。

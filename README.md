@@ -1,4 +1,4 @@
-# ShellBot 1.1.6
+# ShellBot 1.1.7
 
 面向 Windows 的原生 C17 / Win32 MCP 主机。双击 **ShellBot.exe**，在管理界面创建项目、设置权限、连接客户端并管理运行状态。
 
@@ -11,15 +11,17 @@
 3. 在“连接设置…”填写本机监听端口（1～65535）和已有 HTTPS 公共地址。程序只监听 `127.0.0.1`；隧道和域名使用已有配置。
 4. 在 MCP 客户端添加项目公网地址并选择 OAuth。在 ShellBot 的“客户端授权…”中核对申请，再允许连接。
 
-关闭窗口会收进托盘；从“文件”或托盘菜单退出会停止全部项目。详细操作见 [使用说明](docs/USER_GUIDE.md)，本版变化与验证范围见 [1.1.6 发布说明](docs/RELEASE_NOTES_1.1.6.md)。
+关闭窗口会收进托盘；从“文件”或托盘菜单退出会停止全部项目。详细操作见 [使用说明](docs/USER_GUIDE.md)，本版变化与验证范围见 [1.1.7 发布说明](docs/RELEASE_NOTES_1.1.7.md)。
 
 ## 数据与升级
 
 本地 ZIP 更新程序见 [ShellBotUpdate 使用说明](docs/UPDATING.md)。将更新器放在安装根目录后选择下载好的发布包，更新前自动校验并备份，保留 Data 和位置设置。
 
+从 **1.1.6 或更早版本升级到 1.1.7**，先正常停止 ShellBotGraphics 托管的应用并退出 ShellBot，备份 Data、位置设置和旧更新器；从可信的 1.1.7 ZIP 单独取出新版 ShellBotUpdate.exe，替换安装根目录中的旧更新器，再用它安装完整 ZIP。旧更新器不认识新增的图形配套文件，会在替换前拒绝新包。完整步骤及手动升级方式见更新说明。完成后重新启动 ShellBot，并在 MCP 客户端重新连接、刷新工具定义。
+
 默认数据保存在程序旁的 `Data`。可以通过“数据位置…”迁移到其他非 C 盘目录；复制和逐文件校验成功后才保存新位置，原目录由用户确认后清理。`ShellBot.storage.json` 保存自选位置，应与程序一起保留。凭据由当前 Windows 账户 DPAPI 加密。
 
-升级时先从托盘退出旧版，备份 Data 和位置设置，再替换同一固定程序目录中的发布文件。保留原数据、位置设置和 Windows 账户。1.1.6 沿用 1.0.0–1.0.10 和 dev.26–dev.28 的 OAuth v3 存储，既有长期授权继续使用；旧限时连接不会自动升级。不要用发布包覆盖或删除 Data。
+升级时先从托盘退出旧版，备份 Data 和位置设置，再替换同一固定程序目录中的发布文件。保留原数据、位置设置和 Windows 账户。1.1.7 沿用 1.0.0–1.0.10 和 dev.26–dev.28 的 OAuth v3 存储，既有长期授权继续使用；旧限时连接不会自动升级。不要用发布包覆盖或删除 Data。
 
 ## 主要能力
 
@@ -28,15 +30,17 @@
 | 项目管理 | 原生窗口、项目独立凭据与工作进程、启停与暂停、目录迁移、托盘生命周期 |
 | 连接认证 | OAuth 发现、公共 DCR、授权码/S256 PKCE、轮换续期、长期或限时授权、手动撤销 |
 | 文件 | 列表、读取、搜索、创建、基于摘要的修改、复制、移动、删除、独立审批与审计 |
-| 命令任务 | 普通、受限及管理员身份，后台输入输出、取消与超时；按项目明确授权 |
+| 命令任务 | 普通、受限及管理员身份，可查询的异步启动、后台输入输出、取消与超时；按项目明确授权 |
 | 图像与文档 | 图像解码、缩放；PDF 阅读与渲染；DOCX / XLSX / PPTX 结构化阅读及内容预览 |
-| 桌面与传输 | 独立授权的 Windows 桌面操作，产物下载及校验后创建文件的上传 |
+| 桌面与传输 | 独立授权的 Windows 桌面操作、显式锁屏应用后台模式，产物下载及校验后创建文件的上传 |
 
-Windows 1.1.6 的源码编辑最高 8 MiB，文件分块传输最高 4 GiB，图像源最高 64 MiB；完整限制及大源码用法见 [数据容量](docs/CAPACITY_LIMITS.md)。
+Windows 1.1.7 的源码编辑最高 8 MiB，文件分块传输最高 4 GiB，图像源最高 64 MiB；完整限制及大源码用法见 [数据容量](docs/CAPACITY_LIMITS.md)。
 
 共实现 41 个工具，各项目只暴露其策略允许的工具。文件范围、审批方式、执行身份和管理员许可独立设置。受限执行只开放声明的运行文件；普通或管理员命令具有相应账户权限。Office 预览不复现原页面排版，扫描文档不自动 OCR。
 
 更多说明：[文件管理](docs/FILE_MANAGEMENT.md)、[权限与身份](docs/EXECUTION_PERMISSIONS.md)、[命令任务](docs/COMMAND_TASKS.md)、[远程审批](docs/REMOTE_APPROVALS.md)、[桌面控制](docs/DESKTOP_CONTROL.md)、[文档阅读](docs/DOCUMENT_READING.md)、[产物传输](docs/ARTIFACT_TRANSFER.md)。
+
+锁屏时的 GPU 内容优先使用两条无需虚拟机的配套路径：明确启用本机调试端口的独立 Chromium 页面采用只读截图脚本；新启动的普通权限 x64、受支持 D3D11 程序采用显式 ShellBotGraphics 启动采集。普通窗口截图不会自动注入应用。API 范围、启动/停止步骤和实测边界见 [GPU 取图说明](docs/GRAPHICS_CAPTURE.md)；它们不提供登录、解锁或物理键鼠能力。
 
 ## 构建与发布
 
@@ -47,11 +51,11 @@ Windows 1.1.6 的源码编辑最高 8 MiB，文件分块传输最高 4 GiB，图
 .\scripts\build.ps1 -Configuration Release
 ```
 
-自有代码使用 C17、四级警告及警告视为错误，Release 使用静态运行库。默认构建同时生成 GUI 入口、主程序、SandboxProbe 并复制固定 PDFium 依赖。当前正式包为 Windows x64；未将其他系统或架构列为已验收支持。
+自有代码使用 C17、四级警告及警告视为错误，Release 使用静态运行库。默认构建同时生成 GUI 入口、主程序、SandboxProbe、更新器并复制固定 PDFium 依赖；x64 另构建 ShellBotGraphics.exe 和 ShellBotGraphicsCapture.dll，其固定 Microsoft Detours 依赖保留原始源码与 MIT 声明。当前正式包为 Windows x64；未将其他系统或架构列为已验收支持。
 
 仓库保留源码、构建与正式打包脚本、示例配置、图标资源、依赖、许可证及产品文档。交接文档、AI 客户端状态与对话导出、阶段开发记录、本机验收脚本，以及 `tests`、`build`、`out`、`dist` 中的测试和产物只保留在本地，不随 Git 同步。新机器需要完整开发证据时应另行复制这些本地资料；默认构建不依赖它们，`-WithTests` 需要恢复本机测试副本。
 
-1.1.6 为 Windows 正式版，发布包固定命名为 ShellBot-1.1.6-windows-x64.zip，包含 ShellBotUpdate.exe。本版自动回收已结束操作回执，保留防重放摘要；增加显式应用后台租约，已在 Z620 断开并锁屏时验证普通窗口的截图和后台 UIA 操作。GPU 兼容截图可能停留旧帧，需要独立渲染会话，不能等同于任意应用均可锁屏看图。详细用法见 [交互工具](docs/INTERACTIVE_TOOLS.md)、[远程桌面说明](docs/REMOTE_DESKTOP.md)、[回执容量](docs/CAPACITY_LIMITS.md)与发布说明。回归和实机证据位于 build/release-1.1.6；继续优先 Windows，Mac/Linux 未重新移植。原始失败、数据和回滚证据保留，生成缓存按清理要求移除。
+1.1.7 为 Windows 正式版，发布包固定命名为 ShellBot-1.1.7-windows-x64.zip。本版将慢任务准备及持久化放到后台，启动中明确返回 starting 和阶段信息；补充原子 Job 收容、输入先记意图再投递、明确的归档等待状态，并修复重定向父进程下的 ConPTY 标准句柄继承。保留回执自动回收与防重放摘要。Z620 锁屏下的显式 D3D11 提交前取图及独立 Edge/WebGL 页面取图已取得实际新画面；普通 PrintWindow 仍可能返回旧 GPU 合成面，不能据此宣称任意游戏或 Electron 均已支持。详细范围见 [发布说明](docs/RELEASE_NOTES_1.1.7.md)、[交互工具](docs/INTERACTIVE_TOOLS.md)、[远程桌面说明](docs/REMOTE_DESKTOP.md)与 [GPU 取图](docs/GRAPHICS_CAPTURE.md)。回归和实机证据位于 build/release-1.1.7；继续优先 Windows，Mac/Linux 未重新移植。
 
 本地自动化与真实客户端、实际 UAC、物理多屏 DPI、独立 Windows 环境、长期运行分别验收，准确范围见发布说明与包内验证摘要。
 

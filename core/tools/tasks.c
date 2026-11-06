@@ -11,7 +11,7 @@ static yyjson_mut_val *task_error(yyjson_mut_doc *doc, bool *failed, const char 
 yyjson_mut_val *sb_tasks_call(sb_host *host,const char *actor,const char *name,yyjson_val *args,yyjson_mut_doc *doc,bool *failed) {
     yyjson_mut_doc *request=yyjson_mut_doc_new(NULL); if(!request) return task_error(doc,failed,"Cannot allocate task request.");
     yyjson_mut_val *parameters=yyjson_mut_obj(request); sb_file *directory=NULL,*program_file=NULL;sb_root *program_root=NULL;char *program_relative=NULL; char *cwd=NULL,*canonical=NULL,*reply=NULL; sb_error error={0};
-    const char *workspace_id=NULL; char request_hash[65]={0},program_hash[65]={0}; const char *event_key=NULL;
+    const char *workspace_id=NULL; char request_hash[65]={0},program_hash[65]={0}; const char *event_key=NULL;bool startup_audit=false;
     if(!yyjson_is_obj(args)) { sb_fail(&error,"Task arguments must be an object."); goto done; }
     const char *instance=sb_string(yyjson_obj_get(args,"host_instance_id"));
     if (!instance || !sb_execution_instance(host->execution) || strcmp(instance,sb_execution_instance(host->execution))) {
@@ -64,11 +64,9 @@ yyjson_mut_val *sb_tasks_call(sb_host *host,const char *actor,const char *name,y
 #endif
         canonical=yyjson_mut_val_write(parameters,0,NULL);
         if(!canonical || !sb_platform_sha256(canonical,strlen(canonical),request_hash,&error)) goto done;
-#ifdef SB_POSIX
         /* Guards can change after a command writes into cwd. They must not
            change the idempotency digest of an otherwise identical retry. */
         if(host->approved_program_version){yyjson_mut_obj_add_strcpy(request,parameters,"executable_version",host->approved_program_version);yyjson_mut_obj_add_strcpy(request,parameters,"cwd_version",host->approved_target_version);}
-#endif
         yyjson_mut_obj_add_strcpy(request,parameters,"request_key",key);
         yyjson_mut_obj_add_strcpy(request,parameters,"request_sha256",request_hash);
         yyjson_mut_obj_add_strcpy(request,parameters,"token_env",host->config.token_env);
@@ -117,7 +115,10 @@ yyjson_mut_val *sb_tasks_call(sb_host *host,const char *actor,const char *name,y
     yyjson_doc *parsed=canonical?yyjson_read(canonical,strlen(canonical),0):NULL;
     if(!parsed) { sb_fail(&error,"Cannot serialize normalized task arguments.");goto done; }
     bool changing=!strcmp(name,"task_start") || !strcmp(name,"task_input") || !strcmp(name,"task_cancel") || !strcmp(name,"task_archive");
-    if(changing) {
+#ifndef SB_POSIX
+    startup_audit=host->store && changing;
+#endif
+    if(changing && !startup_audit) {
         bool recorded=sb_audit_task(host->audit,"task_operation_requested",actor,event_key,NULL,host->config.execution_profile,*request_hash?request_hash:NULL,name,0);
         if(!recorded && strcmp(name,"task_cancel")) { yyjson_doc_free(parsed);sb_fail(&error,"Audit unavailable; task start, stdin writes and archive are blocked.");goto done; }
     }
@@ -135,9 +136,10 @@ done:
     yyjson_mut_obj_add_val(doc,result,"persistent_state",sb_store_capacity(host->store,doc));
     yyjson_mut_obj_add_strcpy(doc,result,"host_instance_id",sb_execution_instance(host->execution));
     if(*program_hash)yyjson_mut_obj_add_strcpy(doc,result,"executable_sha256",program_hash);
-    if(!*failed && !strcmp(name,"task_start") && yyjson_get_bool(yyjson_obj_get(root,"created_new"))) {
+    if(!*failed && !strcmp(name,"task_start") && yyjson_get_bool(yyjson_obj_get(root,"created_new")) && !startup_audit) {
         const char *id=sb_string(yyjson_obj_get(root,"task_id"));uint64_t pid=0;sb_integer(yyjson_obj_get(root,"process_id"),&pid);
-        if(!sb_audit_task(host->audit,"task_started",actor,event_key,id,host->config.execution_profile,request_hash,name,pid)) yyjson_mut_obj_add_str(doc,result,"audit_warning","Task started but its result record could not be flushed; query the original task, do not rerun it.");
+        const char *status=sb_string(yyjson_obj_get(root,"status"));
+        if(!sb_audit_task(host->audit,status && !strcmp(status,"starting")?"task_accepted":"task_started",actor,event_key,id,host->config.execution_profile,request_hash,name,pid)) yyjson_mut_obj_add_str(doc,result,"audit_warning","Task was accepted but its result record could not be flushed; query the original task, do not rerun it.");
     }
     yyjson_doc_free(response);return result;
 }

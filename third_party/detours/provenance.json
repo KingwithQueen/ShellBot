@@ -1,0 +1,67 @@
+{
+  "upstream": "https://github.com/microsoft/Detours",
+  "tag": "v4.0.1",
+  "commit": "e4bfd6b03e50de46b47abfbd1e46b384f0c5f833",
+  "license": "MIT",
+  "purpose": "Opt-in x64 D3D11 companion instrumentation for newly launched same-user processes",
+  "source_modified": false,
+  "retained_files": [
+    {
+      "path": "creatwth.cpp",
+      "sha256": "062533627bfa775246948fad92f9f3c0ef7841cc1a83c15db9178be12f2dbf4f"
+    },
+    {
+      "path": "detours.cpp",
+      "sha256": "df415e05f985afe88f4b03ba34d6f5abce47edda11cd66d4f72902b801113eb7"
+    },
+    {
+      "path": "detours.h",
+      "sha256": "7b498657d8db4cff2d488b1e65cfeeb5b1305de7f32d23588b1fa86aaa46fcf7"
+    },
+    {
+      "path": "detver.h",
+      "sha256": "1324bbf731d202a37d2f9874279e1b5e2e47118c62662c0372208d4a88342549"
+    },
+    {
+      "path": "disasm.cpp",
+      "sha256": "6c44283ac6987d77d92aca93a6a8e9f0dc1f7caf8a2b310e4b374853e9136236"
+    },
+    {
+      "path": "disolarm.cpp",
+      "sha256": "20900e34f4afa968f4182fc9ae2d94d00ad15ddf1a17c53a034b18b38a9a4592"
+    },
+    {
+      "path": "disolarm64.cpp",
+      "sha256": "b93f39ba5691b9ffb98aae45c7fa5f5a6975a8fed001704ec97f7867a59998ce"
+    },
+    {
+      "path": "disolia64.cpp",
+      "sha256": "8ce93f70257c11a7b1015fac5ff801e7b72bbb9621f302a74f9d0bc1db49d334"
+    },
+    {
+      "path": "disolx64.cpp",
+      "sha256": "dcac45e9bf07b916e454e141f850856b76e3e0f7b502bd5dd56e18aa2250e020"
+    },
+    {
+      "path": "disolx86.cpp",
+      "sha256": "045d4b00029e810a9a156c1e17b33c2becdda1cc652a7cadfe61d9d1c66c81b6"
+    },
+    {
+      "path": "image.cpp",
+      "sha256": "8e7c94b335237565f3dce14b6dfd9dd88876cf10fb55b9c910f12ae9c38bd190"
+    },
+    {
+      "path": "modules.cpp",
+      "sha256": "4a3f970eb539a4379996eb17e14bd75902fe4f34d566cfd19682ff19315cbc6f"
+    },
+    {
+      "path": "uimports.cpp",
+      "sha256": "2b2d92df4c5412906d7e6830a7c2836d78e368a6bef509be028566cbd921e83b"
+    },
+    {
+      "path": "LICENSE.md",
+      "sha256": "b301808b732cfaa60df2b4b422d78cd97d2a15058b207e7e33f0535ba5170dd6"
+    }
+  ],
+  "source_byte_basis": "Unmodified upstream git blobs at pinned commit; no checkout line-ending conversion"
+}

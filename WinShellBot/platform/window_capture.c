@@ -123,7 +123,15 @@ static char *capture_request(yyjson_val *args){
     yyjson_mut_obj_add_bool(doc,r,"pixels_captured",c.captured);yyjson_mut_obj_add_bool(doc,r,"cursor_capture_disabled",c.cursor_disabled);yyjson_mut_obj_add_bool(doc,r,"alpha_preserved",false);yyjson_mut_obj_add_bool(doc,r,"all_black",c.all_black);yyjson_mut_obj_add_bool(doc,r,"uniform",c.uniform);yyjson_mut_obj_add_bool(doc,r,"application_paint_verified",false);
     yyjson_mut_obj_add_uint(doc,r,"width",c.width);yyjson_mut_obj_add_uint(doc,r,"height",c.height);yyjson_mut_obj_add_uint(doc,r,"encoded_bytes",c.png_bytes);yyjson_mut_obj_add_bool(doc,r,"physical_mapping_known",c.region_known);
     if(c.region_known)rectangle(doc,r,"physical_region",c.region);else yyjson_mut_obj_add_null(doc,r,"physical_region");
-    if(c.device)yyjson_mut_obj_add_str(doc,r,"render_device",c.device);if(c.frame_time)yyjson_mut_obj_add_sint(doc,r,"frame_system_relative_100ns",c.frame_time);
+    if(c.device)yyjson_mut_obj_add_str(doc,r,"render_device",c.device);if(c.frame_time>0)yyjson_mut_obj_add_sint(doc,r,"frame_system_relative_100ns",c.frame_time);
+    /* 编码成功不代表应用刷新；尤其 PrintWindow 可能返回锁屏前的 GPU 合成面。 */
+    yyjson_mut_val *freshness=yyjson_mut_obj(doc);bool printed=c.backend && !strcmp(c.backend,"printwindow");
+    yyjson_mut_obj_add_str(doc,freshness,"status","unverified");yyjson_mut_obj_add_bool(doc,freshness,"cached_surface_possible",printed);yyjson_mut_obj_add_bool(doc,freshness,"application_update_verified",false);
+    yyjson_mut_obj_add_str(doc,freshness,"reason",printed?"PrintWindow success does not prove a current GPU frame; locked/occluded applications can return a previous surface.":"A compositor frame timestamp is diagnostic; verify application state and changing pixels separately.");
+    LARGE_INTEGER clock={0},frequency={0};bool age_known=c.frame_time>0 && QueryPerformanceCounter(&clock) && QueryPerformanceFrequency(&frequency) && frequency.QuadPart>0;
+    double age=age_known?((double)clock.QuadPart*10000000.0/(double)frequency.QuadPart-(double)c.frame_time)/10000.0:-1;
+    if(age>=0 && age<1.0e12)yyjson_mut_obj_add_real(doc,freshness,"compositor_frame_age_ms",age);else yyjson_mut_obj_add_null(doc,freshness,"compositor_frame_age_ms");
+    yyjson_mut_obj_add_val(doc,r,"frame_freshness",freshness);
     if(png)yyjson_mut_obj_add_strcpy(doc,r,"png_base64",png);else yyjson_mut_obj_add_str(doc,r,"error",c.error?c.error:c.captured?"window_png_encoding_failed":"window_capture_failed");
     char *wire=yyjson_mut_val_write(r,0,NULL);free(png);yyjson_mut_doc_free(doc);return wire;
 }
